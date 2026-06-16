@@ -351,8 +351,6 @@ Resources:
             Action: s3:PutObject
             Resource: !Sub '${ArtifactLogsBucket.Arn}/artifact-logs/*'
             Condition:
-              ArnLike:
-                'aws:SourceArn': !GetAtt ArtifactBucket.Arn
               StringEquals:
                 'aws:SourceAccount': !Ref AWS::AccountId
 
@@ -395,6 +393,75 @@ Resources:
             Condition:
               Bool:
                 'aws:SecureTransport': 'false'
+
+  # =========================================================================
+  # Auto-empty S3 buckets on stack deletion (ephemeral build artifacts only)
+  # =========================================================================
+  BucketCleanupRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EmptyBuckets
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                  - s3:ListBucketVersions
+                  - s3:DeleteObject
+                  - s3:DeleteObjectVersion
+                Resource:
+                  - !GetAtt ArtifactBucket.Arn
+                  - !Sub '${ArtifactBucket.Arn}/*'
+                  - !GetAtt ArtifactLogsBucket.Arn
+                  - !Sub '${ArtifactLogsBucket.Arn}/*'
+
+  BucketCleanupFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt BucketCleanupRole.Arn
+      Timeout: 300
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] == 'Delete':
+                      s3 = boto3.resource('s3')
+                      for bucket_name in event['ResourceProperties']['BucketNames']:
+                          try:
+                              bucket = s3.Bucket(bucket_name)
+                              bucket.object_versions.all().delete()
+                              bucket.objects.all().delete()
+                              print(f"Emptied bucket: {bucket_name}")
+                          except Exception as e:
+                              print(f"Error emptying {bucket_name}: {e}")
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(f"Error: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  BucketCleanup:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: !GetAtt BucketCleanupFunction.Arn
+      BucketNames:
+        - !Ref ArtifactBucket
+        - !Ref ArtifactLogsBucket
 
   # =========================================================================
   # IAM Role for CodeBuild - needs broad permissions for CDK deployment
