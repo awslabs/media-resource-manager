@@ -1,0 +1,41 @@
+# Gitleaks configuration
+title = "Media Resource Manager Gitleaks Config"
+
+[extend]
+# Use default gitleaks rules as base
+useDefault = true
+
+[allowlist]
+description = "Global allowlist"
+paths = [
+    '''node_modules''',
+    '''cdk\.out''',
+    '''\.git''',
+    '''package-lock\.json''',
+    '''frontend/package-lock\.json''',
+    '''frontend/dist''',
+    '''security-reports''',
+    '''pcsr-evidence''',
+    # Untracked local files (gitignored, not in source control)
+    '''certs/''',
+    # Scanner config and historical detect-secrets baseline
+    '''\.secrets\.baseline''',
+]
+
+# Allow example/placeholder values and known false-positive patterns
+regexes = [
+    '''EXAMPLE''',
+    '''example\.com''',
+    '''placeholder''',
+    '''your-.*-here''',
+    # JMESPath/CloudFormation output key queries — the literal string
+    # 'PrivateSubnet1Id' / 'PrivateSubnet2Id' / 'PrivateSubnet1' matches
+    # gitleaks' "generic-api-key" rule. These are not secrets.
+    '''PrivateSubnet\d+(Id)?''',
+    # Publicly documented Microsoft Office 2024 Volume License GVLK
+    # (published by Microsoft for KMS activation, not a secret)
+    '''XJ2XN-FW8RK-P4HMP-DKDBV-GCVGB''',
+]
+
+# Reference the .gitleaksignore file for specific ignores
+# Add commit hashes or file:line patterns to .gitleaksignore

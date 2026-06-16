@@ -1,0 +1,10 @@
+{
+  "name": "Google Chrome",
+  "versionNumber": "Latest",
+  "description": "Fast, secure web browser by Google.",
+  "platform": "Windows",
+  "scriptFile": "chrome-latest-windows-install.ps1",
+  "estimatedInstallTime": "1-2 minutes",
+  "diskSpaceRequired": "500 MB",
+  "gpuRequired": false
+}

@@ -1,0 +1,122 @@
+[
+  {
+    "ParameterKey": "VpcId",
+    "ParameterValue": "",
+    "Description": "Optional: Existing VPC ID. Leave empty to create a new VPC."
+  },
+  {
+    "ParameterKey": "VpcCidr",
+    "ParameterValue": "10.1.0.0/16",
+    "Description": "CIDR block for VPC. Used when creating new VPC. Minimum /24, recommended /22 or larger."
+  },
+  {
+    "ParameterKey": "AvailabilityZones",
+    "ParameterValue": "",
+    "Description": "Optional: Comma-separated list of AZs for subnets (e.g., us-east-1b,us-east-1c,us-east-1d). Choose AZs that support your required instance types (Mac, GPU). Leave empty to auto-select 3 AZs."
+  },
+  {
+    "ParameterKey": "PublicSubnetMask",
+    "ParameterValue": "28",
+    "Description": "Subnet mask for public subnets (e.g., 28 = /28 = 14 usable IPs). Public subnets only need NLB/NAT Gateway IPs."
+  },
+  {
+    "ParameterKey": "PrivateSubnetMask",
+    "ParameterValue": "24",
+    "Description": "Subnet mask for private subnets (e.g., 24 = /24 = 254 usable IPs). Private subnets host workstations."
+  },
+  {
+    "ParameterKey": "HostnamePrefix",
+    "ParameterValue": "vdi-",
+    "Description": "Prefix for workstation hostnames (e.g., 'company-vdi-' results in hostnames like 'company-vdi-0001')."
+  },
+  {
+    "ParameterKey": "HostnameDigits",
+    "ParameterValue": "4",
+    "Description": "Number of digits for hostname suffix (4 = 0001-9999, 3 = 001-999)."
+  },
+  {
+    "ParameterKey": "DomainName",
+    "ParameterValue": "studio.example.internal",
+    "Description": "Active Directory domain name for workstation domain joining."
+  },
+  {
+    "ParameterKey": "DcvCertificateArn",
+    "ParameterValue": "",
+    "Description": "Optional: ARN of ACM certificate for reference only (not used for TLS termination)."
+  },
+  {
+    "ParameterKey": "DcvDomainName",
+    "ParameterValue": "",
+    "Description": "Optional: Custom domain for DCV connections (e.g., dcv.company.com)."
+  },
+  {
+    "ParameterKey": "DcvCertificateFile",
+    "ParameterValue": "",
+    "Description": "Optional: Path to certificate fullchain PEM file for Connection Gateway TLS (e.g., certs/dcv-certificate.pem)."
+  },
+  {
+    "ParameterKey": "DcvPrivateKeyFile",
+    "ParameterValue": "",
+    "Description": "Optional: Path to private key PEM file for Connection Gateway TLS (e.g., certs/dcv-private-key.pem)."
+  },
+  {
+    "ParameterKey": "UseCognitoAuth",
+    "ParameterValue": "true",
+    "Description": "Set to 'true' for Cognito/SAML auth, 'false' for LDAP."
+  },
+  {
+    "ParameterKey": "AdminGroupName",
+    "ParameterValue": "MRM-Admins",
+    "Description": "Group name(s) for admin access. Comma-separated for multiple values."
+  },
+  {
+    "ParameterKey": "IdentityCenterSyncGroups",
+    "ParameterValue": "",
+    "Description": "Identity Center group name(s) or ID(s) to sync users from. Comma-separated for multiple groups. Leave empty to sync all users."
+  },
+  {
+    "ParameterKey": "FrontendUrl",
+    "ParameterValue": "",
+    "Description": "Optional: Custom URL for the web console (e.g., https://vdi.company.com). When set, this updates CORS and Cognito callback URLs. Leave empty to use the auto-generated CloudFront URL."
+  },
+  {
+    "ParameterKey": "AdminEmails",
+    "ParameterValue": "",
+    "Description": "Optional: Comma-separated email addresses to create as Cognito admin users on first deploy. Each user receives a welcome email with temporary password. Only used when UseCognitoAuth is true. Example: admin@company.com,ops@company.com"
+  },
+  {
+    "ParameterKey": "EnableBedrockFeatures",
+    "ParameterValue": "true",
+    "Description": "Set to 'false' to disable AI/Bedrock features (script generation, AgentCore stack, Observability stack). Useful for accounts with SCPs that restrict Bedrock access."
+  },
+  {
+    "ParameterKey": "MacBuildAvailabilityZone",
+    "ParameterValue": "",
+    "Description": "Optional: AZ for macOS Image Builder builds (e.g., us-east-1c). Must match an AZ with mac dedicated hosts allocated. Leave empty to use the first private subnet."
+  },
+  {
+    "ParameterKey": "WafAllowedIps",
+    "ParameterValue": "",
+    "Description": "Optional: Comma-separated CIDR ranges to whitelist for CloudFront access (e.g., '203.0.113.0/24,198.51.100.0/24'). When set, a WAF WebACL is created that blocks all traffic except from these IPs. Leave empty to allow all traffic (no WAF)."
+  },
+  {
+    "ParameterKey": "FrontendCertificateArn",
+    "ParameterValue": "",
+    "Description": "Optional: ARN of an ACM certificate in us-east-1 for the custom frontend domain. Required when FrontendUrl is set to a custom domain. The certificate must cover the domain in FrontendUrl."
+  },
+  {
+    "ParameterKey": "SsoUserPoolArn",
+    "ParameterValue": "",
+    "Description": "Optional: ARN of an external Cognito User Pool (e.g., created by customer's Entra SSO CloudFormation stack). When set, the CDK app imports this pool instead of creating its own. Example: arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_AbCdEfG"
+  },
+  {
+    "ParameterKey": "SsoUserPoolClientId",
+    "ParameterValue": "",
+    "Description": "Optional: Client ID of the external SSO User Pool. Required when SsoUserPoolArn is set."
+  },
+  {
+    "ParameterKey": "SsoUserPoolDomain",
+    "ParameterValue": "",
+    "Description": "Optional: Domain URL of the external SSO User Pool (e.g., https://my-app.auth.us-east-1.amazoncognito.com). Required when SsoUserPoolArn is set."
+  }
+]

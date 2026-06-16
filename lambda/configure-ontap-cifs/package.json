@@ -1,0 +1,9 @@
+{
+  "name": "configure-ontap-cifs",
+  "version": "1.0.0",
+  "description": "Configure CIFS/SMB on FSxN SVM for Windows workstation access",
+  "main": "index.js",
+  "dependencies": {
+    "ssh2": "^1.15.0"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "name": "OBS Studio",
+  "versionNumber": "Latest",
+  "description": "Free and open source software for video recording and live streaming.",
+  "platform": "Windows",
+  "scriptFile": "obs-studio-latest-install.ps1",
+  "estimatedInstallTime": "2-3 minutes",
+  "diskSpaceRequired": "400 MB",
+  "gpuRequired": false
+}

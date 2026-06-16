@@ -1,0 +1,214 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  CodeCommit Access Setup for Media Resource Manager.
+  Creates IAM policies for external developers to push code to CodeCommit.
+  Optionally creates a new repo, or uses an existing one.
+  Deployment teams can run CDK manually or via the CodeBuild pipeline.
+
+Parameters:
+  RepositoryName:
+    Type: String
+    Default: media-resource-manager
+    Description: Name of the CodeCommit repository (new or existing)
+
+  CreateRepository:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Set to 'true' to create a new CodeCommit repository.
+      Set to 'false' if the repository already exists.
+
+  RepositoryDescription:
+    Type: String
+    Default: Media Resource Manager CDK application
+    Description: Description for the CodeCommit repository (only used if creating new)
+
+  AllowReadOnlyAccountAccess:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Grant ReadOnly access to the AWS account (for dev environment)
+
+Conditions:
+  ShouldCreateRepo: !Equals [!Ref CreateRepository, 'true']
+  GrantReadOnly: !Equals [!Ref AllowReadOnlyAccountAccess, 'true']
+
+Resources:
+
+  # =========================================================================
+  # CodeCommit Repository (only created if CreateRepository=true)
+  # =========================================================================
+  CodeCommitRepository:
+    Type: AWS::CodeCommit::Repository
+    Condition: ShouldCreateRepo
+    Properties:
+      RepositoryName: !Ref RepositoryName
+      RepositoryDescription: !Ref RepositoryDescription
+      Tags:
+        - Key: Application
+          Value: MediaResourceManager
+        - Key: ManagedBy
+          Value: CloudFormation
+
+  # =========================================================================
+  # IAM Policy for External Developers (AWS PS)
+  # Grants: CodeCommit push (excluding protected branches like main, deploy/*)
+  # =========================================================================
+  ExternalDeveloperPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${RepositoryName}-external-developer-policy
+      Description: Policy for external developers to push code to CodeCommit. Write access excludes protected branches.
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          # CodeCommit read access
+          - Sid: CodeCommitRead
+            Effect: Allow
+            Action:
+              - codecommit:BatchGet*
+              - codecommit:Get*
+              - codecommit:Describe*
+              - codecommit:List*
+              - codecommit:GitPull
+            Resource: !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}
+
+          # CodeCommit write access (push to non-protected branches)
+          - Sid: CodeCommitWrite
+            Effect: Allow
+            Action:
+              - codecommit:CreateBranch
+              - codecommit:GitPush
+              - codecommit:DeleteBranch
+              - codecommit:PutFile
+              - codecommit:MergeBranchesByFastForward
+              - codecommit:MergeBranchesBySquash
+              - codecommit:MergeBranchesByThreeWay
+              - codecommit:CreatePullRequest
+              - codecommit:UpdatePullRequestDescription
+              - codecommit:UpdatePullRequestTitle
+            Resource: !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}
+
+          # Deny push to protected branches (main, deploy/*)
+          - Sid: DenyProtectedBranchPush
+            Effect: Deny
+            Action:
+              - codecommit:GitPush
+              - codecommit:DeleteBranch
+              - codecommit:PutFile
+              - codecommit:MergeBranchesByFastForward
+              - codecommit:MergeBranchesBySquash
+              - codecommit:MergeBranchesByThreeWay
+            Resource: !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}
+            Condition:
+              StringEqualsIfExists:
+                codecommit:References:
+                  - refs/heads/main
+              StringLikeIfExists:
+                codecommit:References:
+                  - refs/heads/deploy/*
+    Metadata:
+      cdk_nag:
+        rules_to_suppress:
+          - id: AwsSolutions-IAM5
+            reason: 'CodeCommit BatchGet*, Get*, Describe*, List* are standard read-only patterns scoped to a single repository ARN.'
+
+  # Optional: ReadOnly access to the account (for viewing deployed resources)
+  ReadOnlyAccountPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Condition: GrantReadOnly
+    Properties:
+      ManagedPolicyName: !Sub ${RepositoryName}-readonly-account-policy
+      Description: ReadOnly access to view deployed MRM resources
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: ReadOnlyAccess
+            Effect: Allow
+            Action:
+              - ec2:Describe*
+              - cloudformation:Describe*
+              - cloudformation:List*
+              - cloudformation:GetTemplate
+              - dynamodb:Describe*
+              - dynamodb:List*
+              - lambda:List*
+              - lambda:Get*
+              - s3:List*
+              - s3:GetBucket*
+              - logs:Describe*
+              - logs:FilterLogEvents
+              - ssm:GetParameter*
+              - ssm:DescribeParameters
+              - cognito-idp:Describe*
+              - cognito-idp:List*
+              - apigateway:GET
+              - cloudfront:Get*
+              - cloudfront:List*
+            Resource: '*'
+    Metadata:
+      cdk_nag:
+        rules_to_suppress:
+          - id: AwsSolutions-IAM5
+            reason: 'ReadOnly policy uses standard Describe*/List*/Get* patterns across services for viewing deployed resources. Wildcard resource is required for read-only cross-service visibility.'
+
+Outputs:
+  RepositoryArn:
+    Description: ARN of the CodeCommit repository
+    Value: !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}
+
+  RepositoryCloneUrlHttps:
+    Description: HTTPS clone URL for the CodeCommit repository
+    Value: !Sub https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${RepositoryName}
+
+  ExternalDeveloperPolicyArn:
+    Description: >
+      ARN of the managed policy to attach to the external developer role.
+      Attach this policy to the role specified in ExternalPrincipalArn.
+    Value: !Ref ExternalDeveloperPolicy
+
+  ReadOnlyPolicyArn:
+    Condition: GrantReadOnly
+    Description: ARN of the ReadOnly account policy (attach to external role)
+    Value: !Ref ReadOnlyAccountPolicy
+
+  AttachPoliciesCommand:
+    Description: CLI commands to attach policies to the external role
+    Value: !Sub |
+      # Attach CodeCommit access policy:
+      aws iam attach-role-policy \
+        --role-name <ROLE_NAME> \
+        --policy-arn ${ExternalDeveloperPolicy}
+      
+      # Attach ReadOnly policy (if needed):
+      aws iam attach-role-policy \
+        --role-name <ROLE_NAME> \
+        --policy-arn ${ReadOnlyAccountPolicy}
+
+  CodeBuildDeployCommand:
+    Description: Deploy the CodeBuild pipeline pointing to this repo
+    Value: !Sub |
+      aws cloudformation deploy \
+        --template-file deploy-pipeline.yaml \
+        --stack-name mrm-codebuild-pipeline \
+        --capabilities CAPABILITY_NAMED_IAM \
+        --parameter-overrides \
+          RepoUrl=https://git-codecommit.${AWS::Region}.amazonaws.com/v1/repos/${RepositoryName} \
+          RepoType=codecommit \
+          GitBranch=main
+
+  PushInstructions:
+    Description: Instructions for AWS PS to push code
+    Value: !Sub |
+      # Install git-remote-codecommit (recommended for IAM auth):
+      pip install git-remote-codecommit
+      
+      # Clone using GRC protocol:
+      git clone codecommit::${AWS::Region}://${RepositoryName}
+      
+      # Push to a feature branch (not main or deploy/*):
+      git checkout -b feature/my-changes
+      git push origin feature/my-changes
+      
+      # Then notify PlatformInfra to merge and deploy

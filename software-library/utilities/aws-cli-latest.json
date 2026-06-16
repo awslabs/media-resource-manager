@@ -1,0 +1,10 @@
+{
+  "name": "AWS CLI",
+  "versionNumber": "Latest",
+  "description": "Command-line tool to manage AWS services and resources.",
+  "platform": "Windows",
+  "scriptFile": "aws-cli-latest-install.ps1",
+  "estimatedInstallTime": "2-3 minutes",
+  "diskSpaceRequired": "200 MB",
+  "gpuRequired": false
+}

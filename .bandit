@@ -1,0 +1,6 @@
+[bandit]
+# Bandit configuration file
+exclude_dirs = ['__pycache__', '.git', 'node_modules', 'cdk.out', '.venv', 'venv']
+skips = []
+# Set severity level (low, medium, high)
+# Only report issues with severity >= this level

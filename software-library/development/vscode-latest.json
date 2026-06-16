@@ -1,0 +1,10 @@
+{
+  "name": "Visual Studio Code",
+  "versionNumber": "Latest",
+  "description": "Lightweight code editor with debugging, IntelliSense, and Git integration.",
+  "platform": "Windows",
+  "scriptFile": "vscode-latest-install.ps1",
+  "estimatedInstallTime": "2-3 minutes",
+  "diskSpaceRequired": "350 MB",
+  "gpuRequired": false
+}

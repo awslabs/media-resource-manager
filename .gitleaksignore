@@ -1,0 +1,4 @@
+328af5e95ebfc8cca091a80b76d2c2213935da5c:bin/workstation-management.ts:generic-api-key:85
+# Historical: documentation showing PEM header format strings (not a real key).
+# File in current tree has this pattern removed; fingerprint pins the old commit.
+dbef311db90e2eeedf000977addc0b3a76a3cb30:markdown/CUSTOM_DOMAIN_SETUP.md:private-key:291

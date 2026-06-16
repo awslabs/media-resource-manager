@@ -1,0 +1,36 @@
+# Semgrep Configuration for media-resource-manager
+# 
+# This file documents suppressed rules and provides the recommended scan command.
+#
+# =============================================================================
+# RECOMMENDED SCAN COMMAND
+# =============================================================================
+# semgrep scan --config r/all \
+#   --exclude-rule "typescript.react.portability.i18next.jsx-not-internationalized.jsx-not-internationalized" \
+#   --exclude-rule "gitlab.nodejs_scan.javascript-ssrf-rule-node_ssrf" \
+#   --exclude-rule "python.lang.best-practice.sleep.arbitrary-sleep" \
+#   .
+#
+# =============================================================================
+# SUPPRESSED RULES - Documented Justifications
+# =============================================================================
+#
+# 1. jsx-not-internationalized (WARNING - ~200 findings)
+#    Rule: typescript.react.portability.i18next.jsx-not-internationalized
+#    Reason: Internal admin tool - i18n/localization not required
+#    Files: frontend/src/**/*.tsx
+#
+# 2. node_ssrf (ERROR - 3 findings)
+#    Rule: gitlab.nodejs_scan.javascript-ssrf-rule-node_ssrf
+#    Reason: FALSE POSITIVE - URLs are from deployment config, not user input
+#    Files:
+#      - frontend/src/utils/api.ts:12 - API_URL from config
+#      - frontend/src/utils/auth.ts:101 - Cognito hosted UI endpoint
+#      - frontend/src/utils/auth.ts:173 - Cognito token endpoint
+#
+# 3. arbitrary-sleep (ERROR - 2 findings)
+#    Rule: python.lang.best-practice.sleep.arbitrary-sleep
+#    Reason: INTENTIONAL - Required for polling/retry logic
+#    Files:
+#      - lambda/ad-user-manager/index.py:150 - AD replication delay
+#      - lambda/dcv_session_manager.py:303 - DCV session status polling

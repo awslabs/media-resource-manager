@@ -1,0 +1,64 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/awslabs/automated-security-helper/refs/heads/main/automated_security_helper/schemas/AshConfig.json
+project_name: media-resource-manager
+
+global_settings:
+  severity_threshold: MEDIUM
+
+  # Exclude CDK synthesized output directories from scanning.
+  # These contain base64-encoded Lambda code that triggers thousands of false positive
+  # "high entropy string" detections from detect-secrets. CDK-nag runs separately
+  # via `npm run nag` against the synthesized templates.
+  ignore_paths:
+    - path: 'cdk.out'
+      reason: 'CDK synthesized CloudFormation templates — scanned separately via cdk-nag'
+    - path: 'cdk.out.scan'
+      reason: 'CDK synthesized templates (scan copy) — scanned separately via cdk-nag'
+    - path: 'cdk.out.deploy'
+      reason: 'CDK deployment output — not source code'
+    - path: 'cdk.out.list'
+      reason: 'CDK list output — not source code'
+    - path: 'node_modules'
+      reason: 'Third-party dependencies — scanned via grype/npm-audit SCA'
+    - path: 'frontend/node_modules'
+      reason: 'Frontend third-party dependencies'
+    - path: 'frontend/dist'
+      reason: 'Frontend build output — not source code'
+    - path: '.ash'
+      reason: 'ASH scan output directory'
+    - path: '.secrets.baseline'
+      reason: 'detect-secrets baseline file contains hashes of known findings — not secrets'
+    - path: '.gitleaks.toml'
+      reason: 'gitleaks allowlist config — contains regex patterns that intentionally match false-positive strings (e.g. PrivateSubnet1Id JMESPath, Microsoft KMS GVLK). Not actual secrets.'
+
+  # Suppressions for verified false positives from detect-secrets.
+  # These are Secrets Manager ARN references, env var name mappings, and
+  # AWS log group paths — not actual secret values.
+  suppressions:
+    # Secrets Manager ARN reference (not a secret value, just a pointer to where secrets are stored)
+    - rule_id: 'SECRET-SECRET-KEYWORD'
+      path: 'lambda/generate-regional-hub-template/index.js'
+      line_start: 3747
+      line_end: 3747
+      reason: 'SecretArn property with value "none" — CloudFormation response placeholder when no secret exists'
+
+    # Base64 hash used as CDK CustomResource cache key (deterministic, not a secret)
+    - rule_id: 'SECRET-BASE64-HIGH-ENTROPY-STRING'
+      path: 'lib/constructs/agentcore-runtime.ts'
+      reason: 'MD5 hex hash of config inputs used as CDK CustomResource physical ID — deterministic, not a secret'
+
+    # Documentation example showing a file path parameter (not a key value)
+    - rule_id: 'SECRET-SECRET-KEYWORD'
+      path: 'markdown/CUSTOM_DOMAIN_SETUP.md'
+      reason: 'Documentation example showing DcvPrivateKeyFile parameter — value is a file path, not a key'
+
+    # Deploy pipeline env var name mappings (variable names contain "Secret", values are parameter key names)
+    - rule_id: 'SECRET-SECRET-KEYWORD'
+      path: 'scripts/deploy-pipeline.yaml'
+      reason: 'Environment variable and parameter name mappings containing "Secret" in the key name — no actual secret values present'
+
+    # Deploy pipeline DcvPrivateKeyFile path reference
+    - rule_id: 'SECRET-SECRET-KEYWORD'
+      path: 'scripts/deploy-pipeline.yaml'
+      line_start: 639
+      line_end: 639
+      reason: 'File path to DCV private key PEM file — not a key value'

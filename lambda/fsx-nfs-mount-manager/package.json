@@ -1,0 +1,13 @@
+{
+  "name": "nfs-mount-manager",
+  "version": "1.0.0",
+  "description": "NFS Mount Manager for FSx for NetApp ONTAP on Linux and macOS",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/client-ssm": "^3.0.0",
+    "@aws-sdk/client-ec2": "^3.0.0",
+    "@aws-sdk/client-fsx": "^3.0.0"
+  }
+}

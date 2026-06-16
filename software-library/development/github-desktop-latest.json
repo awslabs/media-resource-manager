@@ -1,0 +1,10 @@
+{
+  "name": "GitHub Desktop",
+  "versionNumber": "Latest",
+  "description": "GitHub Desktop simplifies your development workflow with a GUI for Git version control.",
+  "platform": "Windows",
+  "scriptFile": "github-desktop-latest-install.ps1",
+  "estimatedInstallTime": "2-3 minutes",
+  "diskSpaceRequired": "250 MB",
+  "gpuRequired": false
+}

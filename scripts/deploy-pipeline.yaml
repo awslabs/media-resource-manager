@@ -1,0 +1,988 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Deployment Pipeline - CodeBuild project that clones the repo, restores
+  configuration from SSM Parameter Store, and runs deploy.sh.
+  Supports one-click re-deploys. Works with GitHub, CodeCommit, or any Git repository.
+  Resource names are auto-generated from the CloudFormation stack name.
+  SSM parameter paths are derived from ProductName (matching CDK conventions).
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Required: Application Settings"
+        Parameters:
+          - ProductName
+          - AdminEmails
+      - Label:
+          default: "Required: Network"
+        Parameters:
+          - VpcId
+          - VpcCidr
+          - AvailabilityZones
+          - PublicSubnetMask
+          - PrivateSubnetMask
+      - Label:
+          default: "Required: Active Directory"
+        Parameters:
+          - DomainName
+          - AdminGroupName
+      - Label:
+          default: "Authentication"
+        Parameters:
+          - UseCognitoAuth
+          - IdentityCenterSyncGroups
+          - SsoUserPoolArn
+          - SsoUserPoolClientId
+          - SsoUserPoolDomain
+      - Label:
+          default: "Workstation Settings"
+        Parameters:
+          - HostnamePrefix
+          - HostnameDigits
+          - EnableBedrockFeatures
+      - Label:
+          default: "DCV / Custom Domain (Optional)"
+        Parameters:
+          - DcvCertificateArn
+          - DcvDomainName
+          - FrontendUrl
+          - FrontendCertificateArn
+          - WafAllowedIps
+          - MacBuildAvailabilityZone
+      - Label:
+          default: "Deployment Source"
+        Parameters:
+          - RepoUrl
+          - GitBranch
+          - RepoType
+          - GitHubTokenSecretName
+    ParameterLabels:
+      ProductName:
+        default: "Product Name"
+      AdminEmails:
+        default: "Admin Email Addresses"
+      VpcId:
+        default: "Existing VPC ID (leave blank to create new)"
+      VpcCidr:
+        default: "VPC CIDR Block"
+      AvailabilityZones:
+        default: "Availability Zones (leave blank to auto-select)"
+      PublicSubnetMask:
+        default: "Public Subnet Mask"
+      PrivateSubnetMask:
+        default: "Private Subnet Mask"
+      DomainName:
+        default: "Active Directory Domain Name"
+      AdminGroupName:
+        default: "Admin Group Name"
+      UseCognitoAuth:
+        default: "Use Cognito / SAML Authentication"
+      IdentityCenterSyncGroups:
+        default: "IAM Identity Center Sync Groups"
+      SsoUserPoolArn:
+        default: "External SSO User Pool ARN"
+      SsoUserPoolClientId:
+        default: "External SSO User Pool Client ID"
+      SsoUserPoolDomain:
+        default: "External SSO User Pool Domain"
+      HostnamePrefix:
+        default: "Workstation Hostname Prefix"
+      HostnameDigits:
+        default: "Hostname Suffix Digits"
+      EnableBedrockFeatures:
+        default: "Enable AI / Bedrock Features"
+      DcvCertificateArn:
+        default: "DCV TLS Certificate ARN"
+      DcvDomainName:
+        default: "DCV Custom Domain"
+      FrontendUrl:
+        default: "Custom Frontend URL"
+      FrontendCertificateArn:
+        default: "Frontend TLS Certificate ARN (us-east-1)"
+      WafAllowedIps:
+        default: "WAF Allowed IP Ranges"
+      MacBuildAvailabilityZone:
+        default: "macOS Build Availability Zone"
+      RepoUrl:
+        default: "Git Repository URL"
+      GitBranch:
+        default: "Git Branch"
+      RepoType:
+        default: "Repository Type"
+      GitHubTokenSecretName:
+        default: "GitHub Token Secret Name (private repos only)"
+
+Parameters:
+  RepoUrl:
+    Type: String
+    Default: https://github.com/awslabs/media-resource-manager.git
+    Description: >
+      HTTPS URL of the Git repository. Supports GitHub, CodeCommit, or other Git hosts.
+      For CodeCommit: https://git-codecommit.{region}.amazonaws.com/v1/repos/{repo-name}
+
+  GitBranch:
+    Type: String
+    Default: main
+    Description: Git branch to deploy
+
+  RepoType:
+    Type: String
+    Default: github
+    AllowedValues:
+      - github
+      - codecommit
+    Description: >
+      Repository type. Use 'codecommit' for AWS CodeCommit repos (uses IAM auth).
+      Use 'github' for GitHub repos (optionally uses token for private repos).
+
+  GitHubTokenSecretName:
+    Type: String
+    Default: ''
+    Description: >
+      (Optional) Secrets Manager secret name containing a GitHub personal access
+      token. Required only for private GitHub repositories. Ignored for CodeCommit.
+
+  VpcId:
+    Type: String
+    Default: ''
+    Description: >
+      (Optional) Existing VPC ID for deployment. Leave empty to create a
+      new VPC. This value is written into parameters.json.
+
+  VpcCidr:
+    Type: String
+    Default: 10.1.0.0/16
+    Description: VPC CIDR block (used when creating a new VPC)
+
+  DomainName:
+    Type: String
+    Default: studio.mrm.internal
+    Description: Active Directory domain name for workstation domain joining
+
+  UseCognitoAuth:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: Use Cognito/SAML authentication (true) or LDAP (false)
+
+  AdminGroupName:
+    Type: String
+    Default: MRM-Admins
+    Description: Group name for admin access
+
+  HostnamePrefix:
+    Type: String
+    Default: vdi-
+    Description: Prefix for workstation hostnames
+
+  ProductName:
+    Type: String
+    Default: Media Resource Manager
+    Description: >
+      Product name used for stack naming, UI branding, and SSM parameter paths.
+      The buildspec derives PascalCase (e.g., "MediaResourceManager") and acronym
+      (e.g., "MRM") from this value, matching the CDK naming conventions.
+      Examples: "Media Resource Manager", "CloudEdit", "Studio Workstations"
+
+  EnableBedrockFeatures:
+    Type: String
+    Default: 'true'
+    AllowedValues: ['true', 'false']
+    Description: >
+      Set to 'false' to skip deploying AI/Bedrock stacks (AgentCore, Observability)
+      and hide AI script generation in the frontend. Useful for accounts with SCPs
+      that restrict Bedrock access.
+
+  HostnameDigits:
+    Type: String
+    Default: '4'
+    Description: Number of digits for hostname suffix (4 = 0001-9999, 3 = 001-999)
+
+  AvailabilityZones:
+    Type: String
+    Default: ''
+    Description: >
+      Optional: Comma-separated list of AZs for subnets (e.g., us-east-1b,us-east-1c).
+      Leave empty to auto-select.
+
+  PublicSubnetMask:
+    Type: String
+    Default: '28'
+    Description: Subnet mask for public subnets (e.g., 28 = /28 = 14 usable IPs)
+
+  PrivateSubnetMask:
+    Type: String
+    Default: '24'
+    Description: Subnet mask for private subnets (e.g., 24 = /24 = 254 usable IPs)
+
+  DcvCertificateArn:
+    Type: String
+    Default: ''
+    Description: Optional ARN of ACM certificate for DCV
+
+  DcvDomainName:
+    Type: String
+    Default: ''
+    Description: Optional custom domain for DCV connections (e.g., dcv.company.com)
+
+  FrontendUrl:
+    Type: String
+    Default: ''
+    Description: >
+      Optional: Custom URL for the web console (e.g., https://vdi.company.com).
+      Updates CORS and Cognito callback URLs. Leave empty for auto-generated CloudFront URL.
+
+  AdminEmails:
+    Type: String
+    Default: ''
+    Description: >
+      Optional: Comma-separated email addresses to create as Cognito admin users
+      on first deploy. Users receive a welcome email with temporary password.
+      Only used when UseCognitoAuth is true.
+
+  IdentityCenterSyncGroups:
+    Type: String
+    Default: ''
+    Description: >
+      Optional: Identity Center group name(s) or ID(s) to sync users from.
+      Comma-separated for multiple groups. Leave empty to sync all users.
+
+  MacBuildAvailabilityZone:
+    Type: String
+    Default: ''
+    Description: >
+      Optional: AZ for macOS Image Builder builds (e.g., us-east-1c). Must match
+      an AZ with mac dedicated hosts allocated. Leave empty to use the first
+      private subnet.
+
+  WafAllowedIps:
+    Type: String
+    Default: ''
+    Description: >
+      Optional: Comma-separated CIDR ranges to whitelist for CloudFront access
+      (e.g., 203.0.113.0/24,198.51.100.0/24). When set, a WAF WebACL blocks
+      all traffic except from these IPs. Leave empty to allow all traffic.
+
+  FrontendCertificateArn:
+    Type: String
+    Default: ''
+    Description: >
+      Optional: ARN of an ACM certificate in us-east-1 for the custom frontend
+      domain. Required when FrontendUrl is set to a custom domain. The certificate
+      must cover the domain specified in FrontendUrl.
+
+  SsoUserPoolArn:
+    Type: String
+    Default: ''
+    Description: >
+      Optional: ARN of an external Cognito User Pool with pre-configured SSO/SAML
+      (e.g., Entra ID). When set, the CDK app imports this pool instead of creating
+      its own. Example: arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_AbCdEfG
+
+  SsoUserPoolClientId:
+    Type: String
+    Default: ''
+    Description: >
+      Optional: Client ID of the external SSO User Pool. Required when
+      SsoUserPoolArn is set.
+
+  SsoUserPoolDomain:
+    Type: String
+    Default: ''
+    Description: >
+      Optional: Domain URL of the external SSO User Pool (e.g.,
+      https://my-app.auth.us-east-1.amazoncognito.com). Required when
+      SsoUserPoolArn is set.
+
+Conditions:
+  HasGitHubToken: !Not [!Equals [!Ref GitHubTokenSecretName, '']]
+  IsCodeCommit: !Equals [!Ref RepoType, 'codecommit']
+
+Resources:
+
+  # =========================================================================
+  # S3 Bucket for CodeBuild artifacts and logs
+  # Name is auto-generated by CloudFormation from the stack name.
+  # =========================================================================
+
+  # Logging bucket for ArtifactBucket access logs
+  ArtifactLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        LogFilePrefix: self-logs/
+      LifecycleConfiguration:
+        Rules:
+          - Id: CleanupOldLogs
+            Status: Enabled
+            ExpirationInDays: 90
+
+  ArtifactLogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactLogsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ArtifactLogsBucket.Arn
+              - !Sub '${ArtifactLogsBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+          - Sid: AllowS3LogDelivery
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${ArtifactLogsBucket.Arn}/artifact-logs/*'
+            Condition:
+              ArnLike:
+                'aws:SourceArn': !GetAtt ArtifactBucket.Arn
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      LoggingConfiguration:
+        DestinationBucketName: !Ref ArtifactLogsBucket
+        LogFilePrefix: artifact-logs/
+      LifecycleConfiguration:
+        Rules:
+          - Id: CleanupOldArtifacts
+            Status: Enabled
+            ExpirationInDays: 30
+
+  # S3 bucket policy to enforce SSL-only access (AwsSolutions-S10)
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource:
+              - !GetAtt ArtifactBucket.Arn
+              - !Sub '${ArtifactBucket.Arn}/*'
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  # =========================================================================
+  # IAM Role for CodeBuild - needs broad permissions for CDK deployment
+  # =========================================================================
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-codebuild-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AdministratorAccess
+        # NOTE: AdministratorAccess is used because CDK deployment creates
+        # resources across many services (EC2, DynamoDB, Lambda, Cognito,
+        # CloudFront, Step Functions, etc.). For production, scope this down
+        # to the specific services used.
+      Policies:
+        - PolicyName: CodeCommitAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codecommit:GitPull
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetRepository
+                Resource: '*'
+    Metadata:
+      cdk_nag:
+        rules_to_suppress:
+          - id: AwsSolutions-IAM4
+            reason: 'CDK deployment requires broad permissions across EC2, DynamoDB, Lambda, Cognito, CloudFront, Step Functions, IAM, and more. AdministratorAccess is intentional for the deployment role.'
+          - id: AwsSolutions-IAM5
+            reason: 'CodeCommit GitPull requires wildcard resource. CDK deployment role needs broad permissions by design.'
+
+  # =========================================================================
+  # CodeBuild Project
+  # =========================================================================
+  DeployProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-build
+      Description: !Sub Deploys ${ProductName} CDK stacks
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      TimeoutInMinutes: 120
+      EncryptionKey: !Sub 'arn:aws:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/s3'
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_MEDIUM
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:5.0
+        EnvironmentVariables:
+          - Name: REPO_URL
+            Value: !Ref RepoUrl
+          - Name: GIT_BRANCH
+            Value: !Ref GitBranch
+          - Name: REPO_TYPE
+            Value: !Ref RepoType
+          - Name: GITHUB_TOKEN_SECRET
+            Value: !If
+              - HasGitHubToken
+              - !Ref GitHubTokenSecretName
+              - ''
+          - Name: MRM_VPC_ID
+            Value: !Ref VpcId
+          - Name: MRM_VPC_CIDR
+            Value: !Ref VpcCidr
+          - Name: MRM_DOMAIN_NAME
+            Value: !Ref DomainName
+          - Name: MRM_USE_COGNITO
+            Value: !Ref UseCognitoAuth
+          - Name: MRM_ADMIN_GROUP
+            Value: !Ref AdminGroupName
+          - Name: MRM_HOSTNAME_PREFIX
+            Value: !Ref HostnamePrefix
+          - Name: MRM_HOSTNAME_DIGITS
+            Value: !Ref HostnameDigits
+          - Name: MRM_AVAILABILITY_ZONES
+            Value: !Ref AvailabilityZones
+          - Name: MRM_PUBLIC_SUBNET_MASK
+            Value: !Ref PublicSubnetMask
+          - Name: MRM_PRIVATE_SUBNET_MASK
+            Value: !Ref PrivateSubnetMask
+          - Name: MRM_DCV_CERTIFICATE_ARN
+            Value: !Ref DcvCertificateArn
+          - Name: MRM_DCV_DOMAIN_NAME
+            Value: !Ref DcvDomainName
+          - Name: MRM_FRONTEND_URL
+            Value: !Ref FrontendUrl
+          - Name: MRM_ADMIN_EMAILS
+            Value: !Ref AdminEmails
+          - Name: MRM_IDENTITY_CENTER_SYNC_GROUPS
+            Value: !Ref IdentityCenterSyncGroups
+          - Name: MRM_PRODUCT_NAME
+            Value: !Ref ProductName
+          - Name: MRM_ENABLE_BEDROCK
+            Value: !Ref EnableBedrockFeatures
+          - Name: MRM_MAC_BUILD_AZ
+            Value: !Ref MacBuildAvailabilityZone
+          - Name: MRM_WAF_ALLOWED_IPS
+            Value: !Ref WafAllowedIps
+          - Name: MRM_FRONTEND_CERTIFICATE_ARN
+            Value: !Ref FrontendCertificateArn
+          - Name: MRM_SSO_USER_POOL_ARN
+            Value: !Ref SsoUserPoolArn
+          - Name: MRM_SSO_USER_POOL_CLIENT_ID
+            Value: !Ref SsoUserPoolClientId
+          - Name: MRM_SSO_USER_POOL_DOMAIN
+            Value: !Ref SsoUserPoolDomain
+          - Name: MRM_PARAM_OVERRIDES
+            Value: '{}'
+      Source:
+        Type: NO_SOURCE
+        BuildSpec: |
+          version: 0.2
+
+          env:
+            variables:
+              PROJECT_DIR: /codebuild/output/src/media-resource-manager
+
+          phases:
+            install:
+              runtime-versions:
+                nodejs: 20
+              commands:
+                - echo "=== Deployment Started ==="
+                - npm install -g aws-cdk
+                - node --version && npm --version && cdk --version && aws --version
+                # Install git-remote-codecommit for CodeCommit HTTPS (GRC) auth
+                - pip3 install git-remote-codecommit
+
+                # Derive naming conventions from ProductName (matches CDK's createNamingConventions)
+                - |
+                  CLEANED=$(echo "$MRM_PRODUCT_NAME" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/[[:space:]]\+/ /g')
+                  export PASCAL_CASE=$(echo "$CLEANED" | sed 's/ //g; s/[^a-zA-Z0-9]//g')
+                  export ACRONYM=$(echo "$CLEANED" | awk '{for(i=1;i<=NF;i++) printf toupper(substr($i,1,1))}')
+                  export SSM_CONFIG_PARAM="/${PASCAL_CASE}/DeploymentConfig/parameters"
+                  export SSM_CDK_PARAM="/${PASCAL_CASE}/DeploymentConfig/cdk-json"
+                  echo "ProductName:    $MRM_PRODUCT_NAME"
+                  echo "PascalCase:     $PASCAL_CASE"
+                  echo "Acronym:        $ACRONYM"
+                  echo "SSM config:     $SSM_CONFIG_PARAM"
+                  echo "SSM cdk.json:   $SSM_CDK_PARAM"
+
+            pre_build:
+              commands:
+                # Clone repository based on repo type
+                - |
+                  echo "Cloning from $REPO_TYPE repository..."
+                  if [ "$REPO_TYPE" = "codecommit" ]; then
+                    # CodeCommit uses IAM credentials via git-remote-codecommit
+                    # Convert HTTPS URL to GRC URL format
+                    # From: https://git-codecommit.us-east-1.amazonaws.com/v1/repos/my-repo
+                    # To:   codecommit::us-east-1://my-repo
+                    REGION=$(echo "$REPO_URL" | sed -n 's|.*git-codecommit\.\([^.]*\)\.amazonaws\.com.*|\1|p')
+                    REPO_NAME=$(echo "$REPO_URL" | sed -n 's|.*/repos/\([^/]*\).*|\1|p')
+                    if [ -z "$REGION" ] || [ -z "$REPO_NAME" ]; then
+                      echo "ERROR: Could not parse CodeCommit URL. Expected format:"
+                      echo "  https://git-codecommit.{region}.amazonaws.com/v1/repos/{repo-name}"
+                      exit 1
+                    fi
+                    GRC_URL="codecommit::${REGION}://${REPO_NAME}"
+                    echo "Using GRC URL: $GRC_URL"
+                    git clone --depth 1 --branch "$GIT_BRANCH" "$GRC_URL" "$PROJECT_DIR"
+                  elif [ -n "$GITHUB_TOKEN_SECRET" ] && [ "$GITHUB_TOKEN_SECRET" != "" ]; then
+                    # GitHub with token (private repo)
+                    GITHUB_TOKEN=$(aws secretsmanager get-secret-value --secret-id "$GITHUB_TOKEN_SECRET" --query SecretString --output text)
+                    CLONE_URL=$(echo "$REPO_URL" | sed "s|https://|https://${GITHUB_TOKEN}@|")
+                    git clone --depth 1 --branch "$GIT_BRANCH" "$CLONE_URL" "$PROJECT_DIR"
+                  else
+                    # Public GitHub repo
+                    git clone --depth 1 --branch "$GIT_BRANCH" "$REPO_URL" "$PROJECT_DIR"
+                  fi
+
+                # Restore cdk.json (gitignored) or create from template with product name
+                - |
+                  cd "$PROJECT_DIR"
+                  SAVED_CDK=$(aws ssm get-parameter --name "$SSM_CDK_PARAM" --query "Parameter.Value" --output text 2>/dev/null || echo "")
+                  # Fallback: check legacy path /{ACRONYM}/DeploymentConfig/cdk-json
+                  if ([ -z "$SAVED_CDK" ] || [ "$SAVED_CDK" = "None" ]) && [ "$ACRONYM" != "$PASCAL_CASE" ]; then
+                    LEGACY_CDK_PARAM="/${ACRONYM}/DeploymentConfig/cdk-json"
+                    SAVED_CDK=$(aws ssm get-parameter --name "$LEGACY_CDK_PARAM" --query "Parameter.Value" --output text 2>/dev/null || echo "")
+                    if [ -n "$SAVED_CDK" ] && [ "$SAVED_CDK" != "None" ]; then
+                      echo "Migrating cdk.json from legacy path $LEGACY_CDK_PARAM -> $SSM_CDK_PARAM"
+                      aws ssm put-parameter --name "$SSM_CDK_PARAM" --type String \
+                        --value "$SAVED_CDK" --overwrite --description "cdk.json - migrated from $LEGACY_CDK_PARAM"
+                    fi
+                  fi
+                  if [ -n "$SAVED_CDK" ] && [ "$SAVED_CDK" != "None" ]; then
+                    echo "$SAVED_CDK" > cdk.json
+                    echo "Restored cdk.json from SSM"
+                  elif [ -f cdk.example.json ]; then
+                    cp cdk.example.json cdk.json
+                    echo "Created cdk.json from template"
+                  fi
+                  # Set product name from CloudFormation parameter
+                  if [ -n "$MRM_PRODUCT_NAME" ] && [ -f cdk.json ]; then
+                    node -e "
+                      const fs = require('fs');
+                      const cdk = JSON.parse(fs.readFileSync('cdk.json'));
+                      cdk.context = cdk.context || {};
+                      cdk.context.productName = process.env.MRM_PRODUCT_NAME;
+                      fs.writeFileSync('cdk.json', JSON.stringify(cdk, null, 2));
+                    "
+                    echo "Set productName to: $MRM_PRODUCT_NAME"
+                    # Save updated cdk.json to SSM
+                    aws ssm put-parameter --name "$SSM_CDK_PARAM" --type String \
+                      --value "$(cat cdk.json)" --overwrite \
+                      --description "cdk.json - product name: $MRM_PRODUCT_NAME"
+                  fi
+
+                # Restore parameters.json from SSM, or seed from CFN parameters
+                - |
+                  cd "$PROJECT_DIR"
+                  SAVED_PARAMS=$(aws ssm get-parameter --name "$SSM_CONFIG_PARAM" --query "Parameter.Value" --output text 2>/dev/null || echo "")
+                  # Fallback: check legacy path /{ACRONYM}/DeploymentConfig/parameters
+                  if ([ -z "$SAVED_PARAMS" ] || [ "$SAVED_PARAMS" = "None" ]) && [ "$ACRONYM" != "$PASCAL_CASE" ]; then
+                    LEGACY_CONFIG_PARAM="/${ACRONYM}/DeploymentConfig/parameters"
+                    SAVED_PARAMS=$(aws ssm get-parameter --name "$LEGACY_CONFIG_PARAM" --query "Parameter.Value" --output text 2>/dev/null || echo "")
+                    if [ -n "$SAVED_PARAMS" ] && [ "$SAVED_PARAMS" != "None" ]; then
+                      echo "Migrating parameters from legacy path $LEGACY_CONFIG_PARAM -> $SSM_CONFIG_PARAM"
+                      aws ssm put-parameter --name "$SSM_CONFIG_PARAM" --type String \
+                        --value "$SAVED_PARAMS" --overwrite --tier Advanced --description "Deployment parameters - migrated from $LEGACY_CONFIG_PARAM"
+                    fi
+                  fi
+                  if [ -n "$SAVED_PARAMS" ] && [ "$SAVED_PARAMS" != "None" ]; then
+                    echo "$SAVED_PARAMS" > parameters.json
+                    echo "Restored parameters.json from SSM"
+                  else
+                    echo "No SSM config found, seeding from CloudFormation parameters"
+                    cp parameters.example.json parameters.json
+                    node -e "
+                      const fs = require('fs');
+                      const params = JSON.parse(fs.readFileSync('parameters.json'));
+                      const env = {
+                        VpcId: process.env.MRM_VPC_ID || '',
+                        VpcCidr: process.env.MRM_VPC_CIDR || '10.1.0.0/16',
+                        AvailabilityZones: process.env.MRM_AVAILABILITY_ZONES || '',
+                        PublicSubnetMask: process.env.MRM_PUBLIC_SUBNET_MASK || '28',
+                        PrivateSubnetMask: process.env.MRM_PRIVATE_SUBNET_MASK || '24',
+                        DomainName: process.env.MRM_DOMAIN_NAME || 'studio.mrm.internal',
+                        DcvCertificateArn: process.env.MRM_DCV_CERTIFICATE_ARN || '',
+                        DcvDomainName: process.env.MRM_DCV_DOMAIN_NAME || '',
+                        UseCognitoAuth: process.env.MRM_USE_COGNITO || 'true',
+                        AdminGroupName: process.env.MRM_ADMIN_GROUP || 'MRM-Admins',
+                        HostnamePrefix: process.env.MRM_HOSTNAME_PREFIX || 'vdi-',
+                        HostnameDigits: process.env.MRM_HOSTNAME_DIGITS || '4',
+                        IdentityCenterSyncGroups: process.env.MRM_IDENTITY_CENTER_SYNC_GROUPS || '',
+                        FrontendUrl: process.env.MRM_FRONTEND_URL || '',
+                        AdminEmails: process.env.MRM_ADMIN_EMAILS || '',
+                        EnableBedrockFeatures: process.env.MRM_ENABLE_BEDROCK || 'true',
+                        MacBuildAvailabilityZone: process.env.MRM_MAC_BUILD_AZ || '',
+                        WafAllowedIps: process.env.MRM_WAF_ALLOWED_IPS || '',
+                        FrontendCertificateArn: process.env.MRM_FRONTEND_CERTIFICATE_ARN || '',
+                        SsoUserPoolArn: process.env.MRM_SSO_USER_POOL_ARN || '',
+                        SsoUserPoolClientId: process.env.MRM_SSO_USER_POOL_CLIENT_ID || '',
+                        SsoUserPoolDomain: process.env.MRM_SSO_USER_POOL_DOMAIN || ''
+                      };
+                      for (const [key, value] of Object.entries(env)) {
+                        const p = params.find(p => p.ParameterKey === key);
+                        if (p) p.ParameterValue = value;
+                      }
+                      fs.writeFileSync('parameters.json', JSON.stringify(params, null, 2));
+                    "
+                    aws ssm put-parameter --name "$SSM_CONFIG_PARAM" --type String \
+                      --value "$(cat parameters.json)" --overwrite --tier Advanced \
+                      --description "Deployment parameters - seeded by CodeBuild first run"
+                    echo "Configuration seeded to SSM"
+                  fi
+
+                # Apply runtime parameter overrides
+                # Customers can override any parameter at build time in two ways:
+                #
+                # 1. JSON overrides via MRM_PARAM_OVERRIDES (recommended for ad-hoc changes):
+                #    aws codebuild start-build --project-name <name> \
+                #      --environment-variables-override \
+                #        name=MRM_PARAM_OVERRIDES,value='{"FrontendUrl":"https://new-url.com"}',type=PLAINTEXT
+                #
+                # 2. Update pipeline stack parameters (for persistent changes via console):
+                #    CloudFormation → Update stack → set FrontendUrl, AdminGroupName, etc.
+                #    Then start a new build. The env vars are compared against SSM config
+                #    and any differences are applied.
+                #
+                # Overrides are saved to SSM in post_build, so they persist across builds.
+                - |
+                  cd "$PROJECT_DIR"
+                  if [ -f parameters.json ]; then
+                    node -e "
+                      const fs = require('fs');
+                      const params = JSON.parse(fs.readFileSync('parameters.json'));
+                      let changed = false;
+
+                      // Method 1: JSON overrides via MRM_PARAM_OVERRIDES
+                      const jsonOverrides = process.env.MRM_PARAM_OVERRIDES || '{}';
+                      if (jsonOverrides !== '{}') {
+                        const overrides = JSON.parse(jsonOverrides);
+                        for (const [paramKey, val] of Object.entries(overrides)) {
+                          const p = params.find(p => p.ParameterKey === paramKey);
+                          if (p) {
+                            if (p.ParameterValue !== val) {
+                              console.log('Override (JSON): ' + paramKey + ' = ' + (paramKey.includes('Secret') ? '***' : val));
+                              p.ParameterValue = val;
+                              changed = true;
+                            }
+                          } else {
+                            // Key doesn't exist in saved config — add it
+                            console.log('Adding new parameter (JSON): ' + paramKey + ' = ' + (paramKey.includes('Secret') ? '***' : val));
+                            params.push({ ParameterKey: paramKey, ParameterValue: val });
+                            changed = true;
+                          }
+                        }
+                      }
+
+                      // Method 2: Individual env vars from pipeline stack parameters
+                      // Only apply if the env var has a non-empty value that differs from SSM config.
+                      // Empty env vars are ignored (they represent CloudFormation defaults, not intentional overrides).
+                      const envMap = {
+                        MRM_VPC_ID: 'VpcId',
+                        MRM_VPC_CIDR: 'VpcCidr',
+                        MRM_AVAILABILITY_ZONES: 'AvailabilityZones',
+                        MRM_PUBLIC_SUBNET_MASK: 'PublicSubnetMask',
+                        MRM_PRIVATE_SUBNET_MASK: 'PrivateSubnetMask',
+                        MRM_DOMAIN_NAME: 'DomainName',
+                        MRM_DCV_CERTIFICATE_ARN: 'DcvCertificateArn',
+                        MRM_DCV_DOMAIN_NAME: 'DcvDomainName',
+                        MRM_USE_COGNITO: 'UseCognitoAuth',
+                        MRM_ADMIN_GROUP: 'AdminGroupName',
+                        MRM_HOSTNAME_PREFIX: 'HostnamePrefix',
+                        MRM_HOSTNAME_DIGITS: 'HostnameDigits',
+                        MRM_IDENTITY_CENTER_SYNC_GROUPS: 'IdentityCenterSyncGroups',
+                        MRM_FRONTEND_URL: 'FrontendUrl',
+                        MRM_ADMIN_EMAILS: 'AdminEmails',
+                        MRM_ENABLE_BEDROCK: 'EnableBedrockFeatures',
+                        MRM_MAC_BUILD_AZ: 'MacBuildAvailabilityZone',
+                        MRM_WAF_ALLOWED_IPS: 'WafAllowedIps',
+                        MRM_FRONTEND_CERTIFICATE_ARN: 'FrontendCertificateArn',
+                        MRM_SSO_USER_POOL_ARN: 'SsoUserPoolArn',
+                        MRM_SSO_USER_POOL_CLIENT_ID: 'SsoUserPoolClientId',
+                        MRM_SSO_USER_POOL_DOMAIN: 'SsoUserPoolDomain',
+                      };
+                      for (const [envVar, paramKey] of Object.entries(envMap)) {
+                        const val = process.env[envVar];
+                        if (!val) continue; // empty or unset = use SSM value
+                        const p = params.find(p => p.ParameterKey === paramKey);
+                        if (p) {
+                          if (p.ParameterValue !== val) {
+                            console.log('Override (env): ' + paramKey + ' = ' + (paramKey.includes('Secret') ? '***' : val));
+                            p.ParameterValue = val;
+                            changed = true;
+                          }
+                        } else {
+                          // Key doesn't exist in saved config — add it (new parameter)
+                          console.log('Adding new parameter (env): ' + paramKey + ' = ' + (paramKey.includes('Secret') ? '***' : val));
+                          params.push({ ParameterKey: paramKey, ParameterValue: val });
+                          changed = true;
+                        }
+                      }
+
+                      if (changed) {
+                        fs.writeFileSync('parameters.json', JSON.stringify(params, null, 2));
+                        console.log('parameters.json updated with overrides');
+                      } else {
+                        console.log('No overrides to apply');
+                      }
+                    "
+                  fi
+
+                # Restore DCV TLS certificate files from Secrets Manager (if configured)
+                # Store your cert with: aws secretsmanager create-secret \
+                #   --name /{PascalCase}/DCV/CertificateFiles \
+                #   --secret-string '{"certificate":"...","privateKey":"..."}'
+                - |
+                  cd "$PROJECT_DIR"
+                  CERT_SECRET_NAME="/${PASCAL_CASE}/DCV/CertificateFiles"
+                  CERT_JSON=$(aws secretsmanager get-secret-value --secret-id "$CERT_SECRET_NAME" --query 'SecretString' --output text 2>/dev/null || echo "")
+                  if [ -n "$CERT_JSON" ] && [ "$CERT_JSON" != "" ]; then
+                    mkdir -p certs
+                    echo "$CERT_JSON" | node -e "
+                      const fs = require('fs');
+                      let data = '';
+                      process.stdin.on('data', chunk => data += chunk);
+                      process.stdin.on('end', () => {
+                        const cert = JSON.parse(data);
+                        if (cert.certificate) fs.writeFileSync('certs/fullchain.pem', cert.certificate);
+                        if (cert.privateKey) fs.writeFileSync('certs/private_key_decrypted.pem', cert.privateKey);
+                        console.log('Restored DCV certificate files from Secrets Manager');
+                      });
+                    "
+                    # Ensure parameters.json points to the restored cert files
+                    node -e "
+                      const fs = require('fs');
+                      const params = JSON.parse(fs.readFileSync('parameters.json'));
+                      const updates = {
+                        DcvCertificateFile: 'certs/fullchain.pem',
+                        DcvPrivateKeyFile: 'certs/private_key_decrypted.pem' // pragma: allowlist secret
+                      };
+                      let changed = false;
+                      for (const [key, val] of Object.entries(updates)) {
+                        const p = params.find(p => p.ParameterKey === key);
+                        if (p && p.ParameterValue !== val) {
+                          p.ParameterValue = val;
+                          changed = true;
+                        }
+                      }
+                      if (changed) {
+                        fs.writeFileSync('parameters.json', JSON.stringify(params, null, 2));
+                        console.log('Updated DcvCertificateFile/DcvPrivateKeyFile paths in parameters.json');
+                      }
+                    "
+                  else
+                    echo "No DCV certificate secret found at $CERT_SECRET_NAME (skipping)"
+                  fi
+
+                # Auto-detect VPC CIDR when importing an existing VPC
+                # Prevents misconfigured security group rules from wrong CIDR
+                - |
+                  cd "$PROJECT_DIR"
+                  if [ -f parameters.json ]; then
+                    VPC_ID=$(node -p "JSON.parse(require('fs').readFileSync('parameters.json')).find(p=>p.ParameterKey==='VpcId')?.ParameterValue||''" 2>/dev/null)
+                    if [ -n "$VPC_ID" ]; then
+                      ACTUAL_CIDR=$(aws ec2 describe-vpcs --vpc-ids "$VPC_ID" --query "Vpcs[0].CidrBlock" --output text 2>/dev/null || echo "")
+                      if [ -n "$ACTUAL_CIDR" ] && [ "$ACTUAL_CIDR" != "None" ]; then
+                        node -e "
+                          const fs = require('fs');
+                          const params = JSON.parse(fs.readFileSync('parameters.json'));
+                          const p = params.find(p => p.ParameterKey === 'VpcCidr');
+                          const actual = process.env.ACTUAL_CIDR;
+                          if (p && p.ParameterValue !== actual) {
+                            console.log('Auto-correcting VpcCidr: ' + p.ParameterValue + ' -> ' + actual + ' (from VPC ' + process.env.VPC_ID + ')');
+                            p.ParameterValue = actual;
+                            fs.writeFileSync('parameters.json', JSON.stringify(params, null, 2));
+                          }
+                        "
+                      fi
+                    fi
+                  fi
+
+            build:
+              commands:
+                # One-time migration (v0.1.1): move macOS Image Builder subnet from
+                # cross-stack CloudFormation export to SSM parameter lookup.
+                # Seed the SSM param so Image-MacOS can deploy if it doesn't exist yet.
+                # CDK now owns this parameter via the Infrastructure stack.
+                - |
+                  cd "$PROJECT_DIR"
+                  INFRA_STACK="${ACRONYM}-Infrastructure"
+                  MACOS_STACK="${ACRONYM}-Image-MacOS"
+                  SSM_PARAM="/${PASCAL_CASE}/Network/MacBuildSubnetId"
+                  # Only run if the macOS stack exists and the SSM param is missing
+                  if aws cloudformation describe-stacks --stack-name "$MACOS_STACK" >/dev/null 2>&1; then
+                    if ! aws ssm get-parameter --name "$SSM_PARAM" >/dev/null 2>&1; then
+                      SUBNET=$(aws cloudformation describe-stacks --stack-name "$INFRA_STACK" \
+                        --query "Stacks[0].Outputs[?contains(OutputKey,'PrivateSubnet1')].OutputValue" \
+                        --output text 2>/dev/null | head -1)
+                      if [ -n "$SUBNET" ]; then
+                        aws ssm put-parameter --name "$SSM_PARAM" --type String --value "$SUBNET" \
+                          --description "Migration: subnet for Image-MacOS (CDK will take ownership)" --no-overwrite 2>/dev/null || true
+                        echo "Seeded $SSM_PARAM for macOS stack migration"
+                      fi
+                    fi
+                  fi
+                - cd "$PROJECT_DIR" && chmod +x deploy.sh && ./deploy.sh -y
+
+            post_build:
+              commands:
+                - |
+                  cd "$PROJECT_DIR"
+                  if [ -f parameters.json ]; then
+                    aws ssm put-parameter --name "$SSM_CONFIG_PARAM" --type String \
+                      --value "$(cat parameters.json)" --overwrite --tier Advanced \
+                      --description "Deployment parameters - updated by deploy"
+                    echo "Configuration saved to SSM"
+                  fi
+                  echo "=== Populating Software Library ==="
+                  TABLE_NAME=$(aws ssm get-parameter --name "/${PASCAL_CASE}/SoftwareLibrary/TableName" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+                  BUCKET_NAME=$(aws ssm get-parameter --name "/${PASCAL_CASE}/SoftwareLibrary/UploadsBucket" --query 'Parameter.Value' --output text 2>/dev/null || echo "")
+                  if [ -n "$TABLE_NAME" ] && [ "$TABLE_NAME" != "None" ]; then
+                    node scripts/populate-software-library.js \
+                      --table-name "$TABLE_NAME" \
+                      --bucket-name "$BUCKET_NAME" \
+                      || echo "Software library population completed with warnings (non-blocking)"
+                  else
+                    echo "Software library table not found in SSM - skipping population (first deploy?)"
+                  fi
+                  echo "=== Deployment Complete ==="
+
+  # =========================================================================
+  # Auto-trigger: starts the first build automatically on stack creation
+  # =========================================================================
+  BuildTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${AWS::StackName}-build-trigger-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: StartBuild
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: codebuild:StartBuild
+                Resource: !GetAtt DeployProject.Arn
+
+  BuildTriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-build-trigger
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt BuildTriggerRole.Arn
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+
+          def handler(event, context):
+              try:
+                  if event['RequestType'] in ('Create', 'Update'):
+                      project = event['ResourceProperties']['ProjectName']
+                      boto3.client('codebuild').start_build(projectName=project)
+                      print(f"Started build for project: {project}")
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+              except Exception as e:
+                  print(f"Error: {e}")
+                  cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+
+  BuildTrigger:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: DeployProject
+    Properties:
+      ServiceToken: !GetAtt BuildTriggerFunction.Arn
+      ProjectName: !Ref DeployProject
+      # Changing this forces a new build on stack update
+      RepoUrl: !Ref RepoUrl
+      GitBranch: !Ref GitBranch
+
+Outputs:
+  CodeBuildProjectName:
+    Description: CodeBuild project name - trigger builds from console or CLI
+    Value: !Ref DeployProject
+
+  BuildConsoleUrl:
+    Description: Link to the CodeBuild project in the AWS Console
+    Value: !Sub https://${AWS::Region}.console.aws.amazon.com/codesuite/codebuild/${AWS::AccountId}/projects/${DeployProject}/history
+
+  StartBuildCommand:
+    Description: CLI command to trigger a deployment
+    Value: !Sub >
+      aws codebuild start-build --project-name ${DeployProject}
+      --region ${AWS::Region}
+
+  ViewLogsCommand:
+    Description: CLI command to view the latest build logs
+    Value: !Sub >
+      aws codebuild list-builds-for-project --project-name ${DeployProject}
+      --query 'ids[0]' --output text | xargs -I {} aws codebuild
+      batch-get-builds --ids {} --query 'builds[0].logs.deepLink'
+      --output text
+
+  UpdateConfigCommand:
+    Description: >
+      To update deployment config, derive the PascalCase name from your ProductName
+      (e.g., "Media Resource Manager" -> "MediaResourceManager"), then use it as the
+      SSM parameter path prefix: /{PascalCase}/DeploymentConfig/parameters
+    Value: >
+      PASCAL=$(echo "$PRODUCT_NAME" | sed 's/ //g; s/[^a-zA-Z0-9]//g')
+      && aws ssm get-parameter --name /$PASCAL/DeploymentConfig/parameters
+      --query Parameter.Value --output text > parameters.json
+      && echo "Edit parameters.json, then run:"
+      && aws ssm put-parameter --name /$PASCAL/DeploymentConfig/parameters
+      --type String --value file://parameters.json --overwrite
+
+  ArtifactBucketName:
+    Description: S3 bucket for build artifacts
+    Value: !Ref ArtifactBucket

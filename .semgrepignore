@@ -1,0 +1,12 @@
+# Semgrep ignore patterns
+node_modules/
+cdk.out/
+frontend/dist/
+frontend/node_modules/
+__pycache__/
+*.min.js
+*.bundle.js
+package-lock.json
+security-reports/
+.git/
+*.d.ts

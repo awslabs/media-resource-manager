@@ -1,0 +1,10 @@
+{
+  "name": "FFmpeg",
+  "versionNumber": "Latest",
+  "description": "Complete, cross-platform solution to record, convert and stream audio and video.",
+  "platform": "Windows",
+  "scriptFile": "ffmpeg-latest-install.ps1",
+  "estimatedInstallTime": "1-2 minutes",
+  "diskSpaceRequired": "150 MB",
+  "gpuRequired": false
+}

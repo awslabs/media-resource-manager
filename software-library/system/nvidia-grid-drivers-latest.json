@@ -1,0 +1,10 @@
+{
+  "name": "NVIDIA GRID Drivers",
+  "versionNumber": "Latest",
+  "description": "NVIDIA GRID vGPU drivers for AWS G4/G5 instances. Required for GPU acceleration.",
+  "platform": "Windows",
+  "scriptFile": "nvidia-grid-drivers-latest-install.ps1",
+  "estimatedInstallTime": "5-10 minutes",
+  "diskSpaceRequired": "1.5 GB",
+  "gpuRequired": true
+}
