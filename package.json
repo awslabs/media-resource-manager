@@ -48,7 +48,7 @@
     "@aws-sdk/client-sts": "^3.1012.0",
     "@aws-sdk/lib-dynamodb": "^3.936.0",
     "@aws-sdk/lib-storage": "^3.1012.0",
-    "aws-cdk-lib": "^2.259.0",
+    "aws-cdk-lib": "^2.262.0",
     "constructs": "^10.0.0"
   }
 }
