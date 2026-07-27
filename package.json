@@ -50,5 +50,8 @@
     "@aws-sdk/lib-storage": "^3.1012.0",
     "aws-cdk-lib": "^2.262.0",
     "constructs": "^10.0.0"
+  },
+  "overrides": {
+    "js-yaml": "^3.15.0"
   }
 }
