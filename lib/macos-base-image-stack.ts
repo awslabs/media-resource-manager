@@ -1076,7 +1076,16 @@ outputs:
       // Recipe per version - uses the AWS public macOS AMI directly
       const imageRecipe = new imagebuilder.CfnImageRecipe(this, `MacOS${macosVersion.name}Recipe`, {
         name: `${props.pascalCaseName}-macOS-${macosVersion.name}-DCV-Ready-Recipe`,
-        version: '1.1.0', // Bumped version to use raw AWS public AMI without license config
+        // IMPORTANT: Image Builder recipes are immutable. If you change ANYTHING that
+        // affects this recipe's content (components, parent image, user data, block
+        // device mappings), you MUST bump this version. CloudFormation replaces the
+        // recipe on any content change, and recreating an existing name/version fails
+        // with AlreadyExists, breaking the deploy.
+        // 1.2.0: encode user data with Fn.base64 at deploy time so the Secrets Manager
+        //        ARN token resolves (previously the literal '${Token[...]}' placeholder
+        //        was baked in at synth time, breaking SIP bootstrap and causing recipe
+        //        churn on every synth).
+        version: '1.2.0',
         parentImage: sourceAmiId, // Use AWS public AMI directly (no license config)
         components: [
           { componentArn: grantTccPermissionComponent.attrArn },
@@ -1090,7 +1099,11 @@ outputs:
         }],
         // Bootstrap secure token for ec2-user at first boot - required for SIP disable on Sequoia
         additionalInstanceConfiguration: {
-          userDataOverride: Buffer.from(userDataScript).toString('base64'),
+          // Encode at deploy time with Fn::Base64 so CDK tokens inside the script
+          // (the Secrets Manager ARN) resolve to real values first. Synth-time
+          // Buffer.from(...) encoding would freeze the unresolved token placeholder
+          // text into the recipe.
+          userDataOverride: cdk.Fn.base64(userDataScript),
         },
       });
 
