@@ -10,6 +10,7 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { EC2Client, TerminateInstancesCommand, DescribeInstancesCommand } = require('@aws-sdk/client-ec2');
+const { requireAdmin } = require('./authz');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -31,6 +32,12 @@ exports.handler = async (event) => {
     if (event.httpMethod === 'OPTIONS') {
       return { statusCode: 200, headers: corsHeaders, body: '' };
     }
+
+    // SECURITY: cancelling an install-script generation terminates the running
+    // Step Functions execution and EC2 test instances. Admin only.
+    // See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+    const denial = requireAdmin(event);
+    if (denial) return denial;
 
     // Support both path parameter (for /software/{softwareId}/cancel-generation)
     // and query parameter (for /software/cancel-generation?executionId=xxx)

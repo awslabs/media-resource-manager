@@ -8,6 +8,7 @@ const { FSxClient, DescribeFileSystemsCommand, DescribeStorageVirtualMachinesCom
 const { EC2Client, DescribeNetworkInterfacesCommand } = require('@aws-sdk/client-ec2');
 const crypto = require('crypto');
 const { generateBucketPolicy } = require('./policy-generator');
+const { requireAdmin } = require('./authz');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -45,7 +46,13 @@ const getBucketNameFromArn = (arn) => {
 
 exports.handler = async (event) => {
   console.log('CreateDataSyncLocation event:', JSON.stringify(event, null, 2));
-  
+
+  // SECURITY: creating a DataSync location provisions AWS resources and
+  // grants DataSync IAM access to the referenced S3 bucket or FSx volume.
+  // Admin only. See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+  const denial = requireAdmin(event);
+  if (denial) return denial;
+
   try {
     const body = JSON.parse(event.body || '{}');
     const { name, type, s3Config, fsxConfig } = body;

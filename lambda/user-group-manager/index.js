@@ -8,6 +8,7 @@ const { DirectoryServiceDataClient, CreateUserCommand, UpdateUserCommand, Disabl
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { CognitoIdentityProviderClient, ListUsersCommand, AdminListGroupsForUserCommand } = require('@aws-sdk/client-cognito-identity-provider');
 const crypto = require('crypto');
+const { requireAdmin } = require('./authz');
 
 const dynamoClient = new DynamoDBClient({});
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -35,7 +36,16 @@ exports.handler = async (event) => {
         body: ''
       };
     }
-    
+
+    // SECURITY: every mutating route in this handler is an administrative
+    // operation on the directory or a group. Enforce isAdmin at the routing
+    // boundary before any handler function runs. See H1-3950312 / H1-3964331 /
+    // H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+    if (httpMethod !== 'GET') {
+      const denial = requireAdmin(event);
+      if (denial) return denial;
+    }
+
     switch (httpMethod) {
       case 'GET':
         if (path === '/users') {

@@ -4,6 +4,7 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
+const { requireAdmin } = require('./authz');
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -19,7 +20,13 @@ const ACRONYM = process.env.ACRONYM;
  */
 exports.handler = async (event) => {
   console.log('UpdateRegionalHub API event:', JSON.stringify(event, null, 2));
-  
+
+  // SECURITY: updating a regional hub regenerates the CloudFormation
+  // template and triggers a stack update in another region.
+  // Admin only. See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+  const denial = requireAdmin(event);
+  if (denial) return denial;
+
   try {
     // Parse request body
     const body = typeof event.body === 'string' ? JSON.parse(event.body) : event.body;

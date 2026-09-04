@@ -27,22 +27,36 @@ async function getJwtSecret() {
 
 async function parseJWT(token) {
   try {
+    const parts = token.split('.');
+    if (parts.length !== 3) {
+      throw new Error('Malformed token');
+    }
+    const [header, payload, signature] = parts;
+
     const secret = await getJwtSecret();
-    const [header, payload, signature] = token.split('.');
     const expectedSignature = crypto.createHmac('sha256', secret)
       .update(header + '.' + payload)
       .digest('base64url');
-    
-    if (signature !== expectedSignature) {
+
+    // Constant-time comparison to close a signature-oracle timing side channel.
+    const providedBuf = Buffer.from(signature || '', 'base64url');
+    const expectedBuf = Buffer.from(expectedSignature, 'base64url');
+    if (providedBuf.length !== expectedBuf.length ||
+        !crypto.timingSafeEqual(providedBuf, expectedBuf)) {
       throw new Error('Invalid signature');
     }
-    
+
     const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString());
-    
-    if (decoded.exp < Math.floor(Date.now() / 1000)) {
+
+    // Reject tokens missing exp — the previous check treated undefined < now
+    // as false and accepted the token. Even though signature verification
+    // already blocks unauthenticated forgeries, this defends against a
+    // seed-secret-only compromise where an attacker with the HMAC secret
+    // could otherwise mint tokens with no expiration.
+    if (typeof decoded.exp !== 'number' || decoded.exp < Math.floor(Date.now() / 1000)) {
       throw new Error('Token expired');
     }
-    
+
     return decoded;
   } catch (error) {
     throw new Error('Invalid token');

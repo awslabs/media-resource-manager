@@ -5,6 +5,7 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { SFNClient, StartExecutionCommand } = require('@aws-sdk/client-sfn');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
+const { requireAdmin } = require('./authz');
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -21,7 +22,13 @@ const PASCAL_CASE_NAME = process.env.PASCAL_CASE_NAME;
  */
 exports.handler = async (event) => {
   console.log('DeleteRegionalHub API event:', JSON.stringify(event, null, 2));
-  
+
+  // SECURITY: deleting a regional hub tears down the region's stack and
+  // orphans any workstations still running there.
+  // Admin only. See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+  const denial = requireAdmin(event);
+  if (denial) return denial;
+
   try {
     // Get region from path parameters
     const region = event.pathParameters?.region;

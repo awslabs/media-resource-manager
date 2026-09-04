@@ -13,6 +13,7 @@ const { DynamoDBDocumentClient, GetCommand, PutCommand } = require('@aws-sdk/lib
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { SFNClient, StartExecutionCommand } = require('@aws-sdk/client-sfn');
 const { randomUUID } = require('crypto');
+const { requireAdmin } = require('./authz');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -38,6 +39,12 @@ exports.handler = async (event) => {
     if (event.httpMethod === 'OPTIONS') {
       return { statusCode: 200, headers: corsHeaders, body: '' };
     }
+
+    // SECURITY: script generation kicks off a Step Functions workflow that
+    // launches EC2 test instances and writes to the software library. Admin
+    // only. See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+    const denial = requireAdmin(event);
+    if (denial) return denial;
 
     const body = JSON.parse(event.body || '{}');
     // Generate a softwareId if not provided - use software name as base for cleaner IDs

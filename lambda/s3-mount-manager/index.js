@@ -12,6 +12,7 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand } = require('@aws-sdk/lib-dynamodb');
 const { SSMClient, SendCommandCommand, GetCommandInvocationCommand } = require('@aws-sdk/client-ssm');
 const { EC2Client, DescribeInstancesCommand } = require('@aws-sdk/client-ec2');
+const { requireAdmin } = require('./authz');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -29,7 +30,17 @@ const corsHeaders = {
 
 exports.handler = async (event) => {
     console.log('S3 Mount Manager Event:', JSON.stringify(event, null, 2));
-    
+
+    // SECURITY: mount/unmount operations attach or detach a storage volume
+    // from another user's workstation. Gate API Gateway invocations on
+    // admin. Direct Lambda invocations from workstation-manager (which have
+    // no authorizer context) are trusted internal callers.
+    // See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+    if (event.requestContext?.authorizer) {
+        const denial = requireAdmin(event);
+        if (denial) return denial;
+    }
+
     try {
         // Handle API Gateway event format
         let action, instanceId, storageId;

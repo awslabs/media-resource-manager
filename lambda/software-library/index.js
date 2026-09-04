@@ -7,6 +7,7 @@ const { ImagebuilderClient, CreateComponentCommand, DeleteComponentCommand, List
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { STSClient, GetCallerIdentityCommand } = require('@aws-sdk/client-sts');
+const { requireAdmin } = require('./authz');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -47,12 +48,21 @@ exports.handler = async (event) => {
   try {
     const { httpMethod, resource, pathParameters } = event;
     const softwareId = pathParameters?.softwareId;
-    
+
+    // SECURITY: mutating routes on the software library (create/update/delete)
+    // and the pre-signed upload URL endpoint all allow smuggling arbitrary
+    // binaries into workstation images, so they are administrative operations.
+    // See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+    if (httpMethod !== 'GET' && httpMethod !== 'OPTIONS') {
+      const denial = requireAdmin(event);
+      if (denial) return denial;
+    }
+
     // Handle upload URL request
     if (resource === '/images/software/upload-url' && httpMethod === 'POST') {
       return await generateUploadUrl(JSON.parse(event.body));
     }
-    
+
     switch (httpMethod) {
       case 'GET':
         return softwareId ? await getSoftware(softwareId) : await listSoftware();

@@ -10,6 +10,7 @@ const { DirectoryServiceClient, DescribeDirectoriesCommand } = require('@aws-sdk
 const { DirectoryServiceDataClient, ListGroupMembersCommand } = require('@aws-sdk/client-directory-service-data');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { CognitoIdentityProviderClient, ListUsersCommand } = require('@aws-sdk/client-cognito-identity-provider');
+const { requireAdmin, requireSelfOrAdmin } = require('./authz');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -239,9 +240,58 @@ async function getCognitoUsersForDisplay() {
 
 exports.handler = async (event) => {
   console.log('Event:', JSON.stringify(event, null, 2));
-  
+
   const { httpMethod: method, path, body } = event;
-  
+
+  // SECURITY: gate every mutating route before dispatching. GET routes are
+  // filtered per-function so that non-admin callers only see their own
+  // workstations. Lifecycle operations (start/stop/reboot) fall back to
+  // ownership: a user can start/stop/reboot the workstation they own.
+  // Everything else is admin-only. See H1-3966572 / GHSA-58q4-fcw9-2778 /
+  // SIM P498186948.
+  if (method !== 'GET' && method !== 'OPTIONS') {
+    const routeKey = `${method} ${path}`;
+    const isLifecycle =
+      routeKey === 'POST /workstations/start' ||
+      routeKey === 'POST /workstations/stop' ||
+      routeKey === 'POST /workstations/reboot';
+
+    if (isLifecycle) {
+      let parsedBody;
+      try {
+        parsedBody = JSON.parse(body || '{}');
+      } catch (_err) {
+        parsedBody = {};
+      }
+      const targetInstanceId = parsedBody.instanceId;
+      if (!targetInstanceId) {
+        return {
+          statusCode: 400,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          body: JSON.stringify({ error: 'instanceId is required' })
+        };
+      }
+      const wsResult = await dynamodb.send(new GetCommand({
+        TableName: process.env.WORKSTATION_TABLE_NAME,
+        Key: { instanceId: targetInstanceId }
+      }));
+      if (!wsResult.Item) {
+        return {
+          statusCode: 404,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          body: JSON.stringify({ error: 'Workstation not found' })
+        };
+      }
+      const denial = requireSelfOrAdmin(event, wsResult.Item.assignedUserId);
+      if (denial) return denial;
+    } else {
+      // Admin only: create / update / delete / change-instance-type /
+      // volume management.
+      const denial = requireAdmin(event);
+      if (denial) return denial;
+    }
+  }
+
   try {
     switch (method) {
       case 'GET':

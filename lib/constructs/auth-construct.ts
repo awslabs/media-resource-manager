@@ -203,11 +203,29 @@ export class AuthConstruct extends Construct {
       cognito.UserPoolClientIdentityProvider.COGNITO,
     ];
 
+    // Restrict what end-user access tokens can mutate via UpdateUserAttributes.
+    // Custom attributes (isAdmin, groups, posix, ldap, department) are privileged
+    // claims managed by admin operations (AdminUpdateUserAttributes with IAM) or
+    // SAML attribute mapping only, never by end-user self-write. Without this
+    // restriction, any authenticated user can self-elevate to admin by writing
+    // their own custom:isAdmin, custom:groups, or custom:department claim.
+    //
+    // SAML attribute mapping bypasses client-level writeAttributes, so federated
+    // customers whose IdP maps to custom:groups continue to work unchanged.
+    // Backend Lambdas that call AdminUpdateUserAttributes with IAM credentials
+    // (e.g. user provisioning, group management) are also unaffected.
+    const writeAttributes = new cognito.ClientAttributes().withStandardAttributes({
+      email: true,
+      givenName: true,
+      familyName: true,
+    });
+
     this.userPoolClient = new cognito.UserPoolClient(this, 'UserPoolClient', {
       userPool: this.userPool,
       generateSecret: false,
       authFlows: { userSrp: true, adminUserPassword: true, userPassword: true },
       supportedIdentityProviders,
+      writeAttributes,
       oAuth: {
         flows: { authorizationCodeGrant: true },
         scopes: [cognito.OAuthScope.EMAIL, cognito.OAuthScope.OPENID, cognito.OAuthScope.PROFILE],
@@ -285,12 +303,19 @@ export class AuthConstruct extends Construct {
         USER_POOL_ID: this.userPool.userPoolId,
         CLIENT_ID: this.userPoolClient.userPoolClientId,
         FRONTEND_URL_PARAM_NAME: frontendUrlParamName,
+        // Desired WriteAttributes for the User Pool Client. The preserve
+        // custom resource enforces this on every deploy, self-healing any
+        // prior drift caused by earlier full-replace UpdateUserPoolClient
+        // calls. Must stay in sync with the writeAttributes: field on the
+        // UserPoolClient construct above.
+        ENFORCED_WRITE_ATTRIBUTES: 'email,family_name,given_name',
       },
     });
 
     preserveSamlProvidersLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         'cognito-idp:ListIdentityProviders',
+        'cognito-idp:DescribeUserPoolClient',
         'cognito-idp:UpdateUserPoolClient',
       ],
       resources: [

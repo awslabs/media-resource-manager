@@ -1,0 +1,11 @@
+{
+  "name": "jwt-authorizer",
+  "version": "1.0.0",
+  "private": true,
+  "description": "JWT authorizer Lambda for the MRM API. Verifies Cognito ID tokens against the User Pool JWKS and LDAP tokens against a shared secret before returning an authorizer policy.",
+  "main": "index.js",
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.0.0",
+    "aws-jwt-verify": "^5.1.0"
+  }
+}

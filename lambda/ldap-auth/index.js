@@ -64,7 +64,7 @@ async function authenticateWithLDAP(username, password) {
             console.log('Starting LDAP authentication for:', username);
             
             const client = ldap.createClient({
-              url: `ldap://\${domainName}:389`,
+              url: `ldap://${domainName}:389`,
               timeout: 10000,
               connectTimeout: 10000,
             });
@@ -85,7 +85,24 @@ async function authenticateWithLDAP(username, password) {
               const domainParts = domainName.split('.');
               const baseDN = domainParts.map(part => `DC=${part}`).join(',');
               console.log('Using baseDN:', baseDN);
-              const searchFilter = `(&(objectClass=user)(sAMAccountName=${username}))`;
+              // Escape RFC 4515 LDAP filter special characters in user-supplied
+              // input before interpolating it into the search filter. Without
+              // this, a username like "*" or "admin)(cn=*" would change the
+              // filter's semantics (CWE-90 LDAP injection). Bind already
+              // succeeded above, so this only guards the follow-up attribute
+              // lookup, but a malformed or filter-manipulating username could
+              // still return unexpected attributes or leak enumeration signal.
+              const escapeLdapFilter = (value) => String(value).replace(/[\\*\(\)\0]/g, (c) => {
+                switch (c) {
+                  case '\\': return '\\5c';
+                  case '*':  return '\\2a';
+                  case '(':  return '\\28';
+                  case ')':  return '\\29';
+                  case '\0': return '\\00';
+                  default:   return c;
+                }
+              });
+              const searchFilter = `(&(objectClass=user)(sAMAccountName=${escapeLdapFilter(username)}))`;
               
               client.search(baseDN, {
                 filter: searchFilter,

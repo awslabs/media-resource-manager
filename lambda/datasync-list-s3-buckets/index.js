@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const { S3Client, ListBucketsCommand, GetBucketLocationCommand } = require('@aws-sdk/client-s3');
+const { requireAdmin } = require('./authz');
 
 const s3Client = new S3Client({ region: process.env.AWS_REGION });
 
@@ -13,8 +14,11 @@ const corsHeaders = {
 
 exports.handler = async (event) => {
   console.log('ListS3Buckets event:', JSON.stringify(event, null, 2));
-  
-  // Handle /datasync/config endpoint - returns DataSync role ARN for cross-account bucket policy
+
+  // Handle /datasync/config endpoint - returns DataSync role ARN for cross-account bucket policy.
+  // Same rationale as /storage/config: exposing an owned role ARN + account
+  // id does not itself confer any access, so this stays available to any
+  // authenticated user.
   if (event.resource === '/datasync/config' || event.path?.endsWith('/config')) {
     return {
       statusCode: 200,
@@ -25,7 +29,13 @@ exports.handler = async (event) => {
       })
     };
   }
-  
+
+  // The remaining code path lists every S3 bucket in the account, including
+  // buckets unrelated to MRM. Regular users have no legitimate reason to see
+  // that account-wide inventory, so gate it to admins.
+  const denial = requireAdmin(event);
+  if (denial) return denial;
+
   try {
     // List all buckets in the account
     const listResult = await s3Client.send(new ListBucketsCommand({}));

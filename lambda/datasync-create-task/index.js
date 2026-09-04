@@ -6,6 +6,7 @@ const { DynamoDBDocumentClient, PutCommand, GetCommand } = require('@aws-sdk/lib
 const { DataSyncClient, CreateTaskCommand } = require('@aws-sdk/client-datasync');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const crypto = require('crypto');
+const { requireAdmin } = require('./authz');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -93,7 +94,13 @@ const areLocationsCompatible = (sourceType, destType) => {
 
 exports.handler = async (event) => {
   console.log('CreateDataSyncTask event:', JSON.stringify(event, null, 2));
-  
+
+  // SECURITY: creating a DataSync task binds two locations and can copy
+  // data across storage systems. Admin only.
+  // See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+  const denial = requireAdmin(event);
+  if (denial) return denial;
+
   try {
     const body = JSON.parse(event.body || '{}');
     const { name, sourceLocationId, destinationLocationId, options = {} } = body;

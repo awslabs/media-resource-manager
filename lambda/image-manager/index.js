@@ -249,6 +249,7 @@ async function handleICEErrorAndRetry(pipelineId, pipelineArn) {
 }
 
 const crypto = require('crypto');
+const { requireAdmin } = require('./authz');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamoDocClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -299,7 +300,16 @@ exports.handler = async (event) => {
         body: ''
       };
     }
-    
+
+    // SECURITY: every mutating route creates or deletes Image Builder
+    // pipelines/recipes/images (or triggers pipeline execution, which mints
+    // an AMI). All are administrative operations. Enforce isAdmin at the
+    // routing boundary. See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+    if (method !== 'GET') {
+      const denial = requireAdmin(event);
+      if (denial) return denial;
+    }
+
     switch (method) {
       case 'GET':
         if (path === '/images') {

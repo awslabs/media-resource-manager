@@ -4,6 +4,7 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { DataSyncClient, UpdateTaskCommand } = require('@aws-sdk/client-datasync');
+const { requireAdmin } = require('./authz');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -17,7 +18,13 @@ const corsHeaders = {
 
 exports.handler = async (event) => {
   console.log('UpdateDataSyncTask event:', JSON.stringify(event, null, 2));
-  
+
+  // SECURITY: updating a DataSync task rebinds transfer scope, filters,
+  // and schedule. Admin only.
+  // See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+  const denial = requireAdmin(event);
+  if (denial) return denial;
+
   try {
     const taskId = event.pathParameters?.taskId;
     

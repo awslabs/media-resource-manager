@@ -7,6 +7,7 @@ const { SSMClient, SendCommandCommand, GetParameterCommand } = require('@aws-sdk
 const { EC2Client, DescribeInstancesCommand } = require('@aws-sdk/client-ec2');
 const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
 const { FSxClient, DescribeStorageVirtualMachinesCommand } = require('@aws-sdk/client-fsx');
+const { requireAdmin } = require('./authz');
 
 // DynamoDB client for primary region (workstation table is in primary region)
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
@@ -64,7 +65,16 @@ const PASCAL_CASE_NAME = process.env.PASCAL_CASE_NAME || 'MediaResourceManager';
 
 exports.handler = async (event) => {
     console.log('FSx Mount Manager Event:', JSON.stringify(event, null, 2));
-    
+
+    // SECURITY: not currently exposed via API Gateway; gate on admin only
+    // if an authorizer context ever appears, as belt-and-suspenders in
+    // case an API route is wired up later.
+    // See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+    if (event.requestContext?.authorizer) {
+        const denial = requireAdmin(event);
+        if (denial) return denial;
+    }
+
     try {
         const { action, instanceId, storageId } = event;
         

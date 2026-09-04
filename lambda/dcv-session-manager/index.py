@@ -192,7 +192,76 @@ def lambda_handler(event, context):
             'headers': cors_headers,
             'body': ''
         }
-    
+
+    # ─── Authorization ───────────────────────────────────────────────────────
+    # /dcv is a POST endpoint fronted by the JWT authorizer, so at this point
+    # the caller has a valid Cognito ID token or LDAP JWT. But every /dcv
+    # action mutates or exposes access to a specific workstation, so we still
+    # need to bind the operation to the caller's identity. Without this
+    # binding an ordinary authenticated user can:
+    #
+    #   * enumerate other users' sessions via describe-sessions
+    #     with owner="administrator", then get-connection-data with the
+    #     returned session ids to receive the DCV connection URL and
+    #     effectively remote-console-in as those users
+    #   * create-session on any serverId and receive a connection URL for
+    #     that workstation (full RCE as the OS default user)
+    #
+    # Actions are split into two groups:
+    #   admin-only  — fleet enumeration and lifecycle actions that only
+    #                 make sense for admins; the frontend only invokes
+    #                 these from the admin-gated /dcv page
+    #   user+admin  — create-session, which regular users need to connect
+    #                 to their own workstation. Gated on assignedUserId
+    #                 matching the caller, or caller is admin.
+    ADMIN_ONLY_ACTIONS = {
+        'describe-servers',
+        'describe-sessions',
+        'delete-session',
+        'get-load-balancers',
+        'get-autoscaling-groups',
+        'get-workstation-assignments',
+        'get-instance-states',
+        'get-connection-data',
+    }
+    OWNER_OR_ADMIN_ACTIONS = {'create-session'}
+
+    def _forbidden(msg):
+        return {
+            'statusCode': 403,
+            'headers': {'Content-Type': 'application/json', **cors_headers},
+            'body': json.dumps({'error': msg})
+        }
+
+    def _unauthorized(msg):
+        return {
+            'statusCode': 401,
+            'headers': {'Content-Type': 'application/json', **cors_headers},
+            'body': json.dumps({'error': msg})
+        }
+
+    authorizer_ctx = (event.get('requestContext') or {}).get('authorizer') or {}
+    caller_username = authorizer_ctx.get('username')
+    caller_is_admin = authorizer_ctx.get('isAdmin') == 'true'
+
+    if not caller_username:
+        return _unauthorized('Missing authorizer context')
+
+    def _normalize_user_id(uid):
+        # Match workstation-api normalizeUserId: strip common IdP prefixes and
+        # any @domain, then lowercase. This keeps ownership checks aligned
+        # with how workstation-manager and workstation-api compare ids.
+        if not uid:
+            return ''
+        normalized = uid
+        for prefix in ('IdentityCenter_', 'Okta_', 'SAML_', 'AzureAD_', 'AmazonFederate_'):
+            if normalized.startswith(prefix):
+                normalized = normalized[len(prefix):]
+                break
+        if '@' in normalized:
+            normalized = normalized.split('@', 1)[0]
+        return normalized.lower()
+
     try:
         body = json.loads(event.get('body', '{}'))
         action = body.get('action')
@@ -203,9 +272,57 @@ def lambda_handler(event, context):
         session_id = body.get('dcvSessionId')
         session_type = body.get('sessionType', 'console')
         owner = body.get('owner')
-        
+
+        # Enforce action allow-list + per-action authz before we do any real
+        # work (before routing to a regional lambda too, so a forbidden
+        # request never triggers a cross-region invoke).
+        if action in ADMIN_ONLY_ACTIONS:
+            if not caller_is_admin:
+                return _forbidden('Access denied. Administrator privileges required.')
+        elif action in OWNER_OR_ADMIN_ACTIONS:
+            if not server_id:
+                return {
+                    'statusCode': 400,
+                    'headers': {'Content-Type': 'application/json', **cors_headers},
+                    'body': json.dumps({'error': 'serverId is required'})
+                }
+            if not caller_is_admin:
+                # Look up the workstation and confirm caller is the assignee.
+                try:
+                    ws_table = _dynamodb_table(
+                        os.environ.get('WORKSTATION_TABLE_NAME', 'workstation-instances')
+                    )
+                    ws_resp = ws_table.get_item(Key={'instanceId': server_id})
+                except Exception as e:
+                    print(f"Ownership lookup failed for {server_id}: {e}")
+                    return _forbidden('Access denied')
+                ws_item = ws_resp.get('Item') if isinstance(ws_resp, dict) else None
+                if not ws_item:
+                    return _forbidden('Access denied')
+                assigned = ws_item.get('assignedUserId')
+                if _normalize_user_id(assigned) != _normalize_user_id(caller_username):
+                    return _forbidden(
+                        'Access denied. You may only connect to workstations assigned to you.'
+                    )
+        elif action is None:
+            return {
+                'statusCode': 400,
+                'headers': {'Content-Type': 'application/json', **cors_headers},
+                'body': json.dumps({'error': 'action is required'})
+            }
+        else:
+            # Unknown action: deny by default rather than falling through to
+            # the "Unknown action" branch inside the API-request try block,
+            # which returns 500 and could otherwise be probed to enumerate
+            # supported actions.
+            return {
+                'statusCode': 400,
+                'headers': {'Content-Type': 'application/json', **cors_headers},
+                'body': json.dumps({'error': f'Unknown action: {action}'})
+            }
+
         current_region = os.environ.get('AWS_REGION')
-        
+
         # Route to regional Lambda if workstation is in a different region
         # This is needed because the DCV Session Manager Lambda must be in the same
         # VPC as the Session Manager broker to communicate with it

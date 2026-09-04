@@ -10,6 +10,7 @@
  */
 
 const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
+const { requireAdmin } = require('./authz');
 
 const bedrockClient = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
 
@@ -90,6 +91,13 @@ exports.handler = async (event) => {
     if (event.httpMethod === 'OPTIONS') {
       return { statusCode: 200, headers: corsHeaders, body: '' };
     }
+
+    // SECURITY: the chat-requirements assistant is the entry point for the
+    // install-script agent flow (a Bedrock-backed conversation that leads to
+    // invoke-install-script-agent). Admin only, matching the downstream
+    // handlers. See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+    const denial = requireAdmin(event);
+    if (denial) return denial;
 
     const body = JSON.parse(event.body || '{}');
     const { 

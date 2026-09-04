@@ -13,6 +13,7 @@ const { SSOAdminClient, ListInstancesCommand } = require('@aws-sdk/client-sso-ad
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
+const { requireAdmin } = require('./authz');
 
 const identitystore = new IdentitystoreClient({});
 const ssoAdmin = new SSOAdminClient({});
@@ -67,7 +68,13 @@ exports.handler = async (event) => {
   if (httpMethod === 'OPTIONS') {
     return { statusCode: 200, headers: corsHeaders, body: '' };
   }
-  
+
+  // SECURITY: identity center sync writes to the users table with data
+  // fetched from Identity Center. Admin only. See H1-3966572 /
+  // GHSA-58q4-fcw9-2778 / SIM P498186948.
+  const denial = requireAdmin(event);
+  if (denial) return denial;
+
   try {
     const requestBody = body ? JSON.parse(body) : {};
     const { groupIds: providedGroupIds, identityStoreId: providedIdentityStoreId } = requestBody;

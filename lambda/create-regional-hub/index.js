@@ -6,6 +6,7 @@ const { DynamoDBDocumentClient, PutCommand, GetCommand } = require('@aws-sdk/lib
 const { SFNClient, StartExecutionCommand } = require('@aws-sdk/client-sfn');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { EC2Client, DescribeAvailabilityZonesCommand } = require('@aws-sdk/client-ec2');
+const { requireAdmin } = require('./authz');
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -21,7 +22,14 @@ const PASCAL_CASE_NAME = process.env.PASCAL_CASE_NAME;
  */
 exports.handler = async (event) => {
   console.log('CreateRegionalHub API event:', JSON.stringify(event, null, 2));
-  
+
+  // SECURITY: creating a regional hub kicks off a Step Functions workflow
+  // that deploys IAM, VPC, NLB, DCV Session Manager, and instance profiles
+  // in a new region. Admin only.
+  // See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
+  const denial = requireAdmin(event);
+  if (denial) return denial;
+
   try {
     // Parse request body
     const body = typeof event.body === 'string' ? JSON.parse(event.body) : event.body;

@@ -12,7 +12,7 @@
  * correct callback/logout URLs (since CDK uses placeholders for fresh deployments).
  */
 
-const { CognitoIdentityProviderClient, ListIdentityProvidersCommand, UpdateUserPoolClientCommand } = require('@aws-sdk/client-cognito-identity-provider');
+const { CognitoIdentityProviderClient, ListIdentityProvidersCommand, UpdateUserPoolClientCommand, DescribeUserPoolClientCommand } = require('@aws-sdk/client-cognito-identity-provider');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const https = require('https');
 const url = require('url');
@@ -107,11 +107,38 @@ exports.handler = async (event) => {
     
     console.log('Updating client with supported providers:', supportedProviders);
     console.log('Callback URLs:', callbackUrls);
-    
-    // Update the user pool client to include all providers
+
+    // Fetch the current client configuration first, then override only the
+    // fields this custom resource is responsible for (SupportedIdentityProviders,
+    // callback/logout URLs, allowed OAuth flows). UpdateUserPoolClient is a
+    // full replace, so any field we omit is reset to defaults. In particular,
+    // WriteAttributes and ReadAttributes must be preserved to keep the
+    // privilege-attribute restriction that lib/constructs/auth-construct.ts
+    // sets to prevent user self-elevation via UpdateUserAttributes on
+    // custom:isAdmin, custom:groups, or custom:department.
+    const describeResponse = await cognitoClient.send(new DescribeUserPoolClientCommand({
+      UserPoolId: userPoolId,
+      ClientId: clientId,
+    }));
+    const currentClient = describeResponse.UserPoolClient;
+    console.log('Current WriteAttributes:', currentClient.WriteAttributes);
+    console.log('Current ReadAttributes:', currentClient.ReadAttributes);
+
+    // Enforce the CDK-declared WriteAttributes on every run. UpdateUserPoolClient
+    // is a full replace, so if any prior deploy (or any operator action) stripped
+    // WriteAttributes to defaults, this heals it. If the env var is unset we
+    // fall back to preserving whatever is currently set, to avoid regressing
+    // in tenants that intentionally use custom writeAttributes.
+    const enforcedWriteAttrsRaw = process.env.ENFORCED_WRITE_ATTRIBUTES || '';
+    const enforcedWriteAttrs = enforcedWriteAttrsRaw
+      ? enforcedWriteAttrsRaw.split(',').map(s => s.trim()).filter(Boolean)
+      : currentClient.WriteAttributes;
+    console.log('Enforcing WriteAttributes:', enforcedWriteAttrs);
+
     await cognitoClient.send(new UpdateUserPoolClientCommand({
       UserPoolId: userPoolId,
       ClientId: clientId,
+      // Fields owned by this custom resource:
       SupportedIdentityProviders: supportedProviders,
       AllowedOAuthFlowsUserPoolClient: true,
       AllowedOAuthFlows: ['code'],
@@ -124,6 +151,19 @@ exports.handler = async (event) => {
         'ALLOW_USER_PASSWORD_AUTH',
         'ALLOW_REFRESH_TOKEN_AUTH',
       ],
+      // Enforce the desired WriteAttributes (self-healing). Preserve the rest
+      // of the CDK-managed configuration by echoing the current values back:
+      WriteAttributes: enforcedWriteAttrs,
+      ClientName: currentClient.ClientName,
+      ReadAttributes: currentClient.ReadAttributes,
+      RefreshTokenValidity: currentClient.RefreshTokenValidity,
+      AccessTokenValidity: currentClient.AccessTokenValidity,
+      IdTokenValidity: currentClient.IdTokenValidity,
+      TokenValidityUnits: currentClient.TokenValidityUnits,
+      PreventUserExistenceErrors: currentClient.PreventUserExistenceErrors,
+      EnableTokenRevocation: currentClient.EnableTokenRevocation,
+      EnablePropagateAdditionalUserContextData: currentClient.EnablePropagateAdditionalUserContextData,
+      AuthSessionValidity: currentClient.AuthSessionValidity,
     }));
     
     console.log('Successfully updated user pool client with SAML providers');

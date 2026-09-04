@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const { S3Client, ListBucketsCommand, GetBucketLocationCommand } = require('@aws-sdk/client-s3');
+const { requireAdmin } = require('./authz');
 
 const s3Client = new S3Client({ region: process.env.AWS_REGION });
 
@@ -13,10 +14,13 @@ const corsHeaders = {
 
 exports.handler = async (event) => {
   console.log('StorageConfig event:', JSON.stringify(event, null, 2));
-  
+
   const path = event.path || event.resource || '';
-  
-  // Handle /storage/config endpoint - returns workstation role ARN for cross-account bucket policy
+
+  // Handle /storage/config endpoint - returns workstation role ARN for cross-account bucket policy.
+  // Available to any authenticated user because the frontend surfaces these
+  // identifiers to help admins configure cross-account bucket policies, and
+  // knowing an owned role ARN + account id does not itself confer any access.
   if (path.endsWith('/config')) {
     return {
       statusCode: 200,
@@ -27,9 +31,13 @@ exports.handler = async (event) => {
       })
     };
   }
-  
-  // Handle /storage/s3-buckets endpoint - list S3 buckets in the account
+
+  // Handle /storage/s3-buckets endpoint - list every S3 bucket in the account.
+  // This enumerates non-MRM buckets too so it must be admin-only; regular
+  // users have no legitimate reason to see the account-wide bucket inventory.
   if (path.endsWith('/s3-buckets')) {
+    const denial = requireAdmin(event);
+    if (denial) return denial;
     try {
       const listResult = await s3Client.send(new ListBucketsCommand({}));
       const buckets = listResult.Buckets || [];
