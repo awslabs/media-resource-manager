@@ -1,6 +1,6 @@
 {
   "name": "media-resource-manager",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Media Resource Manager - Amazon CDK application for managing EC2 workstations with Amazon DCV",
   "bin": {
     "media-resource-manager": "bin/media-resource-manager.js"
