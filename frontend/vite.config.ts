@@ -2,11 +2,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /// <reference types="vitest" />
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
 import packageJson from './package.json'
 
-export default defineConfig({
+// `defineConfig` is invoked with `{ mode }` so we can call `loadEnv` and
+// pick up variables from `frontend/.env.local` (gitignored) or `.env`.
+// `process.env` is NOT automatically populated from these files when
+// vite.config.ts is evaluated — this is a well-known Vite gotcha. Calling
+// `loadEnv` explicitly makes VITE_* variables available inside the config.
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, process.cwd(), 'VITE_');
+
+  return {
   // Vitest configuration for unit tests. Runs against src/**/*.test.ts.
   // See frontend/src/utils/*.test.ts for examples.
   test: {
@@ -66,13 +74,18 @@ export default defineConfig({
       port: 3001,
       host: 'localhost'
     },
+    // Dev-server proxy target for `/api/*` requests. Set VITE_API_URL in
+    // a per-machine `frontend/.env.local` (see `.env.example`) to point at
+    // your deployed MRM API Gateway. Falls back to a local loopback so
+    // `npm run dev` doesn't crash when no deployment is configured.
     proxy: {
       '/api': {
-        target: 'https://0hk4rx8as8.execute-api.us-east-1.amazonaws.com/prod',
+        target: env.VITE_API_URL || 'http://localhost:8000',
         changeOrigin: true,
         secure: true,
         rewrite: (path) => path.replace(/^\/api/, '')
       }
     }
   },
+  };
 })
