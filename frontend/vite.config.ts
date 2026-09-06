@@ -1,11 +1,31 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+/// <reference types="vitest" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import packageJson from './package.json'
 
 export default defineConfig({
+  // Vitest configuration for unit tests. Runs against src/**/*.test.ts.
+  // See frontend/src/utils/*.test.ts for examples.
+  test: {
+    environment: 'jsdom',
+    globals: false,
+    include: ['src/**/*.test.ts', 'src/**/*.test.tsx'],
+    // The e2e Playwright suite lives in frontend/tests/e2e/ and is a
+    // different test runner — exclude it from Vitest discovery.
+    exclude: ['tests/**', 'node_modules/**', 'dist/**'],
+    coverage: {
+      provider: 'v8',
+      reporter: ['text', 'html'],
+      // Scoped to the utils that have real logic worth unit testing.
+      // The other utils files (datasyncApi.ts, dcvApi.ts, installScriptApi.ts,
+      // storageApi.ts) are thin fetch wrappers with no branching worth
+      // covering here — they're validated by the Playwright e2e suite.
+      include: ['src/utils/api.ts', 'src/utils/auth.ts'],
+    },
+  },
   plugins: [react()],
   define: {
     __APP_VERSION__: JSON.stringify(packageJson.version),
