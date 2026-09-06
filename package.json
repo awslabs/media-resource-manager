@@ -8,6 +8,7 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
+    "pretest": "scripts/install-test-deps.sh",
     "test": "jest",
     "cdk": "cdk",
     "version-sync": "node -e \"const fs=require('fs');const root=require('./package.json');const fp='frontend/package.json';const fe=JSON.parse(fs.readFileSync(fp));fe.version=root.version;fs.writeFileSync(fp,JSON.stringify(fe,null,2)+'\\n');console.log('Synced version to frontend:',root.version)\"",
