@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { test, expect, trackConsoleErrors } from './support/auth-fixture';
+import { test, expect, trackConsoleErrors, escapeRegex } from './support/auth-fixture';
 
 /**
  * Feature happy-path tests: each top-level page renders its own content,
@@ -54,7 +54,7 @@ test.describe('feature pages render page-specific content', () => {
     test(`${path} renders ${indicator.role} "${indicator.name}"`, async ({ page }) => {
       const errors = await trackConsoleErrors(page);
       await page.goto(path);
-      await expect(page).toHaveURL(new RegExp(path.replace(/\//g, '\\/')), {
+      await expect(page).toHaveURL(new RegExp(escapeRegex(path)), {
         timeout: 30_000,
       });
 

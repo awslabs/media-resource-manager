@@ -52,6 +52,16 @@ export const test = base.extend<{}>({
 export { expect };
 
 /**
+ * Escape a string for use inside a regular expression.
+ * Standard JS pattern — every regex metacharacter gets a preceding backslash.
+ * Use when building a `new RegExp(...)` from a value that isn't a regex
+ * literal (e.g. a route path from a test table).
+ */
+export function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
  * Collect unexpected client-side JS errors during a test.
  *
  * Filters out known-noisy console errors that aren't JS regressions:

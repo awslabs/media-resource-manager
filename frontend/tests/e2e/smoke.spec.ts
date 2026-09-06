@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { test, expect, trackConsoleErrors } from './support/auth-fixture';
+import { test, expect, trackConsoleErrors, escapeRegex } from './support/auth-fixture';
 
 /**
  * Frontend smoke tests — focused on react-router surfaces.
@@ -57,7 +57,7 @@ test.describe('react-router smoke', () => {
       const errors = await trackConsoleErrors(page);
       await page.goto(path);
       // Wait for the URL to settle (React Router may async-resolve).
-      await expect(page).toHaveURL(new RegExp(path.replace(/\//g, '\\/')), {
+      await expect(page).toHaveURL(new RegExp(escapeRegex(path)), {
         timeout: 30_000,
       });
       // Wait for the app shell to be visible — any main region is fine.
