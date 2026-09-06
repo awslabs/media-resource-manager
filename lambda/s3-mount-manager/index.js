@@ -472,14 +472,16 @@ if mountpoint -q "$MOUNT_PATH"; then
             echo "Creating desktop shortcut for $USERNAME..."
             cat > "$DESKTOP_FILE" << DESKTOP_EOF
 [Desktop Entry]
-Type=Link
+Type=Application
 Name=$STORAGE_NAME
 Comment=S3 Mount: $BUCKET_NAME
 Icon=folder-remote
-URL=$MOUNT_PATH
+Exec=xdg-open $MOUNT_PATH
+Terminal=false
 DESKTOP_EOF
             chown "$USERNAME:$USERNAME" "$DESKTOP_FILE"
             chmod 755 "$DESKTOP_FILE"
+            sudo -u "$USERNAME" gio set "$DESKTOP_FILE" metadata::trusted true 2>/dev/null || true
         fi
     done
 else
