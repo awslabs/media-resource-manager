@@ -96,13 +96,21 @@ export class ImageBuilderConstruct extends Construct {
       allowAllOutbound: true
     });
 
-    // Image Builder service role
+    // Image Builder service role. This role is used via an EC2 INSTANCE PROFILE
+    // on build instances, so it must:
+    //  - trust ec2.amazonaws.com (not imagebuilder.amazonaws.com) so the build
+    //    instance can obtain credentials from instance metadata, and
+    //  - include AmazonSSMManagedInstanceCore so the SSM agent can register.
+    // Image Builder orchestrates builds via SSM; without either of these every
+    // pipeline build fails at LaunchBuildInstance with InvalidInstanceId
+    // ("Instances not in a valid state"). See issue #15.
     this.serviceRole = new iam.Role(this, 'ServiceRole', {
       roleName: `${props.pascalCaseName}-ImageBuilder-ServiceRole`,
-      assumedBy: new iam.ServicePrincipal('imagebuilder.amazonaws.com'),
+      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
       managedPolicies: [
         iam.ManagedPolicy.fromAwsManagedPolicyName('EC2InstanceProfileForImageBuilder'),
-        iam.ManagedPolicy.fromAwsManagedPolicyName('EC2InstanceProfileForImageBuilderECRContainerBuilds')
+        iam.ManagedPolicy.fromAwsManagedPolicyName('EC2InstanceProfileForImageBuilderECRContainerBuilds'),
+        iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore')
       ],
       inlinePolicies: {
         S3Access: new iam.PolicyDocument({

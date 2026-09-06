@@ -106,6 +106,38 @@ async function getOsVersionFromAmi(amiId) {
     return 'Unknown';
   }
 }
+
+// EC2 Image Builder drives builds via SSM commands on the build instance.
+// RHEL-family AMIs (Rocky, RHEL, CentOS, Alma) do NOT ship with the SSM agent
+// preinstalled, and these distros are outside Image Builder's default agent
+// bootstrap, so the build instance never registers with SSM and the build
+// fails at LaunchBuildInstance with:
+//   "InvalidInstanceId ... Instances not in a valid state for account"
+// Mirrors the workstation path (lambda/instance-create-linux) which installs
+// the agent via user data. Returns null for OSes that need no override so the
+// default Image Builder bootstrap is preserved. See issue #15.
+function buildSsmAgentUserDataOverride(baseOsVersion) {
+  const os = (baseOsVersion || '').toLowerCase();
+  const isRhelFamily = ['rocky', 'red hat', 'rhel', 'centos', 'alma']
+    .some(marker => os.includes(marker));
+  if (!isRhelFamily) {
+    return null;
+  }
+  const userDataScript = `#!/bin/bash
+# Install SSM Agent for Rocky/RHEL-family (required for Image Builder to reach the build instance)
+if [ -f /etc/os-release ]; then
+  . /etc/os-release
+  if [ "$ID" = "rocky" ] || [ "$ID" = "rhel" ] || [ "$ID" = "centos" ] || [ "$ID" = "almalinux" ]; then
+    echo "Installing SSM Agent for $ID..."
+    dnf install -y https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+    systemctl enable amazon-ssm-agent
+    systemctl start amazon-ssm-agent
+  fi
+fi
+`;
+  return Buffer.from(userDataScript).toString('base64');
+}
+
 async function testInstanceAvailability(subnetId, instanceType = 'm5.large') {
   try {
     const ec2Client = new (require('@aws-sdk/client-ec2').EC2Client)({ region: process.env.AWS_REGION });
@@ -1179,6 +1211,11 @@ async function createImagePipeline(pipelineData, event) {
     // Windows needs 200GB for large software packages like Adobe Creative Cloud (~50GB+ installed)
     const rootDeviceName = resolvedPlatform === 'Linux' ? '/dev/sda1' : '/dev/sda1';
     const volumeSize = 200;
+    // RHEL-family bases need an SSM agent bootstrap or the build never starts (issue #15)
+    const ssmAgentUserData = buildSsmAgentUserDataOverride(baseOsVersion);
+    if (ssmAgentUserData) {
+      console.log(`Base OS "${baseOsVersion}" lacks a preinstalled SSM agent - adding userDataOverride bootstrap`);
+    }
     const imageRecipe = await imageBuilderClient.send(new CreateImageRecipeCommand({
       name: `${prefixedName}-recipe-${pipelineId.substring(0, 8)}`,
       semanticVersion: '1.0.0',
@@ -1186,6 +1223,11 @@ async function createImagePipeline(pipelineData, event) {
       components: componentArns,
       description: description || `Recipe for ${name} pipeline`,
       tags: managedByTags,
+      ...(ssmAgentUserData ? {
+        additionalInstanceConfiguration: {
+          userDataOverride: ssmAgentUserData
+        }
+      } : {}),
       blockDeviceMappings: [
         {
           deviceName: rootDeviceName,
@@ -1835,12 +1877,22 @@ async function updatePipeline(pipelineId, updateData, event) {
     // Use 200GB for all platforms to support large software packages like Adobe Creative Cloud
     const volumeSize = 200;
     
+    // RHEL-family bases need an SSM agent bootstrap or the build never starts (issue #15)
+    const rebuildSsmAgentUserData = buildSsmAgentUserDataOverride(pipeline.baseOsVersion?.S);
+    if (rebuildSsmAgentUserData) {
+      console.log(`Base OS "${pipeline.baseOsVersion?.S}" lacks a preinstalled SSM agent - adding userDataOverride bootstrap`);
+    }
     const newRecipe = await imageBuilderClient.send(new CreateImageRecipeCommand({
       name: currentRecipeName,
       semanticVersion: newVersion,
       parentImage: pipeline.baseImageId?.S,
       components: componentArns,
       description: `Updated recipe for ${pipeline.name?.S} pipeline`,
+      ...(rebuildSsmAgentUserData ? {
+        additionalInstanceConfiguration: {
+          userDataOverride: rebuildSsmAgentUserData
+        }
+      } : {}),
       blockDeviceMappings: [
         {
           deviceName: '/dev/sda1',
