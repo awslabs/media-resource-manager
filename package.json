@@ -52,6 +52,6 @@
     "constructs": "^10.0.0"
   },
   "overrides": {
-    "js-yaml": "^3.15.0"
+    "js-yaml": "^3.15.2"
   }
 }
