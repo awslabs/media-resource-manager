@@ -176,3 +176,6 @@ software-library/utilities/microsoft-office-*
 software-library/utilities/microsoft-365-*
 software-library/utilities/teams-*
 software-library/utilities/slack-*
+
+# Customer AD emulator state (test fixture — contains local resource IDs)
+scripts/customer-ad-emulator/.emulator-state.json
