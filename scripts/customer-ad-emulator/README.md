@@ -26,8 +26,9 @@ Deployed to the caller-supplied VPC + subnet:
   MRM's workstation SG)
 - IAM role with `AmazonSSMManagedInstanceCore` for SSM Run Command
   orchestration during setup
-- Three Secrets Manager secrets: domain administrator password, service
-  account password, test user password
+- Four Secrets Manager secrets under `/MediaResourceManager/Testing/`:
+  domain admin credentials, DSRM (Safe Mode) credentials, AD service
+  account credentials, test user credentials
 - An admin group in AD (default name `Studio-Admins-Test`) and a test user
   pre-populated as a member
 
@@ -68,7 +69,7 @@ The script will:
 1. Create a security group with AD ports (53, 88, 135, 389, 445, 464, 636,
    3268, 3269, 49152-65535) open from the caller-supplied MRM workstation SG
 2. Create an IAM role with `AmazonSSMManagedInstanceCore`
-3. Create three Secrets Manager secrets
+3. Create four Secrets Manager secrets (see list above)
 4. Launch a Windows Server 2022 t3.medium instance
 5. Wait for the instance to boot and SSM agent to register (~5 min)
 6. Send SSM commands to install the AD DS role and promote to first DC in a
@@ -124,7 +125,7 @@ A fresh MRM deploy with those values will:
 
 - EC2 t3.medium Windows on-demand: ~$0.10/hour (US regions)
 - EBS gp3 30 GB: negligible
-- Secrets Manager: $0.40/month per secret × 3 = negligible
+- Secrets Manager: $0.40/month per secret × 4 = negligible
 - SSM commands: free
 
 When teardown runs, the instance is terminated and the hourly clock stops.

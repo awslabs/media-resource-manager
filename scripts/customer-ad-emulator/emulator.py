@@ -255,7 +255,7 @@ def create_iam_role(clients) -> tuple[str, str]:
         clients["iam"].create_role(
             RoleName=role_name,
             AssumeRolePolicyDocument=trust_policy,
-            Description="Customer AD emulator DC — SSM managed instance access",
+            Description="Customer AD emulator DC - SSM managed instance access",
             Tags=[{"Key": RESOURCE_TAG_KEY, "Value": RESOURCE_TAG_VALUE}],
         )
         log_ok(f"Created IAM role {role_name}")
@@ -485,26 +485,26 @@ def cmd_create(args) -> int:
         log("=== Creating secrets ===")
         state["admin_secret_arn"], admin_password = create_secret(
             clients,
-            "MRM/CustomerAdEmulator/AdminPassword",
-            "Domain administrator password for the customer AD emulator DC (test)",
+            "/MediaResourceManager/Testing/CustomerAdEmulatorDomainAdminCredentials",
+            "Domain administrator credentials for the customer AD emulator DC (test)",
             "Administrator",
         )
         state["safemode_secret_arn"], safemode_password = create_secret(
             clients,
-            "MRM/CustomerAdEmulator/SafeModePassword",
-            "Directory Services Restore Mode password (test)",
+            "/MediaResourceManager/Testing/CustomerAdEmulatorSafeModeCredentials",
+            "Directory Services Restore Mode credentials for the customer AD emulator DC (test)",
             "Administrator",
         )
         state["service_secret_arn"], service_password = create_secret(
             clients,
-            "MRM/CustomerAdEmulator/ServiceAccountPassword",
-            f"Service account password for {args.service_account_name} (test)",
+            "/MediaResourceManager/Testing/CustomerAdEmulatorServiceAccountCredentials",
+            f"Service account credentials ({args.service_account_name}) for the customer AD emulator DC (test)",
             args.service_account_name,
         )
         state["test_user_secret_arn"], test_user_password = create_secret(
             clients,
-            "MRM/CustomerAdEmulator/TestUserPassword",
-            f"Test user password for {args.test_user_name} (test)",
+            "/MediaResourceManager/Testing/CustomerAdEmulatorTestUserCredentials",
+            f"Test user credentials ({args.test_user_name}) for the customer AD emulator DC (test)",
             args.test_user_name,
         )
         save_state(state)
