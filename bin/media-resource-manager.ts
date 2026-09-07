@@ -101,6 +101,76 @@ const productName = app.node.tryGetContext('productName') || 'Media Resource Man
 // data, not a synth-time control. See issue #27.
 const useCognitoAuth = getContextOrParameter('useCognitoAuth') !== 'false';
 
+// AD provisioning mode — 'managed' (default) creates AWS Managed Microsoft AD,
+// 'connector' provisions an AD Connector against a customer-supplied AD. See
+// issue #27 (BYO-AD). When mode is 'connector', the following parameters are
+// also required:
+//   AdDomainName              — FQDN of customer AD (e.g. 'customer.internal')
+//   AdDnsServerIps            — comma-separated 1-4 DC IPs (e.g. '10.1.1.87')
+//   AdServiceAccountSecretArn — ARN of {username, password} secret in
+//                               Secrets Manager for the AD Connector service
+//                               account (customer creates this in advance)
+const adModeRaw = (getContextOrParameter('adMode') || 'managed').toLowerCase();
+if (adModeRaw !== 'managed' && adModeRaw !== 'connector') {
+  throw new Error(
+    `AdMode must be 'managed' or 'connector' (got: ${adModeRaw!}). ` +
+    "See parameters.example.json for the connector-mode fields.",
+  );
+}
+const adMode = adModeRaw as 'managed' | 'connector';
+
+let adConnectorConfig: {
+  domainName: string;
+  dnsServerIps: string[];
+  serviceAccountSecretArn: string;
+  size?: 'Small' | 'Large';
+  netbiosName?: string;
+  description?: string;
+} | undefined;
+
+if (adMode === 'connector') {
+  const domainName = getContextOrParameter('adDomainName');
+  const dnsServerIpsRaw = getContextOrParameter('adDnsServerIps');
+  const serviceAccountSecretArn = getContextOrParameter('adServiceAccountSecretArn');
+  const missing: string[] = [];
+  if (!domainName) missing.push('AdDomainName');
+  if (!dnsServerIpsRaw) missing.push('AdDnsServerIps');
+  if (!serviceAccountSecretArn) missing.push('AdServiceAccountSecretArn');
+  if (missing.length) {
+    throw new Error(
+      `AdMode='connector' requires additional parameters: ${missing.join(', ')}. ` +
+      "See parameters.example.json for the connector-mode fields.",
+    );
+  }
+
+  const dnsServerIps = dnsServerIpsRaw!.split(',').map(s => s.trim()).filter(Boolean);
+  if (dnsServerIps.length < 1 || dnsServerIps.length > 4) {
+    throw new Error(
+      `AdDnsServerIps must contain 1-4 IPs (got ${dnsServerIps.length}): '${dnsServerIpsRaw}'`,
+    );
+  }
+
+  const adConnectorSizeRaw = getContextOrParameter('adConnectorSize');
+  let size: 'Small' | 'Large' | undefined;
+  if (adConnectorSizeRaw) {
+    if (adConnectorSizeRaw !== 'Small' && adConnectorSizeRaw !== 'Large') {
+      throw new Error(
+        `AdConnectorSize must be 'Small' or 'Large' (got: '${adConnectorSizeRaw}')`,
+      );
+    }
+    size = adConnectorSizeRaw;
+  }
+
+  adConnectorConfig = {
+    domainName: domainName!,
+    dnsServerIps,
+    serviceAccountSecretArn: serviceAccountSecretArn!,
+    size,
+    netbiosName: getContextOrParameter('adNetbiosName'),
+    description: getContextOrParameter('adConnectorDescription'),
+  };
+}
+
 // Utility functions for different naming conventions
 const createNamingConventions = (name: string) => {
   // Remove extra spaces and trim
@@ -152,6 +222,8 @@ const infrastructureStack = new InfrastructureStack(app, `${naming.acronym}-Infr
   ssoUserPoolArn: getContextOrParameter('ssoUserPoolArn'),
   ssoUserPoolClientId: getContextOrParameter('ssoUserPoolClientId'),
   ssoUserPoolDomain: getContextOrParameter('ssoUserPoolDomain'),
+  adMode,
+  adConnectorConfig,
 });
 
 // DCV Infrastructure stack
@@ -340,6 +412,9 @@ const dataSyncStack = new DataSyncStack(app, `${naming.acronym}-DataSync`, {
   pascalCaseName: naming.pascalCase,
   acronym: naming.acronym,
   dataEncryptionKey: infrastructureStack.security.dataEncryptionKey,
+  // In AdMode=managed this resolves to the MRM-provisioned ResourceAdmin
+  // secret; in AdMode=connector it resolves to the customer-supplied secret.
+  adServiceAccountSecretArn: infrastructureStack.identity.serviceAccountSecretArn,
 });
 dataSyncStack.addDependency(infrastructureStack);
 
