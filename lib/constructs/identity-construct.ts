@@ -460,7 +460,9 @@ export class IdentityConstruct extends Construct {
     const subnetIds = [privateSubnets[0].subnetId, privateSubnets[1].subnetId];
 
     const description = cfg.description
-      || `MRM AD Connector for ${cfg.domainName} (via ${pascalCaseName})`;
+      // Description regex on ConnectDirectory disallows parentheses — see
+      // https://docs.aws.amazon.com/directoryservice/latest/APIReference/API_ConnectDirectory.html
+      || `MRM AD Connector for ${cfg.domainName} via ${pascalCaseName}`;
 
     const connector = new cdk.CustomResource(this, 'AdConnectorResource', {
       serviceToken: provisionerFn.functionArn,
