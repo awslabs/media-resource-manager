@@ -447,9 +447,31 @@ export class IdentityConstruct extends Construct {
       resources: [cfg.serviceAccountSecretArn],
     }));
 
-    // Directory Service needs to attach ENIs to the VPC subnets. Since
-    // ds:ConnectDirectory calls this on behalf of the service, no explicit
-    // ec2:CreateNetworkInterface permission is needed on our Lambda role.
+    // ConnectDirectory requires the caller to have EC2 permissions because
+    // Directory Service uses the caller's credentials (not a service role) to
+    // create the ENIs, security groups, and route configuration that back the
+    // AD Connector directory. See:
+    // https://docs.aws.amazon.com/directoryservice/latest/admin-guide/prereq_connector.html
+    provisionerFn.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'ec2:AuthorizeSecurityGroupEgress',
+        'ec2:AuthorizeSecurityGroupIngress',
+        'ec2:CreateNetworkInterface',
+        'ec2:CreateSecurityGroup',
+        'ec2:DeleteNetworkInterface',
+        'ec2:DeleteSecurityGroup',
+        'ec2:DescribeNetworkInterfaces',
+        'ec2:DescribeSubnets',
+        'ec2:DescribeVpcs',
+        'ec2:DescribeSecurityGroups',
+        'ec2:DetachNetworkInterface',
+        'ec2:ModifyNetworkInterfaceAttribute',
+        'ec2:RevokeSecurityGroupEgress',
+        'ec2:RevokeSecurityGroupIngress',
+      ],
+      resources: ['*'],
+    }));
 
     // Match the pre-existing convention: use two subnets in different AZs.
     if (privateSubnets.length < 2) {
