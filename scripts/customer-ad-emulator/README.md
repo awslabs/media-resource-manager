@@ -21,7 +21,9 @@ outputs and validate the end-to-end flow.
 
 Deployed to the caller-supplied VPC + subnet:
 
-- Single Windows Server 2022 t3.medium EC2 instance
+- Single Windows Server 2022 m5.xlarge EC2 instance (4 vCPU / 16 GB RAM,
+  matches AWS Managed AD Enterprise sizing — sized so `Install-ADDSForest`
+  never hits CPU-credit or memory pressure)
 - Security group with AD ports open FROM a caller-supplied SG (typically
   MRM's workstation SG)
 - IAM role with `AmazonSSMManagedInstanceCore` for SSM Run Command
@@ -70,7 +72,7 @@ The script will:
    3268, 3269, 49152-65535) open from the caller-supplied MRM workstation SG
 2. Create an IAM role with `AmazonSSMManagedInstanceCore`
 3. Create four Secrets Manager secrets (see list above)
-4. Launch a Windows Server 2022 t3.medium instance
+4. Launch a Windows Server 2022 m5.xlarge instance
 5. Wait for the instance to boot and SSM agent to register (~5 min)
 6. Send SSM commands to install the AD DS role and promote to first DC in a
    new forest (~15 min including reboot)
@@ -123,7 +125,7 @@ A fresh MRM deploy with those values will:
 
 ## Cost
 
-- EC2 t3.medium Windows on-demand: ~$0.10/hour (US regions)
+- EC2 m5.xlarge Windows on-demand: ~$0.38/hour (US regions)
 - EBS gp3 30 GB: negligible
 - Secrets Manager: $0.40/month per secret × 4 = negligible
 - SSM commands: free

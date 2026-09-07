@@ -53,7 +53,7 @@ DEFAULT_NETBIOS_NAME = "CUSTOMER"
 DEFAULT_ADMIN_GROUP_NAME = "Studio-Admins-Test"
 DEFAULT_SERVICE_ACCOUNT_NAME = "MRMServiceAccount"
 DEFAULT_TEST_USER_NAME = "teststudio"
-DEFAULT_INSTANCE_TYPE = "t3.medium"
+DEFAULT_INSTANCE_TYPE = "m5.xlarge"
 
 # AWS-published SSM parameter that always resolves to the latest Windows
 # Server 2022 English Full Base AMI in the current region.
