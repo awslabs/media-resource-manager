@@ -100,6 +100,48 @@ We recommend creating a **Budget through AWS Cost Explorer** to help manage cost
 
 **Recommended**: Deploy using the CloudFormation template. No local tools required.
 
+### Prerequisites
+
+Before deploying, check for account-level controls that can block the internet-facing
+components MRM provisions (the DCV Connection Gateway NLB, the CloudFront frontend
+distribution, and the API Gateway endpoint):
+
+- **VPC Block Public Access (BPA)** — if enabled in `block-ingress` mode on the target
+  account/region, inbound internet traffic to your VPC is blocked and the DCV Connection
+  Gateway NLB will be unreachable, showing up client-side as "endpoint is unreachable" in
+  the DCV Viewer. Some organizations enable this by default on newly created accounts as
+  a preventive security guardrail, so a fresh account may already have BPA on.
+
+  Check the setting:
+
+  ```bash
+  aws ec2 describe-vpc-block-public-access-options --region <region>
+  ```
+
+  If it reports `"InternetGatewayBlockMode": "block-ingress"`, add an exclusion for the
+  MRM VPC (or, for tighter blast radius, only the public subnets hosting the DCV
+  Connection Gateway NLB):
+
+  ```bash
+  # VPC-level (simplest — fine for test/dev accounts)
+  aws ec2 create-vpc-block-public-access-exclusion \
+    --vpc-id <mrm-vpc-id> \
+    --internet-gateway-exclusion-mode allow-bidirectional \
+    --region <region>
+
+  # Subnet-level (recommended for prod — only the DCV public subnets)
+  for SUBNET in <dcv-public-subnet-1> <dcv-public-subnet-2> <dcv-public-subnet-3>; do
+    aws ec2 create-vpc-block-public-access-exclusion \
+      --subnet-id $SUBNET \
+      --internet-gateway-exclusion-mode allow-bidirectional \
+      --region <region>
+  done
+  ```
+
+  Exclusions are self-service — no ticket or approval needed provided the account owner
+  can call the API (`ExclusionsAllowed: allowed`). Exclusions take effect within a couple
+  of minutes.
+
 ### One-Click Deployment (CloudFormation + CodeBuild)
 
 1. Click the button below to launch the deployment pipeline:
