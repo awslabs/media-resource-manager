@@ -9,7 +9,8 @@ emulates that for sandbox testing.
 
 Usage:
     python3 emulator.py create --vpc-id vpc-XXX --subnet-id subnet-XXX \\
-        --allow-from-sg sg-XXX [--domain-name customer.internal]
+        (--allow-from-sg sg-XXX | --allow-from-cidr 10.0.0.0/16) \\
+        [--domain-name customer.internal]
 
     python3 emulator.py teardown
 
@@ -174,12 +175,26 @@ def create_secret(clients, name: str, description: str, username: str) -> tuple[
         return arn, password
 
 
-def create_security_group(clients, vpc_id: str, allow_from_sg: str) -> str:
-    """Create the SG allowing AD ports from the caller-supplied MRM SG."""
+def create_security_group(clients, vpc_id: str, allow_from_sg: str | None,
+                          allow_from_cidr: str | None) -> str:
+    """Create the SG allowing AD ports from the caller-supplied source(s).
+
+    At least one of allow_from_sg or allow_from_cidr must be provided. Both
+    may be provided (rules are additive).
+    """
+    if not allow_from_sg and not allow_from_cidr:
+        raise ValueError("Must provide at least one of allow_from_sg or allow_from_cidr")
+
     sg_name = "mrm-customer-ad-emulator-sg"
+    sources_desc = []
+    if allow_from_sg:
+        sources_desc.append(f"sg {allow_from_sg}")
+    if allow_from_cidr:
+        sources_desc.append(f"cidr {allow_from_cidr}")
+
     resp = clients["ec2"].create_security_group(
         GroupName=sg_name,
-        Description="AD ports open to MRM workstation SG (test emulator)",
+        Description=f"AD ports open to {', '.join(sources_desc)} (test emulator)",
         VpcId=vpc_id,
         TagSpecifications=[{
             "ResourceType": "security-group",
@@ -209,17 +224,18 @@ def create_security_group(clients, vpc_id: str, allow_from_sg: str) -> str:
         ("tcp", 3269, 3269, "Global catalog LDAPS"),
         ("tcp", 49152, 65535, "RPC dynamic ports"),
     ]
-    permissions = [
-        {
-            "IpProtocol": proto,
-            "FromPort": from_p,
-            "ToPort": to_p,
-            "UserIdGroupPairs": [{"GroupId": allow_from_sg, "Description": desc}],
-        }
-        for proto, from_p, to_p, desc in ad_ports
-    ]
+
+    def build_rule(proto: str, from_p: int, to_p: int, desc: str) -> dict:
+        rule = {"IpProtocol": proto, "FromPort": from_p, "ToPort": to_p}
+        if allow_from_sg:
+            rule["UserIdGroupPairs"] = [{"GroupId": allow_from_sg, "Description": desc}]
+        if allow_from_cidr:
+            rule["IpRanges"] = [{"CidrIp": allow_from_cidr, "Description": desc}]
+        return rule
+
+    permissions = [build_rule(proto, from_p, to_p, desc) for proto, from_p, to_p, desc in ad_ports]
     clients["ec2"].authorize_security_group_ingress(GroupId=sg_id, IpPermissions=permissions)
-    log_ok(f"Authorized {len(permissions)} AD ports from {allow_from_sg}")
+    log_ok(f"Authorized {len(permissions)} AD ports from {', '.join(sources_desc)}")
     return sg_id
 
 
@@ -436,6 +452,11 @@ def get_instance_private_ip(clients, instance_id: str) -> str:
 
 
 def cmd_create(args) -> int:
+    # Validate ingress source up front, before any AWS calls.
+    if not args.allow_from_sg and not args.allow_from_cidr:
+        log_err("Must provide at least one of --allow-from-sg or --allow-from-cidr")
+        return 2
+
     clients = build_clients(args.profile, args.region)
     identity = clients["sts"].get_caller_identity()
     log(f"AWS account: {identity['Account']}, arn: {identity['Arn']}")
@@ -491,7 +512,7 @@ def cmd_create(args) -> int:
         # ─── Security group ──────────────────────────────────────────────
         log("=== Creating security group ===")
         state["security_group_id"] = create_security_group(
-            clients, args.vpc_id, args.allow_from_sg
+            clients, args.vpc_id, args.allow_from_sg, args.allow_from_cidr
         )
         save_state(state)
 
@@ -720,8 +741,13 @@ def main() -> int:
     p_create = sub.add_parser("create", help="Create the emulator")
     p_create.add_argument("--vpc-id", required=True, help="Existing VPC ID (typically MRM's)")
     p_create.add_argument("--subnet-id", required=True, help="Private subnet in the VPC")
-    p_create.add_argument("--allow-from-sg", required=True,
-                          help="Security group ID to grant AD-port ingress from (typically MRM's workstation SG)")
+    p_create.add_argument("--allow-from-sg", default=None,
+                          help="Security group ID to grant AD-port ingress from (typically MRM's workstation SG). "
+                               "At least one of --allow-from-sg or --allow-from-cidr required.")
+    p_create.add_argument("--allow-from-cidr", default=None,
+                          help="CIDR block to grant AD-port ingress from (typically the MRM VPC CIDR, "
+                               "e.g. 10.1.0.0/16). Broader than --allow-from-sg — use when the workstation "
+                               "SG doesn't exist yet.")
     p_create.add_argument("--domain-name", default=DEFAULT_DOMAIN_NAME,
                           help=f"AD domain name (default: {DEFAULT_DOMAIN_NAME})")
     p_create.add_argument("--netbios-name", default=DEFAULT_NETBIOS_NAME,
