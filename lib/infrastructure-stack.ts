@@ -14,6 +14,13 @@ export interface InfrastructureStackProps extends cdk.StackProps {
   productName: string;
   pascalCaseName: string;
   acronym: string;
+  /**
+   * Synth-time gate for creating Cognito CDK resources. When `false`,
+   * AuthConstruct skips the User Pool, Identity Pool, custom resources, and
+   * all Cognito SSM parameters — the frontend uses LDAP-only login. Defaults
+   * to `true`. See issue #27 for the full auth-flexibility plan.
+   */
+  useCognitoAuth?: boolean;
   adminGroupName?: string;
   identityCenterSyncGroups?: string;
   hostnamePrefix?: string;
@@ -43,12 +50,18 @@ export class InfrastructureStack extends cdk.Stack {
       suppressTemplateIndentation: true, // Reduce template size for large stacks
     });
 
-    // Parameter for authentication mode
+    // CloudFormation parameter for authentication mode.
+    // NOTE: This CFN parameter is a *runtime* mirror only — it is stored in
+    // SSM below and read by the frontend/backend Lambdas to pick the login
+    // flow. The synth-time gate for actually creating vs skipping Cognito
+    // CDK resources is `props.useCognitoAuth`, which is loaded at CDK synth
+    // from parameters.json / context in `bin/media-resource-manager.ts`. Keep
+    // the two in sync in your parameters.json.
     const useCognitoAuth = new cdk.CfnParameter(this, 'UseCognitoAuth', {
       type: 'String',
       default: 'true',
       allowedValues: ['true', 'false'],
-      description: 'Use Cognito authentication (true) or AWS Managed AD (false)',
+      description: 'Use Cognito authentication (true) or AWS Managed AD (false). Must match the useCognitoAuth value in parameters.json.',
     });
 
     // Parameter for admin group name (only used with Cognito auth)
@@ -90,6 +103,7 @@ export class InfrastructureStack extends cdk.Stack {
       acronym: props.acronym,
       productName: props.productName,
       encryptionKey: this.security.dataEncryptionKey,
+      useCognitoAuth: props.useCognitoAuth,
       adminGroupName: props.adminGroupName,
       frontendUrl: props.frontendUrl,
       adminEmails: props.adminEmails,
