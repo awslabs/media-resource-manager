@@ -742,17 +742,23 @@ Resources:
                 # Apply runtime parameter overrides
                 # Customers can override any parameter at build time in two ways:
                 #
-                # 1. JSON overrides via MRM_PARAM_OVERRIDES (recommended for ad-hoc changes):
-                #    aws codebuild start-build --project-name <name> \
-                #      --environment-variables-override \
-                #        name=MRM_PARAM_OVERRIDES,value='{"FrontendUrl":"https://new-url.com"}',type=PLAINTEXT
+                # Precedence (most specific wins):
                 #
-                # 2. Update pipeline stack parameters (for persistent changes via console):
-                #    CloudFormation → Update stack → set FrontendUrl, AdminGroupName, etc.
-                #    Then start a new build. The env vars are compared against SSM config
-                #    and any differences are applied.
+                #   1. MRM_PARAM_OVERRIDES (per-build JSON) — highest priority
+                #        aws codebuild start-build --project-name <name> \
+                #          --environment-variables-override \
+                #            name=MRM_PARAM_OVERRIDES,value='{"FrontendUrl":"https://new-url.com"}',type=PLAINTEXT
+                #      Use for one-off, ad-hoc changes on a single build. Applied
+                #      LAST so it wins over any persistent stack-parameter value.
                 #
-                # Overrides are saved to SSM in post_build, so they persist across builds.
+                #   2. Pipeline stack parameters (persistent, from CloudFormation) — baseline
+                #      Update via: CloudFormation → Update stack → set FrontendUrl, AdminGroupName, etc.
+                #      Then start a new build. The corresponding MRM_* env var is
+                #      compared against SSM config and any difference is applied.
+                #
+                # Both writes to parameters.json are then saved to SSM in post_build,
+                # so a per-build JSON override persists for subsequent builds unless
+                # a stack parameter or another JSON override changes it.
                 - |
                   cd "$PROJECT_DIR"
                   if [ -f parameters.json ]; then
@@ -761,30 +767,10 @@ Resources:
                       const params = JSON.parse(fs.readFileSync('parameters.json'));
                       let changed = false;
 
-                      // Method 1: JSON overrides via MRM_PARAM_OVERRIDES
-                      const jsonOverrides = process.env.MRM_PARAM_OVERRIDES || '{}';
-                      if (jsonOverrides !== '{}') {
-                        const overrides = JSON.parse(jsonOverrides);
-                        for (const [paramKey, val] of Object.entries(overrides)) {
-                          const p = params.find(p => p.ParameterKey === paramKey);
-                          if (p) {
-                            if (p.ParameterValue !== val) {
-                              console.log('Override (JSON): ' + paramKey + ' = ' + (paramKey.includes('Secret') ? '***' : val));
-                              p.ParameterValue = val;
-                              changed = true;
-                            }
-                          } else {
-                            // Key doesn't exist in saved config — add it
-                            console.log('Adding new parameter (JSON): ' + paramKey + ' = ' + (paramKey.includes('Secret') ? '***' : val));
-                            params.push({ ParameterKey: paramKey, ParameterValue: val });
-                            changed = true;
-                          }
-                        }
-                      }
-
-                      // Method 2: Individual env vars from pipeline stack parameters
-                      // Only apply if the env var has a non-empty value that differs from SSM config.
-                      // Empty env vars are ignored (they represent CloudFormation defaults, not intentional overrides).
+                      // Method 2 (baseline): Individual env vars from persistent pipeline stack parameters.
+                      // Applied FIRST to establish the stack-configured baseline. Only applies
+                      // when the env var is non-empty; empty values represent CloudFormation
+                      // defaults, not intentional overrides.
                       const envMap = {
                         MRM_VPC_ID: 'VpcId',
                         MRM_VPC_CIDR: 'VpcCidr',
@@ -815,15 +801,39 @@ Resources:
                         const p = params.find(p => p.ParameterKey === paramKey);
                         if (p) {
                           if (p.ParameterValue !== val) {
-                            console.log('Override (env): ' + paramKey + ' = ' + (paramKey.includes('Secret') ? '***' : val));
+                            console.log('Stack param: ' + paramKey + ' = ' + (paramKey.includes('Secret') ? '***' : val));
                             p.ParameterValue = val;
                             changed = true;
                           }
                         } else {
                           // Key doesn't exist in saved config — add it (new parameter)
-                          console.log('Adding new parameter (env): ' + paramKey + ' = ' + (paramKey.includes('Secret') ? '***' : val));
+                          console.log('Adding stack param: ' + paramKey + ' = ' + (paramKey.includes('Secret') ? '***' : val));
                           params.push({ ParameterKey: paramKey, ParameterValue: val });
                           changed = true;
+                        }
+                      }
+
+                      // Method 1 (per-build): JSON overrides via MRM_PARAM_OVERRIDES.
+                      // Applied LAST so per-build overrides win over persistent stack
+                      // parameters — matches the principle that a more specific,
+                      // deliberately supplied per-build input outranks a persistent default.
+                      const jsonOverrides = process.env.MRM_PARAM_OVERRIDES || '{}';
+                      if (jsonOverrides !== '{}') {
+                        const overrides = JSON.parse(jsonOverrides);
+                        for (const [paramKey, val] of Object.entries(overrides)) {
+                          const p = params.find(p => p.ParameterKey === paramKey);
+                          if (p) {
+                            if (p.ParameterValue !== val) {
+                              console.log('Override (JSON): ' + paramKey + ' = ' + (paramKey.includes('Secret') ? '***' : val));
+                              p.ParameterValue = val;
+                              changed = true;
+                            }
+                          } else {
+                            // Key doesn't exist in saved config — add it
+                            console.log('Adding new parameter (JSON): ' + paramKey + ' = ' + (paramKey.includes('Secret') ? '***' : val));
+                            params.push({ ParameterKey: paramKey, ParameterValue: val });
+                            changed = true;
+                          }
                         }
                       }
 
