@@ -90,6 +90,17 @@ const getContextOrParameter = (key: string): string | undefined => {
 // Get product name from context with fallback
 const productName = app.node.tryGetContext('productName') || 'Media Resource Manager';
 
+// Authentication mode gate — determines at CDK synth time whether Cognito
+// resources should be created at all. When `useCognitoAuth=false`, the whole
+// Cognito stack (User Pool, Identity Pool, custom resources, IAM roles) is
+// omitted from the CloudFormation template. This is required for AWS accounts
+// where Cognito is denied by a service control policy, and enables LDAP-only
+// deployments backed entirely by Active Directory. The corresponding CFN
+// parameter is still declared in InfrastructureStack for runtime SSM mirroring
+// (the frontend reads it from SSM to pick its login flow), but that mirror is
+// data, not a synth-time control. See issue #27.
+const useCognitoAuth = getContextOrParameter('useCognitoAuth') !== 'false';
+
 // Utility functions for different naming conventions
 const createNamingConventions = (name: string) => {
   // Remove extra spaces and trim
@@ -131,6 +142,7 @@ const infrastructureStack = new InfrastructureStack(app, `${naming.acronym}-Infr
   productName: naming.displayName,
   pascalCaseName: naming.pascalCase,
   acronym: naming.acronym,
+  useCognitoAuth,
   adminGroupName: getContextOrParameter('adminGroupName'),
   identityCenterSyncGroups: getContextOrParameter('identityCenterSyncGroups'),
   hostnamePrefix: getContextOrParameter('hostnamePrefix'),
@@ -301,7 +313,10 @@ const storageStack = new StorageStack(app, `${naming.acronym}-Storage`, {
   pascalCaseName: naming.pascalCase,
   acronym: naming.acronym,
   dataEncryptionKey: infrastructureStack.security.dataEncryptionKey,
-  authenticatedRoleArn: infrastructureStack.auth.authenticatedRole.roleArn,
+  // In LDAP-only mode the Cognito Identity Pool authenticated role does not
+  // exist, so the MediaBucket-to-Cognito grant is skipped inside StorageStack
+  // via the `if (props.authenticatedRoleArn)` guard already there.
+  authenticatedRoleArn: infrastructureStack.auth.authenticatedRole?.roleArn,
 });
 storageStack.addDependency(infrastructureStack);
 storageStack.addDependency(dcvStack);
@@ -364,6 +379,7 @@ const apiStack = new ApiStack(app, `${naming.acronym}-Api`, {
   productName: naming.displayName,
   pascalCaseName: naming.pascalCase,
   acronym: naming.acronym,
+  useCognitoAuth,
   userTable: infrastructureStack.database.userTable,
   workstationTable: infrastructureStack.database.workstationTable,
   amiTable: infrastructureStack.database.amiTable,

@@ -62,7 +62,7 @@
   {
     "ParameterKey": "UseCognitoAuth",
     "ParameterValue": "true",
-    "Description": "Set to 'true' for Cognito/SAML auth, 'false' for LDAP."
+    "Description": "'true' creates a Cognito User Pool + Identity Pool and uses Cognito/SAML auth for the web app. 'false' skips all Cognito CDK resources at synth time; the frontend uses LDAP-only login backed by Active Directory. Required to be 'false' in AWS accounts where Cognito is denied by a service control policy."
   },
   {
     "ParameterKey": "AdminGroupName",

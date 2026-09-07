@@ -14,6 +14,17 @@ export interface AuthConstructProps {
   acronym: string;
   productName?: string;
   encryptionKey?: kms.IKey;
+  /**
+   * When `false`, skip creation of ALL Cognito CDK resources: User Pool,
+   * User Pool Client, User Pool Domain, Identity Pool, authenticated IAM
+   * role, pre-token-generation trigger, PreserveSamlProviders custom
+   * resource, CreateAdminGroups custom resource, and Cognito SSM parameters.
+   * Only the LDAP layer is created. Defaults to `true` — today's behavior.
+   *
+   * Required for deployments in AWS accounts that deny `cognito-idp:*` or
+   * `cognito-identity:*` via a service control policy.
+   */
+  useCognitoAuth?: boolean;
   adminGroupName?: string;
   frontendUrl?: string;
   adminEmails?: string;
@@ -27,17 +38,52 @@ export interface AuthConstructProps {
 
 export class AuthConstruct extends Construct {
   public readonly ldapLayer: lambda.LayerVersion;
-  public readonly userPool: cognito.IUserPool;
-  public readonly userPoolClient: cognito.IUserPoolClient;
+  /** User Pool. Undefined when `useCognitoAuth=false`. */
+  public readonly userPool?: cognito.IUserPool;
+  /** User Pool Client. Undefined when `useCognitoAuth=false`. */
+  public readonly userPoolClient?: cognito.IUserPoolClient;
+  /** User Pool Domain. Undefined when `useCognitoAuth=false` OR when using an external SSO pool. */
   public readonly userPoolDomain: cognito.UserPoolDomain | undefined;
-  public readonly identityPool: cognito.CfnIdentityPool;
-  public readonly authenticatedRole: iam.Role;
-  /** True when using an externally-managed SSO User Pool */
+  /** Identity Pool. Undefined when `useCognitoAuth=false`. */
+  public readonly identityPool?: cognito.CfnIdentityPool;
+  /** Authenticated IAM role for the Identity Pool. Undefined when `useCognitoAuth=false`. */
+  public readonly authenticatedRole?: iam.Role;
+  /** True when using an externally-managed SSO User Pool. Always false when `useCognitoAuth=false`. */
   public readonly isExternalSsoPool: boolean;
 
   constructor(scope: Construct, id: string, props: AuthConstructProps) {
     super(scope, id);
 
+    // ─── LDAP layer is always created (needed for workstation authentication) ─
+    // Shared LDAP client library, used by the ldap-auth Lambda regardless of
+    // whether Cognito is present.
+    this.ldapLayer = new lambda.LayerVersion(this, 'LdapLayer', {
+      code: lambda.Code.fromAsset('layers/ldap'),
+      compatibleRuntimes: [lambda.Runtime.NODEJS_22_X],
+      description: 'LDAP client library for authentication',
+    });
+
+    new ssm.StringParameter(this, 'LdapLayerArnParameter', {
+      parameterName: `/${props.pascalCaseName}/Auth/LdapLayerArn`,
+      stringValue: this.ldapLayer.layerVersionArn,
+      description: 'LDAP Layer ARN for workstation authentication'
+    });
+
+    // ─── Early return in LDAP-only mode ──────────────────────────────────────
+    // When useCognitoAuth is explicitly false, no Cognito CDK resources are
+    // created. This is the required path for accounts under a Cognito-deny
+    // SCP. All authentication flows through /auth/ldap and the JWT authorizer
+    // routes LDAP-issued tokens through its HS256 path (see jwt-authorizer).
+    if (props.useCognitoAuth === false) {
+      this.isExternalSsoPool = false;
+      // No User Pool, no Identity Pool, no CFN custom resources, no Cognito
+      // SSM parameters. Downstream stacks handle these fields being undefined
+      // via optional chaining and the `if (props.authenticatedRoleArn)`
+      // guard in storage-stack.ts.
+      return;
+    }
+
+    // ─── Cognito path (default) ──────────────────────────────────────────────
     const useExternalSso = !!(props.ssoUserPoolArn && props.ssoUserPoolClientId);
     this.isExternalSsoPool = useExternalSso;
 
@@ -122,18 +168,7 @@ export class AuthConstruct extends Construct {
         description: 'Cognito Identity Pool ID for direct AWS service access',
       });
 
-      // LDAP Layer (still needed for workstation auth regardless of SSO mode)
-      this.ldapLayer = new lambda.LayerVersion(this, 'LdapLayer', {
-        code: lambda.Code.fromAsset('layers/ldap'),
-        compatibleRuntimes: [lambda.Runtime.NODEJS_22_X],
-        description: 'LDAP client library for authentication',
-      });
-
-      new ssm.StringParameter(this, 'LdapLayerArnParameter', {
-        parameterName: `/${props.pascalCaseName}/Auth/LdapLayerArn`,
-        stringValue: this.ldapLayer.layerVersionArn,
-        description: 'LDAP Layer ARN for workstation authentication',
-      });
+      // LDAP Layer is created unconditionally at the top of this constructor.
 
       return; // Skip the rest — no local pool creation needed
     }
@@ -360,19 +395,7 @@ export class AuthConstruct extends Construct {
 
     // Note: Okta SAML Identity Provider created manually via CLI
 
-    // LDAP Layer for Lambda functions (existing)
-    this.ldapLayer = new lambda.LayerVersion(this, 'LdapLayer', {
-      code: lambda.Code.fromAsset('layers/ldap'),
-      compatibleRuntimes: [lambda.Runtime.NODEJS_22_X],
-      description: 'LDAP client library for authentication',
-    });
-
-    // Store LDAP Layer ARN in SSM parameter for reference
-    new ssm.StringParameter(this, 'LdapLayerArnParameter', {
-      parameterName: `/${props.pascalCaseName}/Auth/LdapLayerArn`,
-      stringValue: this.ldapLayer.layerVersionArn,
-      description: 'LDAP Layer ARN for workstation authentication'
-    });
+    // LDAP Layer is created unconditionally at the top of this constructor.
 
     // Auto-create admin group(s) and initial admin users in Cognito User Pool
     // AdminGroupName can be comma-separated (e.g., "MRM-Admins,14b814d8-...,us-east-1_xxx_Okta")
