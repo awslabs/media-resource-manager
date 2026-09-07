@@ -50,18 +50,26 @@ export class InfrastructureStack extends cdk.Stack {
       suppressTemplateIndentation: true, // Reduce template size for large stacks
     });
 
-    // CloudFormation parameter for authentication mode.
-    // NOTE: This CFN parameter is a *runtime* mirror only — it is stored in
-    // SSM below and read by the frontend/backend Lambdas to pick the login
-    // flow. The synth-time gate for actually creating vs skipping Cognito
-    // CDK resources is `props.useCognitoAuth`, which is loaded at CDK synth
-    // from parameters.json / context in `bin/media-resource-manager.ts`. Keep
-    // the two in sync in your parameters.json.
-    const useCognitoAuth = new cdk.CfnParameter(this, 'UseCognitoAuth', {
+    // Synth-time literal derived from props. This is the single source of
+    // truth for what value ends up in SSM (and therefore what the frontend
+    // uses to pick its login flow). Do NOT read from the CFN parameter
+    // below when writing to SSM — the CFN parameter is a token that is only
+    // resolved at deploy time, and if the operator forgets to pass the
+    // corresponding CFN parameter override, its default silently diverges
+    // from the synth-time gate and the frontend loads the wrong login form.
+    const useCognitoAuthValue = props.useCognitoAuth === false ? 'false' : 'true';
+
+    // CloudFormation parameter kept for backward compatibility with
+    // deployment tooling that still sets it via ParameterOverrides. Its
+    // default is synced to the synth-time decision so an operator who
+    // *doesn't* override it sees the correct value in the CFN console.
+    // The SSM parameter below is bound to `useCognitoAuthValue`, not to
+    // this CFN parameter — see comment above.
+    new cdk.CfnParameter(this, 'UseCognitoAuth', {
       type: 'String',
-      default: 'true',
+      default: useCognitoAuthValue,
       allowedValues: ['true', 'false'],
-      description: 'Use Cognito authentication (true) or AWS Managed AD (false). Must match the useCognitoAuth value in parameters.json.',
+      description: 'Read-only mirror of the synth-time useCognitoAuth flag. To change the auth mode, edit parameters.json (or set cdk context useCognitoAuth) and re-synth; do not override this CFN parameter alone.',
     });
 
     // Parameter for admin group name (only used with Cognito auth)
@@ -154,10 +162,12 @@ export class InfrastructureStack extends cdk.Stack {
       }
     }
 
-    // Store authentication mode in SSM for frontend config
+    // Store authentication mode in SSM for frontend config. Bound to the
+    // synth-time literal, NOT the CFN parameter, so this can never drift
+    // from what the synth-time gate did (see comment on useCognitoAuthValue).
     new cdk.aws_ssm.StringParameter(this, 'AuthModeParameter', {
       parameterName: `/${props.pascalCaseName}/Auth/UseCognitoAuth`,
-      stringValue: useCognitoAuth.valueAsString,
+      stringValue: useCognitoAuthValue,
       description: 'Authentication mode: true for Cognito, false for AWS Managed AD',
     });
 
