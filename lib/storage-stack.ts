@@ -590,6 +590,10 @@ export class StorageStack extends cdk.Stack {
           this, `/${props.pascalCaseName}/DCV/InstanceRoleArn`
         ),
         AWS_ACCOUNT_ID: this.account,
+        // PASCAL_CASE_NAME is used by /storage/config to look up the private
+        // subnet AZ list so the FSx-Windows Single-AZ picker is a dropdown of
+        // AZs this deployment actually has, not free-form text.
+        PASCAL_CASE_NAME: props.pascalCaseName,
       },
     });
 
@@ -598,6 +602,17 @@ export class StorageStack extends cdk.Stack {
       effect: iam.Effect.ALLOW,
       actions: ['s3:ListAllMyBuckets', 's3:GetBucketLocation'],
       resources: ['*'],
+    }));
+
+    // Allow /storage/config to read the private subnet AZ SSM parameters so
+    // the FSx-Windows Single-AZ AZ picker can be populated with the real AZs
+    // in this deployment rather than free-form text.
+    this.functions.listS3Buckets.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ssm:GetParameter'],
+      resources: [
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/Network/PrivateSubnet*`,
+      ],
     }));
     const stateMachineDefinition = {
       Comment: "FSx Storage Creation State Machine with Native Service Integrations",

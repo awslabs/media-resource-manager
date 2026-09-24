@@ -489,24 +489,28 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
 
   // Fetch S3 buckets and config when Mountpoint S3 is selected
   useEffect(() => {
-    if (storageType === 'mountpoint-s3' && showCreateModal) {
-      const fetchS3Data = async () => {
-        setS3BucketsLoading(true);
-        try {
-          const [buckets, config] = await Promise.all([
-            listStorageS3Buckets(),
-            getStorageConfig(),
-          ]);
-          setS3Buckets(buckets);
-          setStorageConfig(config);
-        } catch (error) {
-          console.error('Error fetching S3 data:', error);
-        } finally {
-          setS3BucketsLoading(false);
-        }
-      };
-      fetchS3Data();
-    }
+    if (!showCreateModal) return;
+    // Fetch storage config for any FSx or mountpoint-s3 storage type - the
+    // config carries the deployment's private-subnet AZ list (used by the
+    // FSx-Windows Single-AZ picker) alongside the workstation role ARN
+    // (used by the mountpoint-s3 cross-account policy generator). S3 bucket
+    // listing is only relevant for mountpoint-s3.
+    const needsS3Buckets = storageType === 'mountpoint-s3';
+    const fetchData = async () => {
+      setS3BucketsLoading(true);
+      try {
+        const configPromise = getStorageConfig();
+        const bucketsPromise = needsS3Buckets ? listStorageS3Buckets() : Promise.resolve<S3Bucket[]>([]);
+        const [buckets, config] = await Promise.all([bucketsPromise, configPromise]);
+        if (needsS3Buckets) setS3Buckets(buckets);
+        setStorageConfig(config);
+      } catch (error) {
+        console.error('Error fetching storage config:', error);
+      } finally {
+        setS3BucketsLoading(false);
+      }
+    };
+    fetchData();
   }, [storageType, showCreateModal]);
 
   // Calculate minimum volume size based on HA pairs (100 GiB * 8 constituents * haPairs)
@@ -793,10 +797,20 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
                   <Form.Item
                     name={['configuration', 'availabilityZone']}
                     label="Availability Zone"
-                    tooltip="Enter the AZ (for example us-east-1a) where the file system should be placed. Must match one of the private subnets provisioned in this deployment."
+                    tooltip="AZ where the file system will be placed. Only AZs this deployment has private subnets in are offered."
                     rules={[{ required: true, message: 'Availability Zone is required for Single-AZ' }]}
                   >
-                    <Input placeholder="us-east-1a" />
+                    {storageConfig?.availabilityZones && storageConfig.availabilityZones.length > 0 ? (
+                      <Select
+                        placeholder="Select an Availability Zone"
+                        options={storageConfig.availabilityZones.map((az) => ({ label: az, value: az }))}
+                      />
+                    ) : (
+                      // Fallback for deployments that predate the AZ SSM
+                      // parameters or where the config lookup failed. The
+                      // backend still validates the value against SSM.
+                      <Input placeholder="us-east-1a" />
+                    )}
                   </Form.Item>
                 )}
 

@@ -15,6 +15,9 @@ export interface S3Bucket {
 export interface StorageConfig {
   workstationRoleArn: string;
   accountId: string;
+  /** AZs this deployment has private subnets in, used to populate the
+   *  FSx-Windows Single-AZ AZ picker. Empty on pre-#29 deployments. */
+  availabilityZones?: string[];
 }
 
 // Helper to get auth headers
