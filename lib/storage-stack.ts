@@ -434,8 +434,22 @@ export class StorageStack extends cdk.Stack {
       environmentEncryption: props.dataEncryptionKey,
       environment: {
         STORAGE_TABLE_NAME: props.storageTable.tableName,
+        // PASCAL_CASE_NAME is used to look up /{Pascal}/Network/PrivateSubnet*
+        // SSM parameters when validating a Single-AZ FSx-Windows availability
+        // zone request against the AZs this deployment actually has.
+        PASCAL_CASE_NAME: props.pascalCaseName,
       },
     });
+    // Allow the create-storage Lambda to read /{Pascal}/Network/PrivateSubnet*
+    // parameters so it can validate the availabilityZone in a Single-AZ
+    // fsx-windows request against the AZs this deployment actually has.
+    this.functions.createStorage.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ssm:GetParameter'],
+      resources: [
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/Network/PrivateSubnet*`,
+      ],
+    }));
 
     // Update Storage Function
     this.functions.updateStorage = new lambda.Function(this, 'UpdateStorageFunction', {

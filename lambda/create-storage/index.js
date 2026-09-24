@@ -5,6 +5,7 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
 const { SFNClient, StartExecutionCommand } = require('@aws-sdk/client-sfn');
 const { S3Client, HeadBucketCommand } = require('@aws-sdk/client-s3');
+const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const crypto = require('crypto');
 const { requireAdmin } = require('./authz');
 
@@ -12,6 +13,7 @@ const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
 const sfn = new SFNClient({ region: process.env.AWS_REGION });
 const s3 = new S3Client({ region: process.env.AWS_REGION });
+const ssm = new SSMClient({ region: process.env.AWS_REGION });
 
 const PRIMARY_REGION = process.env.AWS_REGION;
 const REGIONAL_HUBS_TABLE = process.env.REGIONAL_HUBS_TABLE_NAME;
@@ -24,6 +26,36 @@ const corsHeaders = {
 
 function generateStorageId() {
   return crypto.randomUUID();
+}
+
+/**
+ * List the Availability Zones this deployment has private subnets in, by
+ * reading /{pascalCaseName}/Network/PrivateSubnet{n}/AZ for each subnet.
+ * Used by the create-storage handler to fast-fail a Single-AZ FSx Windows
+ * request whose availabilityZone does not match any subnet in the deployment.
+ * Returns an empty array if the deployment predates the AZ publication (the
+ * generate-fsx-template Lambda will fall back to PrivateSubnet1 in that case).
+ */
+async function listPrivateSubnetAzs(pascalCaseName) {
+  try {
+    const countResp = await ssm.send(new GetParameterCommand({
+      Name: `/${pascalCaseName}/Network/PrivateSubnetCount`
+    }));
+    const count = parseInt(countResp.Parameter.Value, 10);
+    const azs = [];
+    for (let i = 1; i <= count; i++) {
+      try {
+        const r = await ssm.send(new GetParameterCommand({
+          Name: `/${pascalCaseName}/Network/PrivateSubnet${i}/AZ`
+        }));
+        if (r.Parameter && r.Parameter.Value) azs.push(r.Parameter.Value);
+      } catch (_) { /* skip */ }
+    }
+    return azs;
+  } catch (err) {
+    console.warn(`listPrivateSubnetAzs: PrivateSubnetCount lookup failed (${err.name}); AZ validation degraded`);
+    return [];
+  }
 }
 
 /**
@@ -276,7 +308,7 @@ async function createMountpointS3Storage(storageId, data, configuration, created
  */
 async function createFsxWindowsStorage(storageId, data, configuration, createdAt, targetRegion) {
   // Validate FSx-specific fields
-  if (!configuration.ssdStorageCapacity || !configuration.throughputCapacity || !configuration.automaticBackupRetentionPeriod) {
+  if (!configuration.ssdStorageCapacity || !configuration.throughputCapacity || configuration.automaticBackupRetentionPeriod === undefined || configuration.automaticBackupRetentionPeriod === null) {
     return {
       statusCode: 400,
       headers: corsHeaders,
@@ -286,6 +318,68 @@ async function createFsxWindowsStorage(storageId, data, configuration, createdAt
       })
     };
   }
+
+  // ── Resilience + storage type + AZ (issue #29) ──────────────────────────
+  // Both are optional for backward compatibility with pre-#29 callers: the
+  // default (multi-az + SSD, no AZ) is byte-identical to the pre-#29 create
+  // behavior. When either is supplied it is validated strictly - resilience
+  // must be one of two values, storage type one of two, and AZ must resolve
+  // to a private subnet actually provisioned in this deployment.
+  const resilience = (configuration.resilience || 'multi-az').toLowerCase();
+  if (resilience !== 'single-az' && resilience !== 'multi-az') {
+    return {
+      statusCode: 400, headers: corsHeaders,
+      body: JSON.stringify({ success: false, error: "resilience must be 'single-az' or 'multi-az'" })
+    };
+  }
+  const storageType = (configuration.storageType || 'SSD').toUpperCase();
+  if (storageType !== 'SSD' && storageType !== 'HDD') {
+    return {
+      statusCode: 400, headers: corsHeaders,
+      body: JSON.stringify({ success: false, error: "storageType must be 'SSD' or 'HDD'" })
+    };
+  }
+  // HDD has a 2000 GiB floor at the AWS API level; catch it early with a
+  // message that names the real minimum instead of letting CFN reject the
+  // stack ~30s in with an opaque parameter-validation error.
+  if (storageType === 'HDD' && configuration.ssdStorageCapacity < 2000) {
+    return {
+      statusCode: 400, headers: corsHeaders,
+      body: JSON.stringify({
+        success: false,
+        error: `HDD storage requires a minimum capacity of 2000 GiB (got ${configuration.ssdStorageCapacity} GiB). Choose a larger capacity or switch to SSD.`
+      })
+    };
+  }
+  // AZ selection only makes sense for Single-AZ. Reject a stray AZ on
+  // Multi-AZ so we do not silently mislead the user.
+  if (resilience === 'multi-az' && configuration.availabilityZone) {
+    return {
+      statusCode: 400, headers: corsHeaders,
+      body: JSON.stringify({
+        success: false,
+        error: "availabilityZone must not be set when resilience='multi-az' - Multi-AZ file systems span both private subnets automatically"
+      })
+    };
+  }
+  // If Single-AZ + explicit AZ, confirm the AZ is one this deployment
+  // actually has a private subnet in. Fast fail with a helpful message
+  // rather than letting the generate-fsx-template Lambda throw at CFN time.
+  const pascalCaseName = process.env.PASCAL_CASE_NAME || 'MediaResourceManager';
+  if (resilience === 'single-az' && configuration.availabilityZone) {
+    const validAzs = await listPrivateSubnetAzs(pascalCaseName);
+    if (!validAzs.includes(configuration.availabilityZone)) {
+      return {
+        statusCode: 400, headers: corsHeaders,
+        body: JSON.stringify({
+          success: false,
+          error: `Availability Zone '${configuration.availabilityZone}' is not present in this deployment. Valid AZs: ${validAzs.join(', ')}`
+        })
+      };
+    }
+  }
+  configuration.resilience = resilience;
+  configuration.storageType = storageType;
 
   // FSx Windows is only supported in primary region (AD dependency)
   const region = targetRegion || process.env.AWS_REGION;
@@ -302,6 +396,9 @@ async function createFsxWindowsStorage(storageId, data, configuration, createdAt
     storageCapacity: configuration.ssdStorageCapacity,
     throughput: configuration.throughputCapacity,
     backupRetention: configuration.automaticBackupRetentionPeriod,
+    resilience,
+    storageType,
+    availabilityZone: configuration.availabilityZone || null,
     configuration
   };
 
@@ -345,6 +442,9 @@ async function createFsxWindowsStorage(storageId, data, configuration, createdAt
         status: 'initializing',
         platform: 'windows',
         region: region,
+        resilience,
+        storageType,
+        availabilityZone: configuration.availabilityZone || null,
         configuration,
         createdAt
       }
