@@ -53,3 +53,39 @@ export const getStorageConfig = async (): Promise<StorageConfig> => {
   }
   return await response.json();
 };
+
+/** Rates returned by GET /storage/pricing for a single Region. Any leaf may
+ *  be undefined when the Pricing API omits or fails on a given SKU - the
+ *  cost estimator should treat missing rates as "hide this line item"
+ *  rather than substituting a placeholder. */
+export interface FsxWindowsRates {
+  storage: { SSD?: { 'single-az'?: number; 'multi-az'?: number }; HDD?: { 'single-az'?: number; 'multi-az'?: number } };
+  throughput: { 'single-az'?: number; 'multi-az'?: number };
+  backup: { 'single-az'?: number; 'multi-az'?: number };
+}
+
+export interface StoragePricing {
+  region: string;
+  currency: string;
+  unit: string;
+  asOf?: string;
+  source?: string;
+  fsxWindows: FsxWindowsRates | null;
+  error?: string;
+}
+
+/** Fetch live AWS FSx pricing from the Price List Query API via the MRM
+ *  backend. Resolves even on backend errors - the response's `fsxWindows`
+ *  field is null when pricing is unavailable, so the UI can just hide the
+ *  cost estimate rather than blocking the create flow. */
+export const getStoragePricing = async (region?: string): Promise<StoragePricing> => {
+  const qs = region ? `?region=${encodeURIComponent(region)}` : '';
+  const response = await apiCall(`storage/pricing${qs}`, {
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) {
+    // Return a null-rate payload so the UI degrades gracefully.
+    return { region: region || '', currency: 'USD', unit: 'per month', fsxWindows: null, error: 'pricing unavailable' };
+  }
+  return await response.json();
+};

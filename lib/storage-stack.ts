@@ -48,6 +48,7 @@ export class StorageStack extends cdk.Stack {
     nfsMountManager: lambda.Function;
     storageCfnWorker: lambda.Function;
     listS3Buckets: lambda.Function;
+    getStoragePricing: lambda.Function;
   };
   public readonly stateMachine: stepfunctions.StateMachine;
   public readonly deletionStateMachine: stepfunctions.StateMachine;
@@ -614,6 +615,32 @@ export class StorageStack extends cdk.Stack {
         `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/Network/PrivateSubnet*`,
       ],
     }));
+
+    // Get Storage Pricing Function (for the create-storage cost estimator).
+    // Queries the AWS Price List API for live FSx rates so the UI can show
+    // an accurate estimated monthly cost that never goes stale. In-memory
+    // cache in the Lambda handles the API's slow pagination and rate limits.
+    this.functions.getStoragePricing = new lambda.Function(this, 'GetStoragePricingFunction', {
+      functionName: `${props.acronym.toLowerCase()}-get-storage-pricing`,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset('lambda/get-storage-pricing'),
+      description: 'Return live AWS FSx pricing for the create-storage cost estimator',
+      timeout: cdk.Duration.seconds(30),
+      reservedConcurrentExecutions: 5,
+      environmentEncryption: props.dataEncryptionKey,
+      environment: {
+        PRODUCT_NAME: props.pascalCaseName,
+      },
+    });
+    // pricing:GetProducts requires resource "*"; the Price List API has no
+    // resource-level ARNs. Scope is read-only, no PII, no billing PII.
+    this.functions.getStoragePricing.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['pricing:GetProducts', 'pricing:DescribeServices', 'pricing:GetAttributeValues'],
+      resources: ['*'],
+    }));
+
     const stateMachineDefinition = {
       Comment: "FSx Storage Creation State Machine with Native Service Integrations",
       StartAt: "UpdateStatusToValidating",

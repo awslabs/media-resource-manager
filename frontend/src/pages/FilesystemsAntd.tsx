@@ -38,7 +38,8 @@ import type { MenuProps } from 'antd';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken } from '../utils/auth';
 import { apiCall } from '../utils/api';
-import { listStorageS3Buckets, getStorageConfig, S3Bucket, StorageConfig } from '../utils/storageApi';
+import { listStorageS3Buckets, getStorageConfig, getStoragePricing, S3Bucket, StorageConfig, StoragePricing } from '../utils/storageApi';
+import { estimateFsxWindowsMonthlyCost, formatUsd } from '../utils/pricing';
 
 const { Title, Text, Link } = Typography;
 const { TextArea } = Input;
@@ -112,6 +113,7 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
   // S3 bucket selection state (for Mountpoint S3)
   const [s3Buckets, setS3Buckets] = useState<S3Bucket[]>([]);
   const [storageConfig, setStorageConfig] = useState<StorageConfig | null>(null);
+  const [storagePricing, setStoragePricing] = useState<StoragePricing | null>(null);
   const [s3BucketsLoading, setS3BucketsLoading] = useState(false);
   const [s3PolicyConfirmed, setS3PolicyConfirmed] = useState(false);
 
@@ -501,6 +503,27 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
   // InputNumber and we coerce `automaticBackupRetentionPeriod` to 0 at
   // submit time. Default true because backups should be the default.
   const fsxWindowsBackupsEnabled = Form.useWatch(['configuration', 'enableBackups'], createForm) ?? true;
+  // Watches that feed the FSx Windows cost estimator; kept adjacent to
+  // resilience/storageType so a future refactor moves them together.
+  const fsxWindowsCapacity = Form.useWatch(['configuration', 'ssdStorageCapacity'], createForm);
+  const fsxWindowsThroughput = Form.useWatch(['configuration', 'throughputCapacity'], createForm);
+  const fsxWindowsRetention = Form.useWatch(['configuration', 'automaticBackupRetentionPeriod'], createForm);
+
+  const fsxWindowsEstimate = useMemo(() => {
+    if (storageType !== 'fsx-windows') return null;
+    return estimateFsxWindowsMonthlyCost(
+      {
+        resilience: fsxWindowsResilience as 'single-az' | 'multi-az',
+        storageType: fsxWindowsStorageType as 'SSD' | 'HDD',
+        ssdStorageCapacity: fsxWindowsCapacity,
+        throughputCapacity: fsxWindowsThroughput,
+        // Coerce to 0 when the backups toggle is off, so the estimate
+        // updates immediately (not just at submit time).
+        automaticBackupRetentionPeriod: fsxWindowsBackupsEnabled ? fsxWindowsRetention : 0,
+      },
+      storagePricing?.fsxWindows
+    );
+  }, [storageType, fsxWindowsResilience, fsxWindowsStorageType, fsxWindowsCapacity, fsxWindowsThroughput, fsxWindowsRetention, fsxWindowsBackupsEnabled, storagePricing]);
 
   // Fetch S3 buckets and config when Mountpoint S3 is selected
   useEffect(() => {
@@ -508,17 +531,23 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
     // Fetch storage config for any FSx or mountpoint-s3 storage type - the
     // config carries the deployment's private-subnet AZ list (used by the
     // FSx-Windows Single-AZ picker) alongside the workstation role ARN
-    // (used by the mountpoint-s3 cross-account policy generator). S3 bucket
-    // listing is only relevant for mountpoint-s3.
+    // (used by the mountpoint-s3 cross-account policy generator). Pricing
+    // is only fetched for FSx types where it drives the cost estimator.
+    // S3 bucket listing is only relevant for mountpoint-s3.
     const needsS3Buckets = storageType === 'mountpoint-s3';
+    const needsPricing = storageType === 'fsx-windows' || storageType === 'fsx-ontap';
     const fetchData = async () => {
       setS3BucketsLoading(true);
       try {
         const configPromise = getStorageConfig();
         const bucketsPromise = needsS3Buckets ? listStorageS3Buckets() : Promise.resolve<S3Bucket[]>([]);
-        const [buckets, config] = await Promise.all([bucketsPromise, configPromise]);
+        // Pricing failures are swallowed inside getStoragePricing (returns
+        // a null-rate payload) so this Promise.all never rejects on that.
+        const pricingPromise = needsPricing ? getStoragePricing() : Promise.resolve<StoragePricing | null>(null);
+        const [buckets, config, pricing] = await Promise.all([bucketsPromise, configPromise, pricingPromise]);
         if (needsS3Buckets) setS3Buckets(buckets);
         setStorageConfig(config);
+        if (needsPricing) setStoragePricing(pricing);
       } catch (error) {
         console.error('Error fetching storage config:', error);
       } finally {
@@ -878,6 +907,39 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
                   >
                     <InputNumber min={1} max={90} style={{ width: '100%' }} />
                   </Form.Item>
+                )}
+
+                {fsxWindowsEstimate && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message={
+                      <Space>
+                        <span>Estimated monthly cost:</span>
+                        <Text strong>{formatUsd(fsxWindowsEstimate.total)}</Text>
+                        <Text type="secondary">/ month</Text>
+                      </Space>
+                    }
+                    description={
+                      <>
+                        <div style={{ marginTop: 4 }}>
+                          {fsxWindowsEstimate.breakdown.storage !== undefined && (
+                            <span style={{ marginRight: 16 }}>Storage: {formatUsd(fsxWindowsEstimate.breakdown.storage)}</span>
+                          )}
+                          {fsxWindowsEstimate.breakdown.throughput !== undefined && (
+                            <span style={{ marginRight: 16 }}>Throughput: {formatUsd(fsxWindowsEstimate.breakdown.throughput)}</span>
+                          )}
+                          {fsxWindowsEstimate.breakdown.backup !== undefined && (
+                            <span style={{ marginRight: 16 }}>Backups: {formatUsd(fsxWindowsEstimate.breakdown.backup)}</span>
+                          )}
+                        </div>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          Live AWS public pricing for {storagePricing?.region || 'this Region'}. Excludes cross-AZ data transfer, provisioned IOPS above defaults, and backup-storage growth beyond the initial file system size.
+                        </Text>
+                      </>
+                    }
+                  />
                 )}
               </>
             )}
