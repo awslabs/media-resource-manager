@@ -482,6 +482,10 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
   const teamSize = Form.useWatch(['configuration', 'teamSize'], createForm);
   const haPairs = Form.useWatch(['configuration', 'haPairs'], createForm) || 2;
   const isCrossAccountS3 = Form.useWatch(['configuration', 'isCrossAccount'], createForm);
+  // FSx Windows resilience + storage-type + AZ (issue #29) — drive
+  // conditional form UI. Defaults mirror the API defaults (multi-az + SSD).
+  const fsxWindowsResilience = Form.useWatch(['configuration', 'resilience'], createForm) || 'multi-az';
+  const fsxWindowsStorageType = Form.useWatch(['configuration', 'storageType'], createForm) || 'SSD';
 
   // Fetch S3 buckets and config when Mountpoint S3 is selected
   useEffect(() => {
@@ -662,7 +666,7 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
           }}
           width={600}
         >
-          <Form form={createForm} layout="vertical" initialValues={{ type: 'fsx-ontap', configuration: { teamSize: 'medium', storageCapacity: 2048, volumeSize: 1600, backupRetention: 30, haPairs: 2, ssdStorageCapacity: 256, throughputCapacity: 64, automaticBackupRetentionPeriod: 7 } }}>
+          <Form form={createForm} layout="vertical" initialValues={{ type: 'fsx-ontap', configuration: { teamSize: 'medium', storageCapacity: 2048, volumeSize: 1600, backupRetention: 30, haPairs: 2, ssdStorageCapacity: 256, throughputCapacity: 64, automaticBackupRetentionPeriod: 7, resilience: 'multi-az', storageType: 'SSD' } }}>
             <Form.Item name="name" label="Name" rules={[{ required: true, message: 'Name is required' }]}>
               <Input ref={createNameInputRef} placeholder="Enter storage name" />
             </Form.Item>
@@ -747,8 +751,76 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
             {/* FSx Windows fields */}
             {storageType === 'fsx-windows' && (
               <>
-                <Form.Item name={['configuration', 'ssdStorageCapacity']} label="SSD Storage Capacity (GiB)">
-                  <InputNumber min={32} max={65536} style={{ width: '100%' }} />
+                <Form.Item
+                  name={['configuration', 'resilience']}
+                  label="Resilience"
+                  tooltip="Multi-AZ replicates the file system across two Availability Zones for high availability. Single-AZ places the file system in one AZ at lower cost."
+                  rules={[{ required: true, message: 'Resilience is required' }]}
+                >
+                  <Select
+                    options={[
+                      { label: 'Multi-AZ (recommended)', value: 'multi-az' },
+                      { label: 'Single-AZ', value: 'single-az' },
+                    ]}
+                  />
+                </Form.Item>
+
+                <Form.Item
+                  name={['configuration', 'storageType']}
+                  label="Storage Type"
+                  tooltip="SSD delivers consistent low-latency performance. HDD is a lower-cost option intended for large, less latency-sensitive workloads."
+                  rules={[{ required: true, message: 'Storage type is required' }]}
+                >
+                  <Select
+                    options={[
+                      { label: 'SSD (recommended)', value: 'SSD' },
+                      { label: 'HDD', value: 'HDD' },
+                    ]}
+                  />
+                </Form.Item>
+
+                {fsxWindowsStorageType === 'HDD' && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message="HDD storage is lower cost but offers lower performance"
+                    description="HDD file systems have a minimum capacity of 2000 GiB and are best suited for large, cold, or throughput-oriented workloads. Storage type cannot be changed after creation - to move to SSD you must create a new file system and copy the data."
+                  />
+                )}
+
+                {fsxWindowsResilience === 'single-az' && (
+                  <Form.Item
+                    name={['configuration', 'availabilityZone']}
+                    label="Availability Zone"
+                    tooltip="Enter the AZ (for example us-east-1a) where the file system should be placed. Must match one of the private subnets provisioned in this deployment."
+                    rules={[{ required: true, message: 'Availability Zone is required for Single-AZ' }]}
+                  >
+                    <Input placeholder="us-east-1a" />
+                  </Form.Item>
+                )}
+
+                <Form.Item
+                  name={['configuration', 'ssdStorageCapacity']}
+                  label={fsxWindowsStorageType === 'HDD' ? 'HDD Storage Capacity (GiB)' : 'SSD Storage Capacity (GiB)'}
+                  dependencies={[['configuration', 'storageType']]}
+                  rules={[
+                    { required: true, message: 'Storage capacity is required' },
+                    {
+                      validator: (_, value) => {
+                        const min = fsxWindowsStorageType === 'HDD' ? 2000 : 32;
+                        if (value === undefined || value === null || value === '') return Promise.resolve();
+                        if (typeof value === 'number' && value >= min) return Promise.resolve();
+                        return Promise.reject(new Error(`Minimum capacity for ${fsxWindowsStorageType} is ${min} GiB`));
+                      },
+                    },
+                  ]}
+                >
+                  <InputNumber
+                    min={fsxWindowsStorageType === 'HDD' ? 2000 : 32}
+                    max={65536}
+                    style={{ width: '100%' }}
+                  />
                 </Form.Item>
                 <Form.Item name={['configuration', 'throughputCapacity']} label="Throughput Capacity (MB/s)">
                   <Select options={[

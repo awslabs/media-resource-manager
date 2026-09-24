@@ -136,10 +136,17 @@ const StorageDetails: React.FC = () => {
         { label: 'Backup Retention', value: details.backupRetention ? `${details.backupRetention} days` : '-' }
       ];
     } else if (details.type === 'fsx-windows') {
+      const resilienceRaw = (details.resilience || details.configuration?.resilience || 'multi-az').toString();
+      const resilienceLabel = resilienceRaw === 'single-az' ? 'Single-AZ' : 'Multi-AZ';
+      const storageTypeLabel = (details.storageType || details.configuration?.storageType || 'SSD').toString().toUpperCase();
+      const azLabel = details.availabilityZone || details.configuration?.availabilityZone || '-';
       return [
         { label: 'Storage Capacity', value: details.storageCapacity || details.configuration?.ssdStorageCapacity ? `${details.storageCapacity || details.configuration?.ssdStorageCapacity} GiB` : '-' },
         { label: 'Throughput Capacity', value: details.throughput || details.configuration?.throughputCapacity ? `${details.throughput || details.configuration?.throughputCapacity} MB/s` : '-' },
-        { label: 'Backup Retention', value: details.backupRetention || details.configuration?.automaticBackupRetentionPeriod ? `${details.backupRetention || details.configuration?.automaticBackupRetentionPeriod} days` : '-' }
+        { label: 'Backup Retention', value: details.backupRetention || details.configuration?.automaticBackupRetentionPeriod ? `${details.backupRetention || details.configuration?.automaticBackupRetentionPeriod} days` : '-' },
+        { label: 'Resilience', value: resilienceLabel },
+        { label: 'Storage Type', value: storageTypeLabel },
+        { label: 'Availability Zone', value: azLabel }
       ];
     } else if (details.type === 'mountpoint-s3') {
       return [
