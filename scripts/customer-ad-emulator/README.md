@@ -69,7 +69,7 @@ python3 emulator.py create \
 The script will:
 
 1. Create a security group with AD ports (53, 88, 135, 389, 445, 464, 636,
-   3268, 3269, 49152-65535) open from the caller-supplied MRM workstation SG
+   3268, 3269, 9389, 49152-65535) open from the caller-supplied MRM workstation SG
 2. Create an IAM role with `AmazonSSMManagedInstanceCore`
 3. Create four Secrets Manager secrets (see list above)
 4. Launch a Windows Server 2022 m5.xlarge instance
