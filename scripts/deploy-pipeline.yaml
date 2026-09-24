@@ -28,6 +28,16 @@ Metadata:
           - DomainName
           - AdminGroupName
       - Label:
+          default: "Optional: Bring-your-own AD (AdMode=connector)"
+        Parameters:
+          - AdMode
+          - AdDomainName
+          - AdDnsServerIps
+          - AdServiceAccountSecretArn
+          - AdConnectorSize
+          - AdNetbiosName
+          - AdConnectorDescription
+      - Label:
           default: "Authentication"
         Parameters:
           - UseCognitoAuth
@@ -75,7 +85,21 @@ Metadata:
       DomainName:
         default: "Active Directory Domain Name"
       AdminGroupName:
-        default: "Admin Group Name"
+        default: "Admin Group Name (comma-separated for multiple)"
+      AdMode:
+        default: "AD Mode (managed = MRM creates AD; connector = BYO-AD)"
+      AdDomainName:
+        default: "Customer AD Domain Name (connector mode)"
+      AdDnsServerIps:
+        default: "Customer AD DNS Server IPs (connector mode)"
+      AdServiceAccountSecretArn:
+        default: "AD Connector Service Account Secret ARN"
+      AdConnectorSize:
+        default: "AD Connector Size (connector mode)"
+      AdNetbiosName:
+        default: "Customer AD NetBIOS Name (connector mode, optional)"
+      AdConnectorDescription:
+        default: "AD Connector Description (connector mode, optional)"
       UseCognitoAuth:
         default: "Use Cognito / SAML Authentication"
       IdentityCenterSyncGroups:
@@ -169,7 +193,79 @@ Parameters:
   AdminGroupName:
     Type: String
     Default: MRM-Admins
-    Description: Group name for admin access
+    Description: >
+      Group name for admin access. Comma-separated for multiple values
+      (e.g., "MRM-Admins,AWS Delegated Administrators"). Matched
+      case-insensitively against each user's group memberships.
+
+  AdMode:
+    Type: String
+    Default: managed
+    AllowedValues:
+      - managed
+      - connector
+    Description: >
+      Active Directory provisioning mode. 'managed' (default) creates AWS
+      Managed Microsoft AD inside the MRM VPC and byte-identically matches
+      pre-PR-3 behavior. 'connector' creates an AWS AD Connector that
+      proxies to a customer-supplied Active Directory reachable from the
+      VPC (BYO-AD). When 'connector', the AdDomainName, AdDnsServerIps,
+      and AdServiceAccountSecretArn parameters are all required. See
+      docs/BYO_AD_MIGRATION.md for the switch-over procedure.
+
+  AdDomainName:
+    Type: String
+    Default: ''
+    Description: >
+      Required when AdMode=connector. FQDN of the customer's Active
+      Directory (e.g. 'customer.internal'). Ignored when AdMode=managed
+      (the DomainName parameter is used instead).
+
+  AdDnsServerIps:
+    Type: String
+    Default: ''
+    Description: >
+      Required when AdMode=connector. Comma-separated list of 1-4 domain
+      controller DNS IPs reachable from the MRM VPC (e.g. '10.1.1.87'
+      or '10.1.1.87,10.1.1.88').
+
+  AdServiceAccountSecretArn:
+    Type: String
+    Default: ''
+    Description: >
+      Required when AdMode=connector. Full ARN of a Secrets Manager
+      secret in the same account and region as MRM. The secret must
+      contain JSON of the form {"username": "...", "password": "..."}
+      for the AD Connector service account that the customer created
+      inside their own AD.
+
+  AdConnectorSize:
+    Type: String
+    Default: ''
+    AllowedValues:
+      - ''
+      - Small
+      - Large
+    Description: >
+      Optional (AdMode=connector only). 'Small' (default) supports up
+      to 500 users; 'Large' supports up to 5,000 users. Leave empty to
+      accept the CDK default of 'Small'.
+
+  AdNetbiosName:
+    Type: String
+    Default: ''
+    Description: >
+      Optional (AdMode=connector only). Short NetBIOS name for the
+      customer's domain (e.g. 'CUSTOMER'). If omitted, derived from
+      the first label of AdDomainName.
+
+  AdConnectorDescription:
+    Type: String
+    Default: ''
+    Description: >
+      Optional (AdMode=connector only). Human-readable description
+      shown in the Directory Service console. Directory Service does
+      not allow parentheses in this field.
 
   HostnamePrefix:
     Type: String
@@ -542,6 +638,20 @@ Resources:
             Value: !Ref UseCognitoAuth
           - Name: MRM_ADMIN_GROUP
             Value: !Ref AdminGroupName
+          - Name: MRM_AD_MODE
+            Value: !Ref AdMode
+          - Name: MRM_AD_DOMAIN_NAME
+            Value: !Ref AdDomainName
+          - Name: MRM_AD_DNS_SERVER_IPS
+            Value: !Ref AdDnsServerIps
+          - Name: MRM_AD_SERVICE_ACCOUNT_SECRET_ARN
+            Value: !Ref AdServiceAccountSecretArn
+          - Name: MRM_AD_CONNECTOR_SIZE
+            Value: !Ref AdConnectorSize
+          - Name: MRM_AD_NETBIOS_NAME
+            Value: !Ref AdNetbiosName
+          - Name: MRM_AD_CONNECTOR_DESCRIPTION
+            Value: !Ref AdConnectorDescription
           - Name: MRM_HOSTNAME_PREFIX
             Value: !Ref HostnamePrefix
           - Name: MRM_HOSTNAME_DIGITS
@@ -714,6 +824,13 @@ Resources:
                         DcvDomainName: process.env.MRM_DCV_DOMAIN_NAME || '',
                         UseCognitoAuth: process.env.MRM_USE_COGNITO || 'true',
                         AdminGroupName: process.env.MRM_ADMIN_GROUP || 'MRM-Admins',
+                        AdMode: process.env.MRM_AD_MODE || 'managed',
+                        AdDomainName: process.env.MRM_AD_DOMAIN_NAME || '',
+                        AdDnsServerIps: process.env.MRM_AD_DNS_SERVER_IPS || '',
+                        AdServiceAccountSecretArn: process.env.MRM_AD_SERVICE_ACCOUNT_SECRET_ARN || '',
+                        AdConnectorSize: process.env.MRM_AD_CONNECTOR_SIZE || '',
+                        AdNetbiosName: process.env.MRM_AD_NETBIOS_NAME || '',
+                        AdConnectorDescription: process.env.MRM_AD_CONNECTOR_DESCRIPTION || '',
                         HostnamePrefix: process.env.MRM_HOSTNAME_PREFIX || 'vdi-',
                         HostnameDigits: process.env.MRM_HOSTNAME_DIGITS || '4',
                         IdentityCenterSyncGroups: process.env.MRM_IDENTITY_CENTER_SYNC_GROUPS || '',
@@ -782,6 +899,13 @@ Resources:
                         MRM_DCV_DOMAIN_NAME: 'DcvDomainName',
                         MRM_USE_COGNITO: 'UseCognitoAuth',
                         MRM_ADMIN_GROUP: 'AdminGroupName',
+                        MRM_AD_MODE: 'AdMode',
+                        MRM_AD_DOMAIN_NAME: 'AdDomainName',
+                        MRM_AD_DNS_SERVER_IPS: 'AdDnsServerIps',
+                        MRM_AD_SERVICE_ACCOUNT_SECRET_ARN: 'AdServiceAccountSecretArn',
+                        MRM_AD_CONNECTOR_SIZE: 'AdConnectorSize',
+                        MRM_AD_NETBIOS_NAME: 'AdNetbiosName',
+                        MRM_AD_CONNECTOR_DESCRIPTION: 'AdConnectorDescription',
                         MRM_HOSTNAME_PREFIX: 'HostnamePrefix',
                         MRM_HOSTNAME_DIGITS: 'HostnameDigits',
                         MRM_IDENTITY_CENTER_SYNC_GROUPS: 'IdentityCenterSyncGroups',
