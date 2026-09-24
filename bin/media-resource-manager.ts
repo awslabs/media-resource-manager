@@ -389,6 +389,10 @@ const storageStack = new StorageStack(app, `${naming.acronym}-Storage`, {
   // exist, so the MediaBucket-to-Cognito grant is skipped inside StorageStack
   // via the `if (props.authenticatedRoleArn)` guard already there.
   authenticatedRoleArn: infrastructureStack.auth.authenticatedRole?.roleArn,
+  // In AdMode=managed this resolves to the MRM-provisioned ResourceAdmin
+  // secret; in AdMode=connector it resolves to the customer-supplied secret.
+  // The FSx template generator Lambda needs GetSecretValue on this ARN.
+  adServiceAccountSecretArn: infrastructureStack.identity.serviceAccountSecretArn,
 });
 storageStack.addDependency(infrastructureStack);
 storageStack.addDependency(dcvStack);
@@ -484,6 +488,10 @@ const apiStack = new ApiStack(app, `${naming.acronym}-Api`, {
   agentProgressTable: agentCoreStack?.agentProgressTable,
   scriptGenerationStateMachine: agentCoreStack?.scriptGenerationStateMachine,
   enableBedrockFeatures,
+  // In AdMode=managed this resolves to the MRM-provisioned ResourceAdmin
+  // secret; in AdMode=connector it resolves to the customer-supplied secret.
+  // The FSx SMB mount manager Lambda needs GetSecretValue on this ARN.
+  adServiceAccountSecretArn: infrastructureStack.identity.serviceAccountSecretArn,
 });
 apiStack.addDependency(workstationStartStack);
 apiStack.addDependency(linuxWorkstationCreationStack);

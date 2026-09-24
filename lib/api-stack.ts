@@ -65,6 +65,14 @@ export interface ApiStackProps extends cdk.StackProps {
   agentProgressTable?: dynamodb.ITable;
   scriptGenerationStateMachine?: stepfunctions.IStateMachine;
   enableBedrockFeatures?: boolean;  // When false, skips Bedrock-dependent Lambda functions
+  /**
+   * ARN of the AD service-account secret. Populated by `IdentityConstruct`
+   * from `/${pascalCaseName}/Identity/AdServiceAccountSecretArn` — MRM-managed
+   * ResourceAdmin secret in `AdMode=managed`, customer-supplied secret ARN
+   * in `AdMode=connector`. The FSx SMB mount manager Lambda needs to read
+   * this secret when mounting FSx to a non-domain-joined workstation.
+   */
+  adServiceAccountSecretArn: string;
 }
 
 export class ApiStack extends cdk.Stack {
@@ -740,18 +748,35 @@ export class ApiStack extends cdk.Stack {
       resources: ['*'],
     }));
 
-    // Grant access to Secrets Manager for AD credentials (for non-domain-joined workstations)
-    // and ONTAP credentials for FSxN storage (which may be in regional hubs)
+    // Grant access to Secrets Manager for AD credentials (for non-domain-joined
+    // workstations) and ONTAP credentials for FSxN storage (which may be in
+    // regional hubs).
+    //
+    // The `/Identity/*` wildcard covers MRM's ResourceAdmin secret in
+    // AdMode=managed. The explicit `adServiceAccountSecretArn` covers the
+    // customer-supplied secret in AdMode=connector, which lives at an arbitrary
+    // path outside the /Identity namespace.
     fsxSmbMountManagerFunction.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['secretsmanager:GetSecretValue'],
       resources: [
-        // AD credentials in primary region
+        // AD credentials in primary region (managed-mode ResourceAdmin secret)
         `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/${props.pascalCaseName}/Identity/*`,
+        // AD service-account secret (mode-agnostic; customer-supplied in connector mode)
+        props.adServiceAccountSecretArn,
         // Storage credentials in primary region
         `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/${props.pascalCaseName}/Storage/*`,
         // Storage credentials in any region (for regional FSxN storage)
         `arn:aws:secretsmanager:*:${this.account}:secret:/${props.pascalCaseName}/Storage/*`
+      ],
+    }));
+    // Grant the mode-agnostic SSM pointer to the service-account secret ARN.
+    // The Lambda reads this to resolve the actual secret ARN at runtime.
+    fsxSmbMountManagerFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ssm:GetParameter'],
+      resources: [
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/Identity/AdServiceAccountSecretArn`,
       ],
     }));
 

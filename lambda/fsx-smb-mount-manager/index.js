@@ -306,13 +306,29 @@ async function getStorageForInstance(instanceId, workstation, isDomainJoined, wo
                 Name: `/${PASCAL_CASE_NAME}/Identity/ActiveDirectoryDomainName`
             }));
             domainName = domainParam.Parameter.Value;
-            
-            // Get credentials from Secrets Manager (using ResourceAdmin account)
+
+            // Resolve the AD service-account secret via the mode-agnostic SSM
+            // parameter populated by IdentityConstruct. In managed mode this
+            // points at the MRM-created ResourceAdmin secret; in connector mode
+            // it points at the customer-supplied secret ARN. Fall back to the
+            // legacy well-known name for backward compat with deployments that
+            // predate PR 3.
+            let adSecretId;
+            try {
+                const arnParam = await ssmPrimary.send(new GetParameterCommand({
+                    Name: `/${PASCAL_CASE_NAME}/Identity/AdServiceAccountSecretArn`
+                }));
+                adSecretId = arnParam.Parameter.Value;
+            } catch (ssmErr) {
+                console.warn(`AdServiceAccountSecretArn SSM param not found (${ssmErr.name}), using legacy secret name`);
+                adSecretId = `/${PASCAL_CASE_NAME}/Identity/ResourceAdminActiveDirectoryLoginCredentials`;
+            }
+
             const secretResponse = await secretsManager.send(new GetSecretValueCommand({
-                SecretId: `/${PASCAL_CASE_NAME}/Identity/ResourceAdminActiveDirectoryLoginCredentials`
+                SecretId: adSecretId
             }));
             credentials = JSON.parse(secretResponse.SecretString);
-            
+
             console.log(`Retrieved AD credentials for non-domain workstation: ${credentials.username}@${domainName}`);
         } catch (error) {
             console.error('Failed to retrieve AD credentials for non-domain workstation:', error);

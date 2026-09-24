@@ -4,10 +4,12 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand } = require('@aws-sdk/lib-dynamodb');
 const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
+const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 
 const dynamoClient = new DynamoDBClient({});
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
 const secretsManager = new SecretsManagerClient({});
+const ssm = new SSMClient({});
 
 const PRIMARY_REGION = process.env.AWS_REGION;
 const REGIONAL_HUBS_TABLE = process.env.REGIONAL_HUBS_TABLE_NAME;
@@ -499,21 +501,36 @@ async function getRegionalNetworkConfig(region) {
 
 
 /**
- * Retrieve AD credentials from Secrets Manager
- * Used for FSx Windows file systems that need to join a self-managed AD domain
+ * Retrieve AD credentials from Secrets Manager for FSx Windows file systems
+ * that need to join a self-managed AD domain.
+ *
+ * Reads the mode-agnostic /${productName}/Identity/AdServiceAccountSecretArn
+ * SSM parameter (populated by IdentityConstruct in both managed and connector
+ * modes) and fetches the secret it points at. Falls back to the legacy
+ * well-known secret name for backward compat with deployments that predate
+ * PR 3 and do not yet have the AdServiceAccountSecretArn parameter.
  */
 async function getAdCredentials(productName) {
-  const secretName = `/${productName}/Identity/ResourceAdminActiveDirectoryLoginCredentials`;
-  console.log(`Retrieving AD credentials from secret: ${secretName}`);
-  
+  let secretId;
+  const ssmParamName = `/${productName}/Identity/AdServiceAccountSecretArn`;
+  try {
+    const ssmResult = await ssm.send(new GetParameterCommand({ Name: ssmParamName }));
+    secretId = ssmResult.Parameter.Value;
+    console.log(`Resolved AD service-account secret ARN via ${ssmParamName}`);
+  } catch (ssmErr) {
+    console.warn(`SSM parameter ${ssmParamName} not found (${ssmErr.name}), falling back to legacy secret name`);
+    secretId = `/${productName}/Identity/ResourceAdminActiveDirectoryLoginCredentials`;
+  }
+  console.log(`Retrieving AD credentials from: ${secretId}`);
+
   try {
     const response = await secretsManager.send(new GetSecretValueCommand({
-      SecretId: secretName
+      SecretId: secretId
     }));
-    
+
     const secret = JSON.parse(response.SecretString);
     console.log('Successfully retrieved AD credentials');
-    
+
     return {
       username: secret.username,
       password: secret.password
