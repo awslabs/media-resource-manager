@@ -158,7 +158,7 @@ async function generateFsxWindowsTemplate(storageId, storageName, configuration,
       "AutomaticBackupRetentionPeriod": {
         "Type": "Number",
         "Default": configuration.automaticBackupRetentionPeriod,
-        "MinValue": 1,
+        "MinValue": 0,
         "MaxValue": 90
       },
       "ProductName": {
