@@ -43,19 +43,111 @@ function generateOntapPassword() {
 }
 
 /**
- * Generate CloudFormation template for FSx for Windows File Server
- * AD credentials are passed as parameters (retrieved by Lambda) instead of using
- * {{resolve:secretsmanager:...}} dynamic references to avoid KMS permission issues
+ * Resolve an Availability Zone (e.g. 'us-east-1a') to the private-subnet index
+ * (1-based) whose AZ matches it. Returns 1 when `az` is unset, so callers that
+ * do not care about AZ placement land in PrivateSubnet1 (byte-identical to the
+ * pre-#29 default). Throws when `az` is set but does not match any subnet in
+ * this deployment - callers should have validated earlier so this is defensive.
+ *
+ * Backing SSM parameters are published by `NetworkConstruct` in the primary
+ * region:
+ *   /{ProductName}/Network/PrivateSubnetCount
+ *   /{ProductName}/Network/PrivateSubnet{1..N}/AZ
  */
-function generateFsxWindowsTemplate(storageId, storageName, configuration, productName, adCredentials) {
+async function resolveAzToSubnetIndex(productName, az) {
+  if (!az) return 1;
+  const countResp = await ssm.send(new GetParameterCommand({
+    Name: `/${productName}/Network/PrivateSubnetCount`
+  }));
+  const count = parseInt(countResp.Parameter.Value, 10);
+  for (let i = 1; i <= count; i++) {
+    try {
+      const azResp = await ssm.send(new GetParameterCommand({
+        Name: `/${productName}/Network/PrivateSubnet${i}/AZ`
+      }));
+      if (azResp.Parameter.Value === az) return i;
+    } catch (err) {
+      // Missing per-subnet AZ parameter; keep scanning. This is expected on
+      // deployments provisioned before the AZ parameter was published.
+      console.warn(`SSM lookup for PrivateSubnet${i}/AZ failed: ${err.name}`);
+    }
+  }
+  throw new Error(
+    `Availability Zone '${az}' does not match any of the ${count} private subnets ` +
+    `in this deployment. Check the AZ against '/{ProductName}/Network/PrivateSubnet{n}/AZ'.`
+  );
+}
+
+/**
+ * Generate CloudFormation template for FSx for Windows File Server.
+ *
+ * Derives `DeploymentType` and `StorageType` from two user-facing choices:
+ *
+ *   configuration.resilience  = 'single-az' | 'multi-az'   (default 'multi-az')
+ *   configuration.storageType = 'SSD'       | 'HDD'        (default 'SSD')
+ *
+ * Table (matches issue #27 / #29 spec):
+ *
+ *   single-az + SSD  →  DeploymentType = SINGLE_AZ_2, StorageType = SSD
+ *   single-az + HDD  →  DeploymentType = SINGLE_AZ_2, StorageType = HDD
+ *   multi-az  + SSD  →  DeploymentType = MULTI_AZ_1,  StorageType = SSD
+ *   multi-az  + HDD  →  DeploymentType = MULTI_AZ_1,  StorageType = HDD
+ *
+ * `SINGLE_AZ_1` is deliberately never emitted (its only unique capability is
+ * DFS-R, which MRM does not encourage on an editorial volume). See #29.
+ *
+ * Subnet placement:
+ *
+ *   multi-az   → SubnetIds = [PrivateSubnet1, PrivateSubnet2],
+ *                PreferredSubnetId = PrivateSubnet1
+ *   single-az  → SubnetIds = [PrivateSubnet<idx>] where <idx> is the subnet
+ *                whose AZ matches configuration.availabilityZone (default 1).
+ *                PreferredSubnetId is not emitted (AWS rejects it on Single-AZ).
+ *
+ * AD credentials are passed as CFN parameters (retrieved by this Lambda at
+ * generate time) instead of `{{resolve:secretsmanager:...}}` dynamic references
+ * because the CFN service principal would otherwise need explicit KMS decrypt
+ * on the customer secret's key - handled as a separate hardening pass.
+ */
+async function generateFsxWindowsTemplate(storageId, storageName, configuration, productName, adCredentials) {
+  const resilience = (configuration.resilience || 'multi-az').toLowerCase();
+  if (resilience !== 'single-az' && resilience !== 'multi-az') {
+    throw new Error(`resilience must be 'single-az' or 'multi-az' (got: '${configuration.resilience}')`);
+  }
+  const isMultiAz = resilience === 'multi-az';
+  const deploymentType = isMultiAz ? 'MULTI_AZ_1' : 'SINGLE_AZ_2';
+
+  const storageType = (configuration.storageType || 'SSD').toUpperCase();
+  if (storageType !== 'SSD' && storageType !== 'HDD') {
+    throw new Error(`storageType must be 'SSD' or 'HDD' (got: '${configuration.storageType}')`);
+  }
+
+  const ssmSubnetRef = (n) => ({
+    "Fn::Join": ["", ["{{resolve:ssm:/", {"Ref": "ProductName"}, `/Network/PrivateSubnet${n}/SubnetID}}`]]
+  });
+
+  let subnetIds;
+  if (isMultiAz) {
+    subnetIds = [ssmSubnetRef(1), ssmSubnetRef(2)];
+  } else {
+    const targetIdx = await resolveAzToSubnetIndex(productName, configuration.availabilityZone);
+    subnetIds = [ssmSubnetRef(targetIdx)];
+  }
+
+  // Minimum storage capacity depends on storage type. AWS enforces 32 GiB for
+  // SSD and 2000 GiB for HDD; reflecting both here means the create-storage
+  // Lambda gets a fast, template-side validation failure if it lets a bad
+  // request through.
+  const minCapacity = storageType === 'HDD' ? 2000 : 32;
+
   return {
     "AWSTemplateFormatVersion": "2010-09-09",
-    "Description": `FSx for Windows File Server - Storage ID: ${storageId}`,
+    "Description": `FSx for Windows File Server (${deploymentType} ${storageType}) - Storage ID: ${storageId}`,
     "Parameters": {
       "SSDStorageCapacity": {
         "Type": "Number",
         "Default": configuration.ssdStorageCapacity,
-        "MinValue": 32,
+        "MinValue": minCapacity,
         "MaxValue": 65536
       },
       "ThroughputCapacity": {
@@ -66,7 +158,7 @@ function generateFsxWindowsTemplate(storageId, storageName, configuration, produ
       "AutomaticBackupRetentionPeriod": {
         "Type": "Number",
         "Default": configuration.automaticBackupRetentionPeriod,
-        "MinValue": 1,
+        "MinValue": 0,
         "MaxValue": 90
       },
       "ProductName": {
@@ -137,29 +229,31 @@ function generateFsxWindowsTemplate(storageId, storageName, configuration, produ
         "Type": "AWS::FSx::FileSystem",
         "Properties": {
           "FileSystemType": "WINDOWS",
+          "StorageType": storageType,
           "StorageCapacity": {"Ref": "SSDStorageCapacity"},
-          "SubnetIds": [
-            {"Fn::Join": ["", ["{{resolve:ssm:/", {"Ref": "ProductName"}, "/Network/PrivateSubnet1/SubnetID}}"]]},
-            {"Fn::Join": ["", ["{{resolve:ssm:/", {"Ref": "ProductName"}, "/Network/PrivateSubnet2/SubnetID}}"]]}
-          ],
+          "SubnetIds": subnetIds,
           "SecurityGroupIds": [{"Ref": "FsxSecurityGroup"}],
           "Tags": [{"Key": "Name", "Value": {"Ref": "StorageName"}}],
-          "WindowsConfiguration": {
-            "ThroughputCapacity": {"Ref": "ThroughputCapacity"},
-            "AutomaticBackupRetentionDays": {"Ref": "AutomaticBackupRetentionPeriod"},
-            "DeploymentType": "MULTI_AZ_1",
-            "PreferredSubnetId": {"Fn::Join": ["", ["{{resolve:ssm:/", {"Ref": "ProductName"}, "/Network/PrivateSubnet1/SubnetID}}"]]},
-            "WeeklyMaintenanceStartTime": "1:05:00",
-            "SelfManagedActiveDirectoryConfiguration": {
-              "DnsIps": [
-                {"Fn::Join": ["", ["{{resolve:ssm:/", {"Ref": "ProductName"}, "/Identity/ActiveDirectoryServerIP1}}"]]},
-                {"Fn::Join": ["", ["{{resolve:ssm:/", {"Ref": "ProductName"}, "/Identity/ActiveDirectoryServerIP2}}"]]}
-              ],
-              "DomainName": {"Fn::Join": ["", ["{{resolve:ssm:/", {"Ref": "ProductName"}, "/Identity/ActiveDirectoryDomainName}}"]]},
-              "UserName": {"Ref": "ADUsername"},
-              "Password": {"Ref": "ADPassword"}
-            }
-          }
+          "WindowsConfiguration": Object.assign(
+            {
+              "ThroughputCapacity": {"Ref": "ThroughputCapacity"},
+              "AutomaticBackupRetentionDays": {"Ref": "AutomaticBackupRetentionPeriod"},
+              "DeploymentType": deploymentType,
+              "WeeklyMaintenanceStartTime": "1:05:00",
+              "SelfManagedActiveDirectoryConfiguration": {
+                "DnsIps": [
+                  {"Fn::Join": ["", ["{{resolve:ssm:/", {"Ref": "ProductName"}, "/Identity/ActiveDirectoryServerIP1}}"]]},
+                  {"Fn::Join": ["", ["{{resolve:ssm:/", {"Ref": "ProductName"}, "/Identity/ActiveDirectoryServerIP2}}"]]}
+                ],
+                "DomainName": {"Fn::Join": ["", ["{{resolve:ssm:/", {"Ref": "ProductName"}, "/Identity/ActiveDirectoryDomainName}}"]]},
+                "UserName": {"Ref": "ADUsername"},
+                "Password": {"Ref": "ADPassword"}
+              }
+            },
+            // PreferredSubnetId is required on MULTI_AZ_1 and rejected on
+            // SINGLE_AZ. Emit conditionally rather than default-and-hope.
+            isMultiAz ? {"PreferredSubnetId": ssmSubnetRef(1)} : {}
+          )
         }
       }
     },
@@ -594,8 +688,8 @@ exports.handler = async (event) => {
     // FSx Windows - retrieve AD credentials from Secrets Manager
     // This avoids KMS permission issues with CloudFormation's {{resolve:secretsmanager:...}} dynamic references
     const adCredentials = await getAdCredentials(productName);
-    
-    template = generateFsxWindowsTemplate(storageId, name, configuration, productName, adCredentials);
+
+    template = await generateFsxWindowsTemplate(storageId, name, configuration, productName, adCredentials);
     parameters = [
       { ParameterKey: 'SSDStorageCapacity', ParameterValue: configuration.ssdStorageCapacity.toString() },
       { ParameterKey: 'ThroughputCapacity', ParameterValue: configuration.throughputCapacity.toString() },

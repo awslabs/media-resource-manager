@@ -48,6 +48,7 @@ export class StorageStack extends cdk.Stack {
     nfsMountManager: lambda.Function;
     storageCfnWorker: lambda.Function;
     listS3Buckets: lambda.Function;
+    getStoragePricing: lambda.Function;
   };
   public readonly stateMachine: stepfunctions.StateMachine;
   public readonly deletionStateMachine: stepfunctions.StateMachine;
@@ -434,8 +435,22 @@ export class StorageStack extends cdk.Stack {
       environmentEncryption: props.dataEncryptionKey,
       environment: {
         STORAGE_TABLE_NAME: props.storageTable.tableName,
+        // PASCAL_CASE_NAME is used to look up /{Pascal}/Network/PrivateSubnet*
+        // SSM parameters when validating a Single-AZ FSx-Windows availability
+        // zone request against the AZs this deployment actually has.
+        PASCAL_CASE_NAME: props.pascalCaseName,
       },
     });
+    // Allow the create-storage Lambda to read /{Pascal}/Network/PrivateSubnet*
+    // parameters so it can validate the availabilityZone in a Single-AZ
+    // fsx-windows request against the AZs this deployment actually has.
+    this.functions.createStorage.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ssm:GetParameter'],
+      resources: [
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/Network/PrivateSubnet*`,
+      ],
+    }));
 
     // Update Storage Function
     this.functions.updateStorage = new lambda.Function(this, 'UpdateStorageFunction', {
@@ -576,6 +591,10 @@ export class StorageStack extends cdk.Stack {
           this, `/${props.pascalCaseName}/DCV/InstanceRoleArn`
         ),
         AWS_ACCOUNT_ID: this.account,
+        // PASCAL_CASE_NAME is used by /storage/config to look up the private
+        // subnet AZ list so the FSx-Windows Single-AZ picker is a dropdown of
+        // AZs this deployment actually has, not free-form text.
+        PASCAL_CASE_NAME: props.pascalCaseName,
       },
     });
 
@@ -585,6 +604,43 @@ export class StorageStack extends cdk.Stack {
       actions: ['s3:ListAllMyBuckets', 's3:GetBucketLocation'],
       resources: ['*'],
     }));
+
+    // Allow /storage/config to read the private subnet AZ SSM parameters so
+    // the FSx-Windows Single-AZ AZ picker can be populated with the real AZs
+    // in this deployment rather than free-form text.
+    this.functions.listS3Buckets.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ssm:GetParameter'],
+      resources: [
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/Network/PrivateSubnet*`,
+      ],
+    }));
+
+    // Get Storage Pricing Function (for the create-storage cost estimator).
+    // Queries the AWS Price List API for live FSx rates so the UI can show
+    // an accurate estimated monthly cost that never goes stale. In-memory
+    // cache in the Lambda handles the API's slow pagination and rate limits.
+    this.functions.getStoragePricing = new lambda.Function(this, 'GetStoragePricingFunction', {
+      functionName: `${props.acronym.toLowerCase()}-get-storage-pricing`,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset('lambda/get-storage-pricing'),
+      description: 'Return live AWS FSx pricing for the create-storage cost estimator',
+      timeout: cdk.Duration.seconds(30),
+      reservedConcurrentExecutions: 5,
+      environmentEncryption: props.dataEncryptionKey,
+      environment: {
+        PRODUCT_NAME: props.pascalCaseName,
+      },
+    });
+    // pricing:GetProducts requires resource "*"; the Price List API has no
+    // resource-level ARNs. Scope is read-only, no PII, no billing PII.
+    this.functions.getStoragePricing.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['pricing:GetProducts', 'pricing:DescribeServices', 'pricing:GetAttributeValues'],
+      resources: ['*'],
+    }));
+
     const stateMachineDefinition = {
       Comment: "FSx Storage Creation State Machine with Native Service Integrations",
       StartAt: "UpdateStatusToValidating",

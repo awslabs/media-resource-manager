@@ -22,6 +22,9 @@ import {
   Collapse,
   Radio,
   Checkbox,
+  Switch,
+  Row,
+  Col,
 } from 'antd';
 import {
   PlusOutlined,
@@ -37,7 +40,8 @@ import type { MenuProps } from 'antd';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken } from '../utils/auth';
 import { apiCall } from '../utils/api';
-import { listStorageS3Buckets, getStorageConfig, S3Bucket, StorageConfig } from '../utils/storageApi';
+import { listStorageS3Buckets, getStorageConfig, getStoragePricing, S3Bucket, StorageConfig, StoragePricing } from '../utils/storageApi';
+import { estimateFsxWindowsMonthlyCost, formatUsd } from '../utils/pricing';
 
 const { Title, Text, Link } = Typography;
 const { TextArea } = Input;
@@ -111,6 +115,7 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
   // S3 bucket selection state (for Mountpoint S3)
   const [s3Buckets, setS3Buckets] = useState<S3Bucket[]>([]);
   const [storageConfig, setStorageConfig] = useState<StorageConfig | null>(null);
+  const [storagePricing, setStoragePricing] = useState<StoragePricing | null>(null);
   const [s3BucketsLoading, setS3BucketsLoading] = useState(false);
   const [s3PolicyConfirmed, setS3PolicyConfirmed] = useState(false);
 
@@ -245,6 +250,16 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
 
       const requestBody: any = { ...values };
       if (!requestBody.region) delete requestBody.region;
+
+      // FSx Windows: the UI models "disable backups" as a toggle for
+      // discoverability; the backend/CFN model it as retention days = 0.
+      // Coerce here and strip the UI-only field before sending.
+      if (requestBody.type === 'fsx-windows' && requestBody.configuration) {
+        if (requestBody.configuration.enableBackups === false) {
+          requestBody.configuration.automaticBackupRetentionPeriod = 0;
+        }
+        delete requestBody.configuration.enableBackups;
+      }
 
       const response = await apiCall('storage', {
         method: 'POST',
@@ -482,27 +497,66 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
   const teamSize = Form.useWatch(['configuration', 'teamSize'], createForm);
   const haPairs = Form.useWatch(['configuration', 'haPairs'], createForm) || 2;
   const isCrossAccountS3 = Form.useWatch(['configuration', 'isCrossAccount'], createForm);
+  // FSx Windows resilience + storage-type + AZ (issue #29) — drive
+  // conditional form UI. Defaults mirror the API defaults (multi-az + SSD).
+  const fsxWindowsResilience = Form.useWatch(['configuration', 'resilience'], createForm) || 'multi-az';
+  const fsxWindowsStorageType = Form.useWatch(['configuration', 'storageType'], createForm) || 'SSD';
+  // Backups toggle - when disabled the form suppresses the retention-days
+  // InputNumber and we coerce `automaticBackupRetentionPeriod` to 0 at
+  // submit time. Default true because backups should be the default.
+  const fsxWindowsBackupsEnabled = Form.useWatch(['configuration', 'enableBackups'], createForm) ?? true;
+  // Watches that feed the FSx Windows cost estimator; kept adjacent to
+  // resilience/storageType so a future refactor moves them together.
+  const fsxWindowsCapacity = Form.useWatch(['configuration', 'ssdStorageCapacity'], createForm);
+  const fsxWindowsThroughput = Form.useWatch(['configuration', 'throughputCapacity'], createForm);
+  const fsxWindowsRetention = Form.useWatch(['configuration', 'automaticBackupRetentionPeriod'], createForm);
+
+  const fsxWindowsEstimate = useMemo(() => {
+    if (storageType !== 'fsx-windows') return null;
+    return estimateFsxWindowsMonthlyCost(
+      {
+        resilience: fsxWindowsResilience as 'single-az' | 'multi-az',
+        storageType: fsxWindowsStorageType as 'SSD' | 'HDD',
+        ssdStorageCapacity: fsxWindowsCapacity,
+        throughputCapacity: fsxWindowsThroughput,
+        // Coerce to 0 when the backups toggle is off, so the estimate
+        // updates immediately (not just at submit time).
+        automaticBackupRetentionPeriod: fsxWindowsBackupsEnabled ? fsxWindowsRetention : 0,
+      },
+      storagePricing?.fsxWindows
+    );
+  }, [storageType, fsxWindowsResilience, fsxWindowsStorageType, fsxWindowsCapacity, fsxWindowsThroughput, fsxWindowsRetention, fsxWindowsBackupsEnabled, storagePricing]);
 
   // Fetch S3 buckets and config when Mountpoint S3 is selected
   useEffect(() => {
-    if (storageType === 'mountpoint-s3' && showCreateModal) {
-      const fetchS3Data = async () => {
-        setS3BucketsLoading(true);
-        try {
-          const [buckets, config] = await Promise.all([
-            listStorageS3Buckets(),
-            getStorageConfig(),
-          ]);
-          setS3Buckets(buckets);
-          setStorageConfig(config);
-        } catch (error) {
-          console.error('Error fetching S3 data:', error);
-        } finally {
-          setS3BucketsLoading(false);
-        }
-      };
-      fetchS3Data();
-    }
+    if (!showCreateModal) return;
+    // Fetch storage config for any FSx or mountpoint-s3 storage type - the
+    // config carries the deployment's private-subnet AZ list (used by the
+    // FSx-Windows Single-AZ picker) alongside the workstation role ARN
+    // (used by the mountpoint-s3 cross-account policy generator). Pricing
+    // is only fetched for FSx types where it drives the cost estimator.
+    // S3 bucket listing is only relevant for mountpoint-s3.
+    const needsS3Buckets = storageType === 'mountpoint-s3';
+    const needsPricing = storageType === 'fsx-windows' || storageType === 'fsx-ontap';
+    const fetchData = async () => {
+      setS3BucketsLoading(true);
+      try {
+        const configPromise = getStorageConfig();
+        const bucketsPromise = needsS3Buckets ? listStorageS3Buckets() : Promise.resolve<S3Bucket[]>([]);
+        // Pricing failures are swallowed inside getStoragePricing (returns
+        // a null-rate payload) so this Promise.all never rejects on that.
+        const pricingPromise = needsPricing ? getStoragePricing() : Promise.resolve<StoragePricing | null>(null);
+        const [buckets, config, pricing] = await Promise.all([bucketsPromise, configPromise, pricingPromise]);
+        if (needsS3Buckets) setS3Buckets(buckets);
+        setStorageConfig(config);
+        if (needsPricing) setStoragePricing(pricing);
+      } catch (error) {
+        console.error('Error fetching storage config:', error);
+      } finally {
+        setS3BucketsLoading(false);
+      }
+    };
+    fetchData();
   }, [storageType, showCreateModal]);
 
   // Calculate minimum volume size based on HA pairs (100 GiB * 8 constituents * haPairs)
@@ -660,9 +714,9 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
           okButtonProps={{
             disabled: storageType === 'mountpoint-s3' && isCrossAccountS3 && !s3PolicyConfirmed,
           }}
-          width={600}
+          width={storageType === 'fsx-windows' || storageType === 'fsx-ontap' ? 820 : 600}
         >
-          <Form form={createForm} layout="vertical" initialValues={{ type: 'fsx-ontap', configuration: { teamSize: 'medium', storageCapacity: 2048, volumeSize: 1600, backupRetention: 30, haPairs: 2, ssdStorageCapacity: 256, throughputCapacity: 64, automaticBackupRetentionPeriod: 7 } }}>
+          <Form form={createForm} layout="vertical" initialValues={{ type: 'fsx-ontap', configuration: { teamSize: 'medium', storageCapacity: 2048, volumeSize: 1600, backupRetention: 30, haPairs: 2, ssdStorageCapacity: 256, throughputCapacity: 64, automaticBackupRetentionPeriod: 7, resilience: 'multi-az', storageType: 'SSD', enableBackups: true } }}>
             <Form.Item name="name" label="Name" rules={[{ required: true, message: 'Name is required' }]}>
               <Input ref={createNameInputRef} placeholder="Enter storage name" />
             </Form.Item>
@@ -747,23 +801,164 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
             {/* FSx Windows fields */}
             {storageType === 'fsx-windows' && (
               <>
-                <Form.Item name={['configuration', 'ssdStorageCapacity']} label="SSD Storage Capacity (GiB)">
-                  <InputNumber min={32} max={65536} style={{ width: '100%' }} />
-                </Form.Item>
-                <Form.Item name={['configuration', 'throughputCapacity']} label="Throughput Capacity (MB/s)">
-                  <Select options={[
-                    { label: '32 MB/s', value: 32 },
-                    { label: '64 MB/s', value: 64 },
-                    { label: '128 MB/s', value: 128 },
-                    { label: '256 MB/s', value: 256 },
-                    { label: '512 MB/s', value: 512 },
-                    { label: '1024 MB/s', value: 1024 },
-                    { label: '2048 MB/s', value: 2048 },
-                  ]} />
-                </Form.Item>
-                <Form.Item name={['configuration', 'automaticBackupRetentionPeriod']} label="Backup Retention (days)">
-                  <InputNumber min={0} max={90} style={{ width: '100%' }} />
-                </Form.Item>
+                <Row gutter={16}>
+                  <Col xs={24} md={12}>
+                    <Form.Item
+                      name={['configuration', 'resilience']}
+                      label="Resilience"
+                      tooltip="Multi-AZ replicates the file system across two Availability Zones for high availability. Single-AZ places the file system in one AZ at lower cost."
+                      rules={[{ required: true, message: 'Resilience is required' }]}
+                    >
+                      <Select
+                        options={[
+                          { label: 'Multi-AZ (recommended)', value: 'multi-az' },
+                          { label: 'Single-AZ', value: 'single-az' },
+                        ]}
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Form.Item
+                      name={['configuration', 'storageType']}
+                      label="Storage Type"
+                      tooltip="SSD delivers consistent low-latency performance. HDD is a lower-cost option intended for large, less latency-sensitive workloads."
+                      rules={[{ required: true, message: 'Storage type is required' }]}
+                    >
+                      <Select
+                        options={[
+                          { label: 'SSD (recommended)', value: 'SSD' },
+                          { label: 'HDD', value: 'HDD' },
+                        ]}
+                      />
+                    </Form.Item>
+                  </Col>
+                </Row>
+
+                {fsxWindowsStorageType === 'HDD' && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message="HDD storage is lower cost but offers lower performance"
+                    description="HDD file systems have a minimum capacity of 2000 GiB and are best suited for large, cold, or throughput-oriented workloads. Storage type cannot be changed after creation - to move to SSD you must create a new file system and copy the data."
+                  />
+                )}
+
+                <Row gutter={16}>
+                  {fsxWindowsResilience === 'single-az' && (
+                    <Col xs={24} md={12}>
+                      <Form.Item
+                        name={['configuration', 'availabilityZone']}
+                        label="Availability Zone"
+                        tooltip="AZ where the file system will be placed. Only AZs this deployment has private subnets in are offered."
+                        rules={[{ required: true, message: 'Availability Zone is required for Single-AZ' }]}
+                      >
+                        {storageConfig?.availabilityZones && storageConfig.availabilityZones.length > 0 ? (
+                          <Select
+                            placeholder="Select an Availability Zone"
+                            options={storageConfig.availabilityZones.map((az) => ({ label: az, value: az }))}
+                          />
+                        ) : (
+                          // Fallback for deployments that predate the AZ SSM
+                          // parameters or where the config lookup failed. The
+                          // backend still validates the value against SSM.
+                          <Input placeholder="us-east-1a" />
+                        )}
+                      </Form.Item>
+                    </Col>
+                  )}
+                  <Col xs={24} md={12}>
+                    <Form.Item
+                      name={['configuration', 'ssdStorageCapacity']}
+                      label={fsxWindowsStorageType === 'HDD' ? 'HDD Storage Capacity (GiB)' : 'SSD Storage Capacity (GiB)'}
+                      dependencies={[['configuration', 'storageType']]}
+                      rules={[
+                        { required: true, message: 'Storage capacity is required' },
+                        {
+                          validator: (_, value) => {
+                            const min = fsxWindowsStorageType === 'HDD' ? 2000 : 32;
+                            if (value === undefined || value === null || value === '') return Promise.resolve();
+                            if (typeof value === 'number' && value >= min) return Promise.resolve();
+                            return Promise.reject(new Error(`Minimum capacity for ${fsxWindowsStorageType} is ${min} GiB`));
+                          },
+                        },
+                      ]}
+                    >
+                      <InputNumber
+                        min={fsxWindowsStorageType === 'HDD' ? 2000 : 32}
+                        max={65536}
+                        style={{ width: '100%' }}
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Form.Item name={['configuration', 'throughputCapacity']} label="Throughput Capacity (MB/s)">
+                      <Select options={[
+                        { label: '32 MB/s', value: 32 },
+                        { label: '64 MB/s', value: 64 },
+                        { label: '128 MB/s', value: 128 },
+                        { label: '256 MB/s', value: 256 },
+                        { label: '512 MB/s', value: 512 },
+                        { label: '1024 MB/s', value: 1024 },
+                        { label: '2048 MB/s', value: 2048 },
+                      ]} />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Form.Item
+                      name={['configuration', 'enableBackups']}
+                      label="Automatic Backups"
+                      valuePropName="checked"
+                      tooltip="When enabled, FSx takes a daily backup and retains it for the specified number of days. Disable to skip backups entirely (not recommended for production)."
+                    >
+                      <Switch checkedChildren="Enabled" unCheckedChildren="Disabled" />
+                    </Form.Item>
+                  </Col>
+                  {fsxWindowsBackupsEnabled && (
+                    <Col xs={24} md={12}>
+                      <Form.Item
+                        name={['configuration', 'automaticBackupRetentionPeriod']}
+                        label="Backup Retention (days)"
+                        rules={[{ required: true, message: 'Retention days is required when backups are enabled' }]}
+                      >
+                        <InputNumber min={1} max={90} style={{ width: '100%' }} />
+                      </Form.Item>
+                    </Col>
+                  )}
+                </Row>
+
+                {fsxWindowsEstimate && (
+                  <Alert
+                    type="info"
+                    showIcon
+                    style={{ marginBottom: 16 }}
+                    message={
+                      <Space>
+                        <span>Estimated monthly cost:</span>
+                        <Text strong>{formatUsd(fsxWindowsEstimate.total)}</Text>
+                        <Text type="secondary">/ month</Text>
+                      </Space>
+                    }
+                    description={
+                      <>
+                        <div style={{ marginTop: 4 }}>
+                          {fsxWindowsEstimate.breakdown.storage !== undefined && (
+                            <span style={{ marginRight: 16 }}>Storage: {formatUsd(fsxWindowsEstimate.breakdown.storage)}</span>
+                          )}
+                          {fsxWindowsEstimate.breakdown.throughput !== undefined && (
+                            <span style={{ marginRight: 16 }}>Throughput: {formatUsd(fsxWindowsEstimate.breakdown.throughput)}</span>
+                          )}
+                          {fsxWindowsEstimate.breakdown.backup !== undefined && (
+                            <span style={{ marginRight: 16 }}>Backups: {formatUsd(fsxWindowsEstimate.breakdown.backup)}</span>
+                          )}
+                        </div>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          Live AWS public pricing for {storagePricing?.region || 'this Region'}. Excludes cross-AZ data transfer, provisioned IOPS above defaults, and backup-storage growth beyond the initial file system size.
+                        </Text>
+                      </>
+                    }
+                  />
+                )}
               </>
             )}
 

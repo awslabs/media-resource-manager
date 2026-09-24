@@ -2,9 +2,40 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const { S3Client, ListBucketsCommand, GetBucketLocationCommand } = require('@aws-sdk/client-s3');
+const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { requireAdmin } = require('./authz');
 
 const s3Client = new S3Client({ region: process.env.AWS_REGION });
+const ssmClient = new SSMClient({ region: process.env.AWS_REGION });
+
+/**
+ * Look up the Availability Zones this deployment has private subnets in by
+ * reading /{pascalCaseName}/Network/PrivateSubnet{n}/AZ from SSM. Returns
+ * an empty array on lookup failure so the UI degrades to free-form entry
+ * instead of blocking storage creation entirely.
+ */
+async function listPrivateSubnetAzs() {
+  const pascalCaseName = process.env.PASCAL_CASE_NAME || 'MediaResourceManager';
+  try {
+    const countResp = await ssmClient.send(new GetParameterCommand({
+      Name: `/${pascalCaseName}/Network/PrivateSubnetCount`
+    }));
+    const count = parseInt(countResp.Parameter.Value, 10);
+    const azs = [];
+    for (let i = 1; i <= count; i++) {
+      try {
+        const r = await ssmClient.send(new GetParameterCommand({
+          Name: `/${pascalCaseName}/Network/PrivateSubnet${i}/AZ`
+        }));
+        if (r.Parameter && r.Parameter.Value) azs.push(r.Parameter.Value);
+      } catch (_) { /* skip - deployment may predate this parameter */ }
+    }
+    return azs;
+  } catch (err) {
+    console.warn(`listPrivateSubnetAzs: lookup failed (${err.name}); returning []`);
+    return [];
+  }
+}
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -22,12 +53,14 @@ exports.handler = async (event) => {
   // identifiers to help admins configure cross-account bucket policies, and
   // knowing an owned role ARN + account id does not itself confer any access.
   if (path.endsWith('/config')) {
+    const availabilityZones = await listPrivateSubnetAzs();
     return {
       statusCode: 200,
       headers: corsHeaders,
       body: JSON.stringify({
         workstationRoleArn: process.env.WORKSTATION_ROLE_ARN,
         accountId: process.env.AWS_ACCOUNT_ID,
+        availabilityZones,
       })
     };
   }

@@ -1267,6 +1267,7 @@ export class ApiStack extends cdk.Stack {
     const s3MountIntegration = new apigateway.LambdaIntegration(props.storageStack.functions.s3MountManager);
     const nfsMountIntegration = new apigateway.LambdaIntegration(props.storageStack.functions.nfsMountManager);
     const listS3BucketsIntegration = new apigateway.LambdaIntegration(props.storageStack.functions.listS3Buckets);
+    const getStoragePricingIntegration = new apigateway.LambdaIntegration(props.storageStack.functions.getStoragePricing);
 
     // API Methods - now using dedicated functions
     workstationsResource.addMethod('GET', workstationIntegration, { authorizer });
@@ -1492,6 +1493,14 @@ export class ApiStack extends cdk.Stack {
     // Storage Config endpoint - GET /storage/config (for cross-account bucket policy generation)
     const storageConfigResource = storageResource.addResource('config');
     storageConfigResource.addMethod('GET', listS3BucketsIntegration, { authorizer });
+
+    // Storage Pricing endpoint - GET /storage/pricing?region=<region>
+    // Returns live AWS Price List rates for FSx storage/throughput/backup
+    // so the create-storage UI can render a monthly cost estimate that
+    // never goes stale. Available to any authenticated user; response
+    // contains only public pricing data.
+    const storagePricingResource = storageResource.addResource('pricing');
+    storagePricingResource.addMethod('GET', getStoragePricingIntegration, { authorizer });
 
     // ===========================================
     // DATASYNC API

@@ -287,6 +287,18 @@ umount ${details.mountPath}`;
                 <Descriptions.Item label="Storage Capacity">{details.storageCapacity || details.configuration?.ssdStorageCapacity ? `${details.storageCapacity || details.configuration?.ssdStorageCapacity} GiB` : '-'}</Descriptions.Item>
                 <Descriptions.Item label="Throughput Capacity">{details.throughput || details.configuration?.throughputCapacity ? `${details.throughput || details.configuration?.throughputCapacity} MB/s` : '-'}</Descriptions.Item>
                 <Descriptions.Item label="Backup Retention">{details.backupRetention || details.configuration?.automaticBackupRetentionPeriod ? `${details.backupRetention || details.configuration?.automaticBackupRetentionPeriod} days` : '-'}</Descriptions.Item>
+                <Descriptions.Item label="Resilience">
+                  {(() => {
+                    const r = (details.resilience || details.configuration?.resilience || 'multi-az').toString();
+                    return r === 'single-az' ? 'Single-AZ' : 'Multi-AZ';
+                  })()}
+                </Descriptions.Item>
+                <Descriptions.Item label="Storage Type">
+                  {(details.storageType || details.configuration?.storageType || 'SSD').toString().toUpperCase()}
+                </Descriptions.Item>
+                <Descriptions.Item label="Availability Zone">
+                  {details.availabilityZone || details.configuration?.availabilityZone || '-'}
+                </Descriptions.Item>
               </Descriptions>
             )}
             {details.type === 'mountpoint-s3' && (
