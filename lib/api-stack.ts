@@ -1756,6 +1756,14 @@ export class ApiStack extends cdk.Stack {
       environment: {
         JWT_SECRET_ARN: jwtSecret.secretArn,
         PASCAL_CASE_NAME: props.pascalCaseName,
+        // Admin group name(s) to check for LDAP admin privilege. Comma-separated,
+        // case-insensitive, matched against each group's CN (parsed from DN).
+        // Defaults to "AWS Delegated Administrators" for backward compatibility
+        // with existing AWS Managed Microsoft AD deployments where that group
+        // grants admin. Customer AD (AD Connector) deployments should set this
+        // to a group that already exists in the customer's directory (e.g. via
+        // the adminGroupName CDK context / CFN parameter).
+        ADMIN_GROUP_NAME: ssm.StringParameter.valueForStringParameter(this, `/${props.pascalCaseName}/Auth/AdminGroupName`),
       },
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 15,
