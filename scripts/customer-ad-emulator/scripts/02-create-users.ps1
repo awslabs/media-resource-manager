@@ -79,6 +79,31 @@ if ($existing) {
 # but for a test fixture the simpler pattern is fine.
 Write-Host "  Service account is a member of Domain Users by default"
 
+# AD Connector uses this account to perform ds:CreateComputer / ds:DeleteComputer
+# on behalf of MRM when workstations are provisioned. Those calls require
+# CreateChild / DeleteChild + Write on the target OU. For this test emulator we
+# add the account to Domain Admins as the simplest way to grant everything
+# MRM might call — that keeps the fixture setup script small and unambiguous.
+#
+# Real customers deploying with AdMode=connector against their own AD should
+# NOT do this. Instead, use least-privilege delegation on the OU where
+# workstations will land, e.g.:
+#
+#   dsacls "OU=Workstations,DC=customer,DC=internal" `
+#     /G "CUSTOMER\MRMServiceAccount:CCDC;computer" /I:T
+#
+# See docs/BYO_AD_MIGRATION.md for the full prerequisite checklist.
+Write-Host ""
+Write-Host "=== Adding service account to Domain Admins (test-fixture only) ==="
+$isDomainAdmin = Get-ADPrincipalGroupMembership -Identity $ServiceAccountName |
+    Where-Object { $_.SamAccountName -eq 'Domain Admins' }
+if ($isDomainAdmin) {
+    Write-Host "  Service account is already a member of Domain Admins"
+} else {
+    Add-ADGroupMember -Identity "Domain Admins" -Members $ServiceAccountName
+    Write-Host "  Added service account to Domain Admins"
+}
+
 # ─── Admin group ────────────────────────────────────────────────────────
 Write-Host ""
 Write-Host "=== Creating admin group: $AdminGroupName ==="
