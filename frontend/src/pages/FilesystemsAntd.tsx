@@ -23,6 +23,8 @@ import {
   Radio,
   Checkbox,
   Switch,
+  Row,
+  Col,
 } from 'antd';
 import {
   PlusOutlined,
@@ -712,7 +714,7 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
           okButtonProps={{
             disabled: storageType === 'mountpoint-s3' && isCrossAccountS3 && !s3PolicyConfirmed,
           }}
-          width={600}
+          width={storageType === 'fsx-windows' || storageType === 'fsx-ontap' ? 820 : 600}
         >
           <Form form={createForm} layout="vertical" initialValues={{ type: 'fsx-ontap', configuration: { teamSize: 'medium', storageCapacity: 2048, volumeSize: 1600, backupRetention: 30, haPairs: 2, ssdStorageCapacity: 256, throughputCapacity: 64, automaticBackupRetentionPeriod: 7, resilience: 'multi-az', storageType: 'SSD', enableBackups: true } }}>
             <Form.Item name="name" label="Name" rules={[{ required: true, message: 'Name is required' }]}>
@@ -799,33 +801,38 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
             {/* FSx Windows fields */}
             {storageType === 'fsx-windows' && (
               <>
-                <Form.Item
-                  name={['configuration', 'resilience']}
-                  label="Resilience"
-                  tooltip="Multi-AZ replicates the file system across two Availability Zones for high availability. Single-AZ places the file system in one AZ at lower cost."
-                  rules={[{ required: true, message: 'Resilience is required' }]}
-                >
-                  <Select
-                    options={[
-                      { label: 'Multi-AZ (recommended)', value: 'multi-az' },
-                      { label: 'Single-AZ', value: 'single-az' },
-                    ]}
-                  />
-                </Form.Item>
-
-                <Form.Item
-                  name={['configuration', 'storageType']}
-                  label="Storage Type"
-                  tooltip="SSD delivers consistent low-latency performance. HDD is a lower-cost option intended for large, less latency-sensitive workloads."
-                  rules={[{ required: true, message: 'Storage type is required' }]}
-                >
-                  <Select
-                    options={[
-                      { label: 'SSD (recommended)', value: 'SSD' },
-                      { label: 'HDD', value: 'HDD' },
-                    ]}
-                  />
-                </Form.Item>
+                <Row gutter={16}>
+                  <Col xs={24} md={12}>
+                    <Form.Item
+                      name={['configuration', 'resilience']}
+                      label="Resilience"
+                      tooltip="Multi-AZ replicates the file system across two Availability Zones for high availability. Single-AZ places the file system in one AZ at lower cost."
+                      rules={[{ required: true, message: 'Resilience is required' }]}
+                    >
+                      <Select
+                        options={[
+                          { label: 'Multi-AZ (recommended)', value: 'multi-az' },
+                          { label: 'Single-AZ', value: 'single-az' },
+                        ]}
+                      />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Form.Item
+                      name={['configuration', 'storageType']}
+                      label="Storage Type"
+                      tooltip="SSD delivers consistent low-latency performance. HDD is a lower-cost option intended for large, less latency-sensitive workloads."
+                      rules={[{ required: true, message: 'Storage type is required' }]}
+                    >
+                      <Select
+                        options={[
+                          { label: 'SSD (recommended)', value: 'SSD' },
+                          { label: 'HDD', value: 'HDD' },
+                        ]}
+                      />
+                    </Form.Item>
+                  </Col>
+                </Row>
 
                 {fsxWindowsStorageType === 'HDD' && (
                   <Alert
@@ -837,77 +844,88 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
                   />
                 )}
 
-                {fsxWindowsResilience === 'single-az' && (
-                  <Form.Item
-                    name={['configuration', 'availabilityZone']}
-                    label="Availability Zone"
-                    tooltip="AZ where the file system will be placed. Only AZs this deployment has private subnets in are offered."
-                    rules={[{ required: true, message: 'Availability Zone is required for Single-AZ' }]}
-                  >
-                    {storageConfig?.availabilityZones && storageConfig.availabilityZones.length > 0 ? (
-                      <Select
-                        placeholder="Select an Availability Zone"
-                        options={storageConfig.availabilityZones.map((az) => ({ label: az, value: az }))}
+                <Row gutter={16}>
+                  {fsxWindowsResilience === 'single-az' && (
+                    <Col xs={24} md={12}>
+                      <Form.Item
+                        name={['configuration', 'availabilityZone']}
+                        label="Availability Zone"
+                        tooltip="AZ where the file system will be placed. Only AZs this deployment has private subnets in are offered."
+                        rules={[{ required: true, message: 'Availability Zone is required for Single-AZ' }]}
+                      >
+                        {storageConfig?.availabilityZones && storageConfig.availabilityZones.length > 0 ? (
+                          <Select
+                            placeholder="Select an Availability Zone"
+                            options={storageConfig.availabilityZones.map((az) => ({ label: az, value: az }))}
+                          />
+                        ) : (
+                          // Fallback for deployments that predate the AZ SSM
+                          // parameters or where the config lookup failed. The
+                          // backend still validates the value against SSM.
+                          <Input placeholder="us-east-1a" />
+                        )}
+                      </Form.Item>
+                    </Col>
+                  )}
+                  <Col xs={24} md={12}>
+                    <Form.Item
+                      name={['configuration', 'ssdStorageCapacity']}
+                      label={fsxWindowsStorageType === 'HDD' ? 'HDD Storage Capacity (GiB)' : 'SSD Storage Capacity (GiB)'}
+                      dependencies={[['configuration', 'storageType']]}
+                      rules={[
+                        { required: true, message: 'Storage capacity is required' },
+                        {
+                          validator: (_, value) => {
+                            const min = fsxWindowsStorageType === 'HDD' ? 2000 : 32;
+                            if (value === undefined || value === null || value === '') return Promise.resolve();
+                            if (typeof value === 'number' && value >= min) return Promise.resolve();
+                            return Promise.reject(new Error(`Minimum capacity for ${fsxWindowsStorageType} is ${min} GiB`));
+                          },
+                        },
+                      ]}
+                    >
+                      <InputNumber
+                        min={fsxWindowsStorageType === 'HDD' ? 2000 : 32}
+                        max={65536}
+                        style={{ width: '100%' }}
                       />
-                    ) : (
-                      // Fallback for deployments that predate the AZ SSM
-                      // parameters or where the config lookup failed. The
-                      // backend still validates the value against SSM.
-                      <Input placeholder="us-east-1a" />
-                    )}
-                  </Form.Item>
-                )}
-
-                <Form.Item
-                  name={['configuration', 'ssdStorageCapacity']}
-                  label={fsxWindowsStorageType === 'HDD' ? 'HDD Storage Capacity (GiB)' : 'SSD Storage Capacity (GiB)'}
-                  dependencies={[['configuration', 'storageType']]}
-                  rules={[
-                    { required: true, message: 'Storage capacity is required' },
-                    {
-                      validator: (_, value) => {
-                        const min = fsxWindowsStorageType === 'HDD' ? 2000 : 32;
-                        if (value === undefined || value === null || value === '') return Promise.resolve();
-                        if (typeof value === 'number' && value >= min) return Promise.resolve();
-                        return Promise.reject(new Error(`Minimum capacity for ${fsxWindowsStorageType} is ${min} GiB`));
-                      },
-                    },
-                  ]}
-                >
-                  <InputNumber
-                    min={fsxWindowsStorageType === 'HDD' ? 2000 : 32}
-                    max={65536}
-                    style={{ width: '100%' }}
-                  />
-                </Form.Item>
-                <Form.Item name={['configuration', 'throughputCapacity']} label="Throughput Capacity (MB/s)">
-                  <Select options={[
-                    { label: '32 MB/s', value: 32 },
-                    { label: '64 MB/s', value: 64 },
-                    { label: '128 MB/s', value: 128 },
-                    { label: '256 MB/s', value: 256 },
-                    { label: '512 MB/s', value: 512 },
-                    { label: '1024 MB/s', value: 1024 },
-                    { label: '2048 MB/s', value: 2048 },
-                  ]} />
-                </Form.Item>
-                <Form.Item
-                  name={['configuration', 'enableBackups']}
-                  label="Automatic Backups"
-                  valuePropName="checked"
-                  tooltip="When enabled, FSx takes a daily backup and retains it for the specified number of days. Disable to skip backups entirely (not recommended for production)."
-                >
-                  <Switch checkedChildren="Enabled" unCheckedChildren="Disabled" />
-                </Form.Item>
-                {fsxWindowsBackupsEnabled && (
-                  <Form.Item
-                    name={['configuration', 'automaticBackupRetentionPeriod']}
-                    label="Backup Retention (days)"
-                    rules={[{ required: true, message: 'Retention days is required when backups are enabled' }]}
-                  >
-                    <InputNumber min={1} max={90} style={{ width: '100%' }} />
-                  </Form.Item>
-                )}
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Form.Item name={['configuration', 'throughputCapacity']} label="Throughput Capacity (MB/s)">
+                      <Select options={[
+                        { label: '32 MB/s', value: 32 },
+                        { label: '64 MB/s', value: 64 },
+                        { label: '128 MB/s', value: 128 },
+                        { label: '256 MB/s', value: 256 },
+                        { label: '512 MB/s', value: 512 },
+                        { label: '1024 MB/s', value: 1024 },
+                        { label: '2048 MB/s', value: 2048 },
+                      ]} />
+                    </Form.Item>
+                  </Col>
+                  <Col xs={24} md={12}>
+                    <Form.Item
+                      name={['configuration', 'enableBackups']}
+                      label="Automatic Backups"
+                      valuePropName="checked"
+                      tooltip="When enabled, FSx takes a daily backup and retains it for the specified number of days. Disable to skip backups entirely (not recommended for production)."
+                    >
+                      <Switch checkedChildren="Enabled" unCheckedChildren="Disabled" />
+                    </Form.Item>
+                  </Col>
+                  {fsxWindowsBackupsEnabled && (
+                    <Col xs={24} md={12}>
+                      <Form.Item
+                        name={['configuration', 'automaticBackupRetentionPeriod']}
+                        label="Backup Retention (days)"
+                        rules={[{ required: true, message: 'Retention days is required when backups are enabled' }]}
+                      >
+                        <InputNumber min={1} max={90} style={{ width: '100%' }} />
+                      </Form.Item>
+                    </Col>
+                  )}
+                </Row>
 
                 {fsxWindowsEstimate && (
                   <Alert
