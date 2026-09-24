@@ -33,6 +33,21 @@ export interface InfrastructureStackProps extends cdk.StackProps {
   ssoUserPoolClientId?: string;
   /** Optional: Domain URL of the external SSO User Pool */
   ssoUserPoolDomain?: string;
+  /**
+   * AD provisioning mode. `'managed'` (default) creates AWS Managed Microsoft
+   * AD; `'connector'` creates an AD Connector against a customer-supplied AD.
+   * See issue #27 (BYO-AD).
+   */
+  adMode?: 'managed' | 'connector';
+  /** Required when `adMode === 'connector'`. */
+  adConnectorConfig?: {
+    domainName: string;
+    dnsServerIps: string[];
+    serviceAccountSecretArn: string;
+    size?: 'Small' | 'Large';
+    netbiosName?: string;
+    description?: string;
+  };
 }
 
 export class InfrastructureStack extends cdk.Stack {
@@ -93,7 +108,8 @@ export class InfrastructureStack extends cdk.Stack {
       encryptionKey: this.security.dataEncryptionKey,
     });
 
-    // Identity construct (AWS Managed AD) - depends on network and database
+    // Identity construct (AWS Managed AD by default, AD Connector when
+    // adMode='connector') - depends on network and database
     this.identity = new IdentityConstruct(this, 'Identity', {
       vpc: this.network.vpc,
       privateSubnets: this.network.privateSubnets,
@@ -101,6 +117,8 @@ export class InfrastructureStack extends cdk.Stack {
       acronym: props.acronym,
       userTableName: this.database.userTable.tableName,
       encryptionKey: this.security.dataEncryptionKey,
+      adMode: props.adMode,
+      adConnectorConfig: props.adConnectorConfig,
     });
     this.identity.node.addDependency(this.network);
     this.identity.node.addDependency(this.database);

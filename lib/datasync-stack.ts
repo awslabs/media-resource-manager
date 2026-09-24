@@ -16,6 +16,14 @@ interface DataSyncStackProps extends cdk.StackProps {
   pascalCaseName: string;
   acronym: string;
   dataEncryptionKey?: kms.IKey;
+  /**
+   * ARN of the AD service-account secret ({username, password} JSON) used by
+   * the create-location Lambda when building SMB DataSync locations. In
+   * managed-AD mode this points at the MRM-provisioned ResourceAdmin secret;
+   * in AD-Connector mode it points at the customer-supplied secret. Wired
+   * through from `InfrastructureStack.identity.serviceAccountSecretArn`.
+   */
+  adServiceAccountSecretArn: string;
 }
 
 export class DataSyncStack extends cdk.Stack {
@@ -259,7 +267,10 @@ export class DataSyncStack extends cdk.Stack {
       environment: {
         ...commonEnv,
         AD_DOMAIN_PARAMETER_NAME: `/${props.pascalCaseName}/Identity/ActiveDirectoryDomainName`,
-        AD_CREDENTIALS_SECRET_ARN: `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/${props.pascalCaseName}/Identity/ResourceAdminActiveDirectoryLoginCredentials`, // pragma: allowlist secret
+        // ARN is wired via CDK cross-stack ref rather than derived from a
+        // hardcoded name pattern, so both AdMode=managed and AdMode=connector
+        // work identically at runtime.
+        AD_CREDENTIALS_SECRET_ARN: props.adServiceAccountSecretArn, // pragma: allowlist secret
       },
     });
 
@@ -269,10 +280,12 @@ export class DataSyncStack extends cdk.Stack {
       actions: ['ssm:GetParameter'],
       resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/Identity/ActiveDirectoryDomainName`],
     }));
+    // Grant read access to the AD service-account secret. The `*` suffix
+    // covers the random 6-char version suffix Secrets Manager appends.
     this.functions.createLocation.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['secretsmanager:GetSecretValue'],
-      resources: [`arn:aws:secretsmanager:${this.region}:${this.account}:secret:/${props.pascalCaseName}/Identity/ResourceAdminActiveDirectoryLoginCredentials*`],
+      resources: [`${props.adServiceAccountSecretArn}*`],
     }));
 
     // Delete DataSync Location Function

@@ -118,5 +118,40 @@
     "ParameterKey": "SsoUserPoolDomain",
     "ParameterValue": "",
     "Description": "Optional: Domain URL of the external SSO User Pool (e.g., https://my-app.auth.us-east-1.amazoncognito.com). Required when SsoUserPoolArn is set."
+  },
+  {
+    "ParameterKey": "AdMode",
+    "ParameterValue": "managed",
+    "Description": "'managed' (default) provisions AWS Managed Microsoft AD inside the MRM VPC. 'connector' creates an AWS AD Connector that proxies to a customer-supplied Active Directory reachable from the VPC (BYO-AD). When 'connector' is selected, the AdDomainName, AdDnsServerIps, and AdServiceAccountSecretArn parameters are all required. See issue #27."
+  },
+  {
+    "ParameterKey": "AdDomainName",
+    "ParameterValue": "",
+    "Description": "Required when AdMode=connector. FQDN of the customer's Active Directory (e.g. 'customer.internal')."
+  },
+  {
+    "ParameterKey": "AdDnsServerIps",
+    "ParameterValue": "",
+    "Description": "Required when AdMode=connector. Comma-separated list of 1-4 domain controller DNS IPs reachable from the MRM VPC (e.g. '10.1.1.87' or '10.1.1.87,10.1.1.88')."
+  },
+  {
+    "ParameterKey": "AdServiceAccountSecretArn",
+    "ParameterValue": "",
+    "Description": "Required when AdMode=connector. Full ARN of a Secrets Manager secret in the same account and region as MRM. The secret must contain JSON of the form {\"username\": \"...\", \"password\": \"...\"} for the AD Connector service account the customer created inside their own AD."
+  },
+  {
+    "ParameterKey": "AdConnectorSize",
+    "ParameterValue": "",
+    "Description": "Optional (AdMode=connector only). 'Small' (default) supports up to 500 users; 'Large' supports up to 5,000 users. Leave empty for 'Small'."
+  },
+  {
+    "ParameterKey": "AdNetbiosName",
+    "ParameterValue": "",
+    "Description": "Optional (AdMode=connector only). Short NetBIOS name for the customer's domain (e.g. 'CUSTOMER'). If omitted, derived from the first label of AdDomainName."
+  },
+  {
+    "ParameterKey": "AdConnectorDescription",
+    "ParameterValue": "",
+    "Description": "Optional (AdMode=connector only). Human-readable description shown in the Directory Service console."
   }
 ]

@@ -157,31 +157,56 @@ async function authenticateWithLDAP(username, password) {
                       displayName = displayName || attributes.cn;
                     }
                     
-                    // Check multiple possible group attributes
+                    // Check multiple possible group attributes and match each
+                    // group's CN (parsed from its DN) against the configured
+                    // admin group name(s). ADMIN_GROUP_NAME is populated from
+                    // the /Auth/AdminGroupName SSM parameter, seeded from the
+                    // adminGroupName CDK context / CFN parameter (default
+                    // "MRM-Admins"). Comma-separated values allow multiple
+                    // admin groups. "AWS Delegated Administrators" is always
+                    // honored so that upgrades from AWS Managed Microsoft AD
+                    // (where that group grants admin by default) keep working
+                    // even if the operator has not updated adminGroupName.
+                    const adminGroupConfig = process.env.ADMIN_GROUP_NAME || 'AWS Delegated Administrators';
+                    const configuredAdminGroups = adminGroupConfig
+                      .split(',')
+                      .map(g => g.trim().toLowerCase())
+                      .filter(g => g);
+                    const validAdminGroups = new Set([
+                      ...configuredAdminGroups,
+                      'aws delegated administrators',
+                    ]);
+                    // DN example: "CN=MRM-Admins,OU=Groups,DC=customer,DC=internal"
+                    const extractCn = (dn) => {
+                      const match = /^CN=([^,]+)/i.exec(String(dn));
+                      return match ? match[1].trim().toLowerCase() : String(dn).trim().toLowerCase();
+                    };
                     const groupAttributes = ['memberOf', 'member', 'groups', 'group'];
                     let foundGroups = false;
-                    
+                    let matchedAdminGroup = null;
+
                     for (const groupAttr of groupAttributes) {
                       if (attributes[groupAttr]) {
                         const groups = Array.isArray(attributes[groupAttr]) ? attributes[groupAttr] : [attributes[groupAttr]];
                         console.log('Found groups in', '"' + groupAttr + '":', groups);
                         foundGroups = true;
-                        
-                        isAdmin = groups.some(group => {
-                          const groupLower = group.toLowerCase();
-                          return groupLower.includes('aws delegated administrators') ||
-                                 groupLower.includes('aws-delegated-administrators') ||
-                                 groupLower.includes('awsdelegatedadministrators');
-                        });
-                        
+
+                        for (const group of groups) {
+                          const cn = extractCn(group);
+                          if (validAdminGroups.has(cn)) {
+                            isAdmin = true;
+                            matchedAdminGroup = group;
+                            break;
+                          }
+                        }
+
                         if (isAdmin) {
-                          console.log('User is admin based on group:', groups.find(g => 
-                            g.toLowerCase().includes('aws') && g.toLowerCase().includes('admin')
-                          ));
+                          console.log('User is admin based on group:', matchedAdminGroup);
                           break;
                         }
                       }
                     }
+                    console.log('Configured admin groups:', Array.from(validAdminGroups));
                     
                     if (!foundGroups) {
                       console.log('No group attributes found. Available attributes:', Object.keys(attributes));

@@ -222,6 +222,13 @@ def create_security_group(clients, vpc_id: str, allow_from_sg: str | None,
         ("tcp", 636, 636, "LDAPS"),
         ("tcp", 3268, 3268, "Global catalog LDAP"),
         ("tcp", 3269, 3269, "Global catalog LDAPS"),
+        # ADWS (Active Directory Web Services) is used by FSx for Windows and
+        # by any client that runs Get-ADUser / Set-ADUser / Add-ADGroupMember
+        # PowerShell cmdlets against the domain. FSx's file-system creation
+        # times out and fails with NoCommunicationWithDCs if 9389 is blocked,
+        # even though LDAP/Kerberos on 389/88 are open. Domain-join alone does
+        # not need this port, so a missing rule is easy to miss.
+        ("tcp", 9389, 9389, "ADWS (Active Directory Web Services) - required by FSx for Windows"),
         ("tcp", 49152, 65535, "RPC dynamic ports"),
     ]
 
