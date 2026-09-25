@@ -976,11 +976,19 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
       width: 160,
       sorter: (a, b) => `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`),
       sortOrder: userSortedInfo?.columnKey === 'name' ? userSortedInfo.order : null,
-      render: (_, record) => (
-        <Link onClick={() => (window.location.href = `/users/${record.userId}`)}>
-          {record.firstName} {record.lastName}
-        </Link>
-      ),
+      render: (_, record) => {
+        // Prefer the AD-populated first+last name. Fall back to the local
+        // part of the email, then the userId, so JIT-provisioned service
+        // accounts (which often have no givenName/sn in AD) still show
+        // something meaningful in the Name column instead of an empty link.
+        const humanName = `${record.firstName || ''} ${record.lastName || ''}`.trim();
+        const fallback = record.email ? record.email.split('@')[0] : record.userId;
+        return (
+          <Link onClick={() => (window.location.href = `/users/${record.userId}`)}>
+            {humanName || fallback}
+          </Link>
+        );
+      },
     },
     {
       title: 'Email',
