@@ -397,7 +397,7 @@ const LoginAntd: React.FC<LoginProps> = ({ onSignIn, productName }) => {
                 prefix={<UserOutlined />}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="Enter your AD username (without domain)"
+                placeholder="Enter your AD username"
                 size="large"
               />
             </Form.Item>

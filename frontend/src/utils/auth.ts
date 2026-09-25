@@ -298,11 +298,26 @@ export const isBedrockEnabled = async (): Promise<boolean> => {
 // LDAP Authentication
 export const signInWithLDAP = async (username: string, password: string) => {
   const config = await getConfig();
-  
+
+  // Normalise UPN and NetBIOS forms into a bare sAMAccountName before we
+  // POST to /auth/ldap. AD administrators routinely type any of:
+  //   - "MRMServiceAccount"                    (sAMAccountName; canonical)
+  //   - "MRMServiceAccount@customer.internal"  (UPN)
+  //   - "CUSTOMER\\MRMServiceAccount"          (down-level / NetBIOS)
+  // and the LDAP search filter binds on sAMAccountName only, so the
+  // non-canonical forms silently fail against the emulator despite being
+  // valid AD identifiers. Backend also normalises defensively; doing it
+  // here first means the login form succeeds on the first attempt instead
+  // of the user having to re-type without the domain suffix.
+  const normalisedUsername = username
+    .trim()
+    .replace(/^[^\\]+\\/, '') // strip DOMAIN\ prefix if present
+    .replace(/@.+$/, '');     // strip @domain.suffix if present
+
   const response = await fetch(`${config.apiUrl}auth/ldap`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password }),
+    body: JSON.stringify({ username: normalisedUsername, password }),
   });
   
   if (!response.ok) {

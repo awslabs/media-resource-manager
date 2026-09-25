@@ -332,10 +332,21 @@ async function authenticateWithLDAP(username, password) {
         }
         
         exports.handler = async (event) => {
-          console.log('Direct LDAP Auth request for user:', JSON.parse(event.body || '{}').username);
-          
-          const { username, password } = JSON.parse(event.body || '{}');
-          
+          const rawBody = JSON.parse(event.body || '{}');
+          // Normalise UPN ("user@domain.tld") and down-level ("DOMAIN\user")
+          // forms into a bare sAMAccountName. The LDAP search filter below
+          // binds on sAMAccountName only, so the non-canonical forms would
+          // otherwise silently fail to match despite being valid AD
+          // identifiers. Frontend also strips defensively; doing it here
+          // covers direct API callers (curl, integration tests, other
+          // clients) too.
+          const rawUsername = rawBody.username;
+          const username = typeof rawUsername === 'string'
+            ? rawUsername.trim().replace(/^[^\\]+\\/, '').replace(/@.+$/, '')
+            : rawUsername;
+          const password = rawBody.password;
+          console.log('Direct LDAP Auth request for user:', username, rawUsername !== username ? `(normalised from "${rawUsername}")` : '');
+
           if (!username || !password) {
             return {
               statusCode: 400,

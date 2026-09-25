@@ -480,7 +480,7 @@ const Login: React.FC<LoginProps> = ({ onSignIn, productName }) => {
                   <Input
                     value={username}
                     onChange={({ detail }) => setUsername(detail.value)}
-                    placeholder="Enter your AD username (without domain)"
+                    placeholder="Enter your AD username"
                     required
                   />
                 </FormField>
