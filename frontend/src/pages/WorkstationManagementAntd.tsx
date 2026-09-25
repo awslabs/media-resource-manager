@@ -80,6 +80,7 @@ interface Workstation {
   workstationName?: string;
   assignedUserId?: string;
   assignedUserDisplay?: string;
+  assignedUserEmail?: string;
   region?: string;
   instanceType: string;
   platform?: string;
@@ -1689,6 +1690,17 @@ const WorkstationManagementAntd: React.FC<WorkstationManagementAntdProps> = ({
         ) : (
           <Text type="secondary">Unassigned</Text>
         );
+      },
+    },
+    {
+      title: 'Email',
+      key: 'assignedUserEmail',
+      sorter: (a, b) => (a.assignedUserEmail || '').localeCompare(b.assignedUserEmail || ''),
+      sortOrder: sortedInfo?.columnKey === 'assignedUserEmail' ? sortedInfo.order : null,
+      render: (_, record) => {
+        const email = record.assignedUserEmail
+          || users.find(u => u.userId === record.assignedUserId)?.email;
+        return email ? email : <Text type="secondary">-</Text>;
       },
     },
     {
