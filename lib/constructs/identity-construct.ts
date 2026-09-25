@@ -153,6 +153,14 @@ export class IdentityConstruct extends Construct {
       this.directoryId = connectorProps.directoryId;
       dnsIps = cfg.dnsServerIps;
       serviceAccountSecretArn = cfg.serviceAccountSecretArn;
+
+      // Enable Directory Data Access (Data API) on the AD Connector so the
+      // runtime user-group-manager Lambda can read user status and group
+      // membership from the customer's AD via ds-data:DescribeUser and
+      // ds-data:ListGroupMembers. Without this, every user lookup returns
+      // AccessDeniedException / DATA_DISABLED and the UI renders every
+      // user as "Disabled" regardless of their actual AD state.
+      this.enableDirectoryDataAccess(this.directoryId);
     } else {
       // ─────── Managed AD path (byte-identical to pre-PR-3 behavior) ───────
       domainName = params.DomainName || 'studio.mrm.internal';
@@ -222,8 +230,10 @@ export class IdentityConstruct extends Construct {
       // ResourceAdmin secret in managed mode.
       serviceAccountSecretArn = resourceAdminSecret.secretArn;
 
-      // Enable Directory Data Access (Data API) — only relevant for Managed AD.
-      this.enableDirectoryDataAccess();
+      // Enable Directory Data Access (Data API) on the Managed AD so the
+      // downstream CreateUser Custom Resources and the runtime user-list /
+      // group-membership readers can call ds-data:*.
+      this.enableDirectoryDataAccess(this.managedAd.ref);
 
       // Create AD users using Custom Resources — only relevant for Managed AD.
       this.createAdUsers(
@@ -278,15 +288,20 @@ export class IdentityConstruct extends Construct {
   }
 
   /**
-   * Managed-AD-only: enable the Directory Service Data API so subsequent
-   * Custom Resources can create/manage users via `ds-data:*`.
+   * Enable the Directory Service Data API on a directory so downstream
+   * consumers (Custom Resources that create users in managed mode; the
+   * user-group-manager Lambda that lists users in both modes) can call
+   * `ds-data:*`.
+   *
+   * Applies to both directory types:
+   *   - Managed AD: enables read+write - MRM creates ResourceAdmin and
+   *     RM_AdConnectorUser here via CreateUserCommand.
+   *   - AD Connector: enables read - MRM never writes into the customer's
+   *     AD, but the DS Data API read operations (DescribeUser,
+   *     ListGroupMembers) proxy through the connector so the user list,
+   *     enable/disable status, and group membership all work.
    */
-  private enableDirectoryDataAccess() {
-    if (!this.managedAd) {
-      throw new Error('enableDirectoryDataAccess called without a Managed AD');
-    }
-    const managedAd = this.managedAd;
-
+  private enableDirectoryDataAccess(directoryId: string) {
     const enableDataAccessFunction = new lambda.Function(this, 'EnableDataAccessFunction', {
       functionName: `${this.acronym.toLowerCase()}-enable-directory-data-access`,
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -300,14 +315,14 @@ export class IdentityConstruct extends Construct {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['ds:EnableDirectoryDataAccess'],
-        resources: [`arn:aws:ds:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:directory/${managedAd.ref}`],
+        resources: [`arn:aws:ds:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:directory/${directoryId}`],
       })
     );
 
     new cdk.CustomResource(this, 'EnableDirectoryDataAccess', {
       serviceToken: enableDataAccessFunction.functionArn,
       properties: {
-        DirectoryId: managedAd.ref,
+        DirectoryId: directoryId,
       },
     });
   }
