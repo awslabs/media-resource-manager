@@ -220,6 +220,70 @@ async function getAdminGroupName() {
   }
 }
 
+/**
+ * Import the deployment's configured admin AD group(s) as MRM group(s) in
+ * `mrm-groups` DDB so users in the admin group show that group in the UI
+ * and admins can see the same access control primitive they configured
+ * during deployment. Runs on every list-users / list-groups call because
+ * it is idempotent (ConditionExpression: attribute_not_exists) and never
+ * mutates an already-imported record. Cheap - a single conditional Put
+ * per admin group per request that succeeds only once per deployment.
+ *
+ * Deliberately does NOT import the legacy "AWS Delegated Administrators"
+ * fallback (managed-AD default) - only the operator-configured groups
+ * from /Auth/AdminGroupName. Managed-mode deployments where operators
+ * did not override the default keep the current no-admin-MRM-group
+ * behavior, matching pre-v1.3.1 behavior byte-for-byte.
+ *
+ * Cognito mode: no-op. Cognito user pool groups drive admin status there
+ * and are enumerated directly via AdminListGroupsForUser.
+ *
+ * See #37 for the follow-up "Import from AD" UI that lets admins bulk
+ * import arbitrary AD groups, not just the admin group.
+ */
+async function ensureAdminGroupImported() {
+  try {
+    const useCognitoAuth = await getUseCognitoAuth();
+    if (useCognitoAuth) return;
+
+    const adminGroupConfig = await getAdminGroupName();
+    const adminGroups = adminGroupConfig
+      .split(',')
+      .map((g) => g.trim())
+      .filter((g) => g && g.toLowerCase() !== 'aws delegated administrators');
+
+    for (const groupName of adminGroups) {
+      const slug = groupName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
+      const groupId = `group-admin-${slug}`;
+      try {
+        await dynamodb.send(new PutCommand({
+          TableName: process.env.GROUPS_TABLE_NAME,
+          Item: {
+            groupId,
+            groupName,
+            description: 'Users in this AD group have MRM administrator privileges. Auto-imported from /Auth/AdminGroupName.',
+            importedFromAD: true,
+            adminGroup: true,
+            createdAt: new Date().toISOString(),
+          },
+          ConditionExpression: 'attribute_not_exists(groupId)',
+        }));
+        console.log(`ensureAdminGroupImported: imported admin AD group "${groupName}" as MRM group ${groupId}`);
+      } catch (err) {
+        // ConditionalCheckFailed is the happy path - record already exists.
+        if (err.name !== 'ConditionalCheckFailedException') {
+          console.warn(`ensureAdminGroupImported: put failed for "${groupName}": ${err.name} ${err.message}`);
+        }
+      }
+    }
+  } catch (err) {
+    // Never fail the caller on this - it is a UX polish, not a correctness
+    // requirement. If the import misses this request, it will run again on
+    // the next one.
+    console.warn(`ensureAdminGroupImported: skipped due to ${err.name || 'error'}: ${err.message}`);
+  }
+}
+
 // Get users from Cognito User Pool (for Cognito auth mode)
 async function getUsersFromCognito() {
   try {
@@ -431,6 +495,11 @@ async function getUsersFromCognito() {
 // Get users from LDAP/Directory Service (original implementation)
 async function getUsersFromLDAP() {
   try {
+    // Ensure the admin AD group is imported as an MRM group before scanning
+    // so users in the admin group see it as a group membership. Same
+    // idempotent path as getGroups().
+    await ensureAdminGroupImported();
+
     const result = await dynamodb.send(new ScanCommand({
       TableName: process.env.USER_TABLE_NAME
     }));
@@ -517,6 +586,11 @@ async function getUsersFromLDAP() {
 
 async function getGroups(event) {
   try {
+    // Ensure the configured admin AD group is represented as an MRM group
+    // before we scan, so admins do not see an empty Groups page on a fresh
+    // BYO-AD deployment. Idempotent; skipped in Cognito mode.
+    await ensureAdminGroupImported();
+
     const result = await dynamodb.send(new ScanCommand({
       TableName: process.env.GROUPS_TABLE_NAME
     }));
