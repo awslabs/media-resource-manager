@@ -429,7 +429,7 @@ exports.handler = async (event) => {
           // Strip IdP prefixes (IdentityCenter_, Okta_, etc.)
           if (displayName.includes('_')) {
             const parts = displayName.split('_');
-            const knownPrefixes = ['IdentityCenter', 'Okta', 'SAML', 'AzureAD', 'AmazonFederate'];
+            const knownPrefixes = ['IdentityCenter', 'Okta', 'SAML', 'AzureAD', 'EntraID', 'AmazonFederate'];
             if (knownPrefixes.includes(parts[0])) {
               displayName = parts.slice(1).join('_');
             }
@@ -553,6 +553,7 @@ exports.handler = async (event) => {
                 } else {
                   workstation.assignedUserDisplay = user.firstName || user.lastName || formatUserIdForDisplay(workstation.assignedUserId);
                 }
+                workstation.assignedUserEmail = user.email || '';
               } else {
                 workstation.assignedUserDisplay = formatUserIdForDisplay(workstation.assignedUserId);
               }
@@ -1374,7 +1375,7 @@ exports.handler = async (event) => {
         if (!id) return '';
         let normalized = id;
         // Strip known IdP prefixes
-        const knownPrefixes = ['IdentityCenter_', 'Okta_', 'SAML_', 'AzureAD_', 'AmazonFederate_'];
+        const knownPrefixes = ['IdentityCenter_', 'Okta_', 'SAML_', 'AzureAD_', 'EntraID_', 'AmazonFederate_'];
         for (const prefix of knownPrefixes) {
           if (normalized.startsWith(prefix)) {
             normalized = normalized.substring(prefix.length);
@@ -1458,7 +1459,7 @@ exports.handler = async (event) => {
       const normalizeUserId = (id) => {
         if (!id) return '';
         let normalized = id;
-        const knownPrefixes = ['IdentityCenter_', 'Okta_', 'SAML_', 'AzureAD_', 'AmazonFederate_'];
+        const knownPrefixes = ['IdentityCenter_', 'Okta_', 'SAML_', 'AzureAD_', 'EntraID_', 'AmazonFederate_'];
         for (const prefix of knownPrefixes) {
           if (normalized.startsWith(prefix)) {
             normalized = normalized.substring(prefix.length);

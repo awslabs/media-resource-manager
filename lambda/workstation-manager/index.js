@@ -643,7 +643,7 @@ async function getWorkstations(event) {
         if (displayName.includes('_')) {
           const parts = displayName.split('_');
           // Only strip if it looks like an IdP prefix (first part is a known provider)
-          const knownPrefixes = ['IdentityCenter', 'Okta', 'SAML', 'AzureAD', 'AmazonFederate'];
+          const knownPrefixes = ['IdentityCenter', 'Okta', 'SAML', 'AzureAD', 'EntraID', 'AmazonFederate'];
           if (knownPrefixes.includes(parts[0])) {
             displayName = parts.slice(1).join('_');
           }
@@ -730,6 +730,7 @@ async function getWorkstations(event) {
               } else {
                 workstation.assignedUserDisplay = user.firstName || user.lastName || formatUserIdForDisplay(workstation.assignedUserId);
               }
+              workstation.assignedUserEmail = user.email || '';
             } else {
               // User not found anywhere - format the ID for display
               workstation.assignedUserDisplay = formatUserIdForDisplay(workstation.assignedUserId);

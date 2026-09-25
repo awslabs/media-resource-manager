@@ -47,6 +47,7 @@ interface Workstation {
   workstationName: string;
   assignedUserId: string;
   assignedUserDisplay?: string;
+  assignedUserEmail?: string;
   instanceStatus: string;
   dcvStatus: string;
   status: string;
@@ -621,6 +622,11 @@ const DashboardAntd: React.FC<DashboardProps> = ({
                 <Text strong style={{ fontSize: '16px', display: 'block', marginBottom: '4px' }}>
                   {ws.assignedUserDisplay || ws.assignedUserId || 'Unassigned'}
                 </Text>
+                {ws.assignedUserEmail && (
+                  <Text type="secondary" style={{ fontSize: '12px', display: 'block' }}>
+                    {ws.assignedUserEmail}
+                  </Text>
+                )}
                 <Text type="secondary" style={{ fontSize: '13px', display: 'block' }}>
                   {ws.workstationName || ws.instanceId}
                 </Text>
