@@ -472,24 +472,20 @@ const Login: React.FC<LoginProps> = ({ onSignIn, productName }) => {
                   </Alert>
                 )}
                 
-                <Alert type="info">
-                  Sign in with your Active Directory credentials.
-                </Alert>
-                
                 <FormField label="Username">
                   <Input
                     value={username}
                     onChange={({ detail }) => setUsername(detail.value)}
-                    placeholder="Enter your AD username"
+                    placeholder="Enter your username"
                     required
                   />
                 </FormField>
 
-                <FormField label="Active Directory Password">
+                <FormField label="Password">
                   <Input
                     value={password}
                     onChange={({ detail }) => setPassword(detail.value)}
-                    placeholder="Enter your AD password"
+                    placeholder="Enter your password"
                     type="password"
                     required
                   />

@@ -386,27 +386,21 @@ const LoginAntd: React.FC<LoginProps> = ({ onSignIn, productName }) => {
           </Space>
         ) : (
           <Form layout="vertical" onFinish={handleLDAPSignIn}>
-            <Alert
-              message="Sign in with your Active Directory credentials."
-              type="info"
-              showIcon
-              style={{ marginBottom: '1.5rem' }}
-            />
             <Form.Item label="Username" required>
               <Input
                 prefix={<UserOutlined />}
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="Enter your AD username"
+                placeholder="Enter your username"
                 size="large"
               />
             </Form.Item>
-            <Form.Item label="Active Directory Password" required>
+            <Form.Item label="Password" required>
               <Input.Password
                 prefix={<LockOutlined />}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                placeholder="Enter your AD password"
+                placeholder="Enter your password"
                 size="large"
               />
             </Form.Item>
