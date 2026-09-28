@@ -154,13 +154,15 @@ export class IdentityConstruct extends Construct {
       dnsIps = cfg.dnsServerIps;
       serviceAccountSecretArn = cfg.serviceAccountSecretArn;
 
-      // Enable Directory Data Access (Data API) on the AD Connector so the
-      // runtime user-group-manager Lambda can read user status and group
-      // membership from the customer's AD via ds-data:DescribeUser and
-      // ds-data:ListGroupMembers. Without this, every user lookup returns
-      // AccessDeniedException / DATA_DISABLED and the UI renders every
-      // user as "Disabled" regardless of their actual AD state.
-      this.enableDirectoryDataAccess(this.directoryId);
+      // Directory Service Data API is deliberately NOT enabled on the AD
+      // Connector: EnableDirectoryDataAccess returns
+      // UnsupportedOperationException on connector-type directories, and
+      // even if it did not, ds-data:DescribeUser / ListGroupMembers do not
+      // proxy through an AD Connector to the customer's AD. BYO-AD user
+      // status and group membership are therefore read via direct LDAP
+      // queries (tracked separately - see the LDAP-based read integration
+      // work). MRM never writes to the customer's AD; user and group
+      // lifecycle in BYO-AD mode is the customer AD team's responsibility.
     } else {
       // ─────── Managed AD path (byte-identical to pre-PR-3 behavior) ───────
       domainName = params.DomainName || 'studio.mrm.internal';
