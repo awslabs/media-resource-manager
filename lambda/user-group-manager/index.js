@@ -555,7 +555,29 @@ async function getUsersFromLDAP() {
     const result = await dynamodb.send(new ScanCommand({
       TableName: process.env.USER_TABLE_NAME
     }));
-    
+
+    // In BYO-AD (AD Connector) mode the ds-data:* APIs are not supported on
+    // the directory - DescribeUser and ListGroupMembers would both throw.
+    // Return the DDB records as-is with status/groups omitted so the UI can
+    // render "-" instead of a misleading "Disabled" / "No groups". The
+    // LDAP-based read integration that restores real state lives in a
+    // separate work stream tracked in a future release.
+    const adMode = await getAdMode();
+    if (adMode === 'connector') {
+      const users = result.Items.map((user) => ({
+        ...user,
+        status: 'unknown',
+        enabled: null,
+        role: user.isAdmin ? 'Administrator' : 'User',
+        groups: [],
+      }));
+      return {
+        statusCode: 200,
+        headers: corsHeaders,
+        body: JSON.stringify(users),
+      };
+    }
+
     // Get directory ID for Directory Service calls
     const directoryId = await getDirectoryId();
     

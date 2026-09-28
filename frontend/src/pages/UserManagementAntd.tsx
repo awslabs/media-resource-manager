@@ -49,7 +49,10 @@ interface User {
   department?: string;
   role?: string;
   groups?: string[];
-  enabled: boolean;
+  /** true if AD reports the user as enabled, false if disabled, null when
+   *  MRM cannot determine the state (currently: BYO-AD mode, where the
+   *  ds-data:* APIs are not supported on AD Connector). */
+  enabled: boolean | null;
   createdAt: string;
 }
 
@@ -1022,6 +1025,12 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
       key: 'groups',
       width: 160,
       render: (_, record) => {
+        // BYO-AD mode: group memberships come from AD and require an LDAP
+        // read integration that has not landed yet. Show "-" instead of a
+        // misleading "No groups" that implies MRM checked and found none.
+        if (isConnectorMode) {
+          return <Text type="secondary">-</Text>;
+        }
         if (!record.groups || record.groups.length === 0) {
           return <Text type="secondary">No groups</Text>;
         }
@@ -1043,11 +1052,19 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
       width: 90,
       sorter: (a, b) => (a.enabled ? 1 : 0) - (b.enabled ? 1 : 0),
       sortOrder: userSortedInfo?.columnKey === 'status' ? userSortedInfo.order : null,
-      render: (_, record) => (
-        <Tag color={record.enabled ? 'green' : 'default'}>
-          {record.enabled ? 'Active' : 'Disabled'}
-        </Tag>
-      ),
+      render: (_, record) => {
+        // BYO-AD mode: backend returns enabled=null because ds-data:* is
+        // unsupported on AD Connector. Render "-" instead of a misleading
+        // "Disabled" until the LDAP-based read integration lands.
+        if (record.enabled === null || record.enabled === undefined) {
+          return <Text type="secondary">-</Text>;
+        }
+        return (
+          <Tag color={record.enabled ? 'green' : 'default'}>
+            {record.enabled ? 'Active' : 'Disabled'}
+          </Tag>
+        );
+      },
     },
     {
       title: 'Actions',
