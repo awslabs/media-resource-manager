@@ -109,6 +109,13 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
   const [groupToDelete, setGroupToDelete] = useState<Group | null>(null);
   const [assignedWorkstations, setAssignedWorkstations] = useState<any[]>([]);
 
+  // BYO-AD (AD Connector) mode: MRM is a read-only tenant of the customer's
+  // Active Directory. User and group lifecycle belongs to the customer's AD
+  // tools; the corresponding UI controls are hidden. Backend also refuses
+  // these write operations with 403 CONNECTOR_MODE_READ_ONLY as defense in
+  // depth.
+  const isConnectorMode = !config?.useCognitoAuth && config?.adMode === 'connector';
+
   // Manage groups/users state
   const [selectedUserForGroups, setSelectedUserForGroups] = useState<User | null>(null);
   const [desiredMemberships, setDesiredMemberships] = useState<string[]>([]);
@@ -1048,15 +1055,17 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
       width: 180,
       render: (_, record) => (
         <Space size={4}>
-          <Tooltip title="Manage Groups">
-            <Button
-              size="small"
-              icon={<TeamOutlined />}
-              onClick={() => openManageGroupsModal(record)}
-            >
-              Groups
-            </Button>
-          </Tooltip>
+          {!isConnectorMode && (
+            <Tooltip title="Manage Groups">
+              <Button
+                size="small"
+                icon={<TeamOutlined />}
+                onClick={() => openManageGroupsModal(record)}
+              >
+                Groups
+              </Button>
+            </Tooltip>
+          )}
           {autoStartEnabled && (
             <Tooltip title="Configure Schedule">
               <Button
@@ -1158,6 +1167,16 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
         {/* Header */}
         <Title level={3} style={{ marginBottom: 24 }}>User Management</Title>
 
+        {isConnectorMode && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="Read-only: this deployment uses BYO-AD (AD Connector)"
+            description="Users and groups shown here are read from your Active Directory. Create, edit, disable, delete, group membership, and password reset are managed in your AD by your directory team. MRM auto-provisions a local record on each user's first sign-in so you can assign workstations to them."
+          />
+        )}
+
         {alert && (
           <Alert
             type={alert.type}
@@ -1200,7 +1219,7 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
                 >
                   Details
                 </Button>
-                {!config?.useCognitoAuth && (
+                {!config?.useCognitoAuth && !isConnectorMode && (
                   <Dropdown
                     menu={{ items: getUserActionMenuItems() }}
                     disabled={selectedUserKeys.length === 0}
@@ -1208,12 +1227,14 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
                     <Button disabled={selectedUserKeys.length === 0}>Edit Users</Button>
                   </Dropdown>
                 )}
-                <Button
-                  disabled={selectedUserKeys.length !== 1}
-                  onClick={() => openManageGroupsModal(selectedUsers[0])}
-                >
-                  Manage Groups
-                </Button>
+                {!isConnectorMode && (
+                  <Button
+                    disabled={selectedUserKeys.length !== 1}
+                    onClick={() => openManageGroupsModal(selectedUsers[0])}
+                  >
+                    Manage Groups
+                  </Button>
+                )}
                 {autoStartEnabled && (
                   <Button
                     icon={<ClockCircleOutlined />}
@@ -1223,14 +1244,16 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
                     Configure Schedules
                   </Button>
                 )}
-                <Button
-                  icon={<SyncOutlined />}
-                  loading={syncingUsers}
-                  onClick={handleSyncFromIdentityCenter}
-                >
-                  Sync from Identity Center
-                </Button>
-                {!config?.useCognitoAuth && (
+                {config?.useCognitoAuth && (
+                  <Button
+                    icon={<SyncOutlined />}
+                    loading={syncingUsers}
+                    onClick={handleSyncFromIdentityCenter}
+                  >
+                    Sync from Identity Center
+                  </Button>
+                )}
+                {!config?.useCognitoAuth && !isConnectorMode && (
                   <Button
                     type="primary"
                     icon={<PlusOutlined />}
@@ -1294,12 +1317,14 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
                 <Tooltip title="Refresh">
                   <Button icon={<ReloadOutlined />} onClick={fetchGroups} loading={groupsLoading} />
                 </Tooltip>
-                <Dropdown
-                  menu={{ items: getGroupActionMenuItems() }}
-                  disabled={selectedGroupKeys.length !== 1}
-                >
-                  <Button disabled={selectedGroupKeys.length !== 1}>Actions</Button>
-                </Dropdown>
+                {!isConnectorMode && (
+                  <Dropdown
+                    menu={{ items: getGroupActionMenuItems() }}
+                    disabled={selectedGroupKeys.length !== 1}
+                  >
+                    <Button disabled={selectedGroupKeys.length !== 1}>Actions</Button>
+                  </Dropdown>
+                )}
                 <Button
                   disabled={selectedGroupKeys.length !== 1}
                   onClick={() => {
@@ -1308,13 +1333,15 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
                 >
                   Details
                 </Button>
-                <Button
-                  type="primary"
-                  icon={<PlusOutlined />}
-                  onClick={() => setShowCreateGroupModal(true)}
-                >
-                  Create Group
-                </Button>
+                {!isConnectorMode && (
+                  <Button
+                    type="primary"
+                    icon={<PlusOutlined />}
+                    onClick={() => setShowCreateGroupModal(true)}
+                  >
+                    Create Group
+                  </Button>
+                )}
               </Space>
             }
             
@@ -1351,9 +1378,11 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
                   <Space direction="vertical" align="center" style={{ padding: 24 }}>
                     <Text strong>No groups</Text>
                     <Text type="secondary">No groups to display.</Text>
-                    <Button type="primary" onClick={() => setShowCreateGroupModal(true)}>
-                      Create Group
-                    </Button>
+                    {!isConnectorMode && (
+                      <Button type="primary" onClick={() => setShowCreateGroupModal(true)}>
+                        Create Group
+                      </Button>
+                    )}
                   </Space>
                 ),
               }}
