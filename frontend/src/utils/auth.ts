@@ -5,6 +5,11 @@
 
 interface Config {
   useCognitoAuth: boolean;
+  /** 'managed' (MRM owns AWS Managed Microsoft AD) or 'connector' (MRM is a
+   *  read-only tenant of a customer-supplied AD via AD Connector). Only
+   *  meaningful when useCognitoAuth === false. Defaults to 'managed' on
+   *  older deployments that pre-date the /Identity/AdMode SSM parameter. */
+  adMode?: 'managed' | 'connector';
   enableBedrockFeatures?: boolean;
   cognitoUserPoolId?: string;
   cognitoClientId?: string;

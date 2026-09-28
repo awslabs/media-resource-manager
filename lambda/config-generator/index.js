@@ -35,6 +35,22 @@ exports.handler = async (event) => {
       console.log('Auth mode parameter not found, defaulting to Cognito');
     }
 
+    // Get AD deployment mode (managed vs connector). Only meaningful when
+    // useCognitoAuth === false; defaults to 'managed' for backward compat
+    // with pre-#27 deployments where the parameter did not exist.
+    let adMode = 'managed';
+    try {
+      const adModeParam = await ssm.send(new GetParameterCommand({
+        Name: `/${pascalCaseName}/Identity/AdMode`
+      }));
+      const value = adModeParam.Parameter.Value;
+      if (value === 'managed' || value === 'connector') {
+        adMode = value;
+      }
+    } catch (error) {
+      console.log('AD mode parameter not found, defaulting to managed');
+    }
+
     // Get Cognito values if using Cognito auth
     let cognitoConfig = {};
     let identityProviders = [];
@@ -102,6 +118,7 @@ exports.handler = async (event) => {
       productName: process.env.PRODUCT_NAME || 'Media Resource Manager',
       acronym: process.env.PRODUCT_ACRONYM || 'MRM',
       useCognitoAuth,
+      adMode,
       enableBedrockFeatures: process.env.ENABLE_BEDROCK_FEATURES !== 'false',
       identityProviders,
       identityPoolId,

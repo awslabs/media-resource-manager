@@ -269,6 +269,7 @@ export class IdentityConstruct extends Construct {
       dnsIps,
       serviceAccountSecretArn,
       props.pascalCaseName,
+      adMode,
     );
 
     // Common CFN output for the domain name.
@@ -526,6 +527,7 @@ export class IdentityConstruct extends Construct {
     dnsIps: string[],
     serviceAccountSecretArn: string,
     pascalCaseName: string,
+    adMode: 'managed' | 'connector',
   ) {
     // Domain information — same well-known parameter paths in both modes.
     new ssm.StringParameter(this, 'DomainNameParameter', {
@@ -566,6 +568,19 @@ export class IdentityConstruct extends Construct {
         'ARN of the AD service-account secret ({username, password}). Points at '
         + 'the MRM-managed ResourceAdmin secret in adMode=managed, or the '
         + 'customer-supplied secret in adMode=connector.',
+    });
+
+    // Publish the AD mode so downstream code (config-generator building the
+    // frontend config.json, user-group-manager gating write operations) can
+    // branch on it without duplicating the synth-time gate. Well-known path
+    // parallel to `.../Auth/UseCognitoAuth` used by the Cognito toggle.
+    new ssm.StringParameter(this, 'AdModeParameter', {
+      parameterName: `/${pascalCaseName}/Identity/AdMode`,
+      stringValue: adMode,
+      description:
+        "AD deployment mode: 'managed' = MRM owns AWS Managed Microsoft AD "
+        + "and can create/enable/disable/delete users; 'connector' = MRM is a "
+        + "read-only tenant of a customer-supplied AD via AD Connector.",
     });
   }
 
