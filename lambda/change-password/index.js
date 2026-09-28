@@ -88,6 +88,30 @@ exports.handler = async (event) => {
       });
     }
 
+    // In BYO-AD (AD Connector) mode MRM is a read-only tenant of the
+    // customer's Active Directory. Password lifecycle belongs to the
+    // customer's AD team and the tools they operate. Refuse the request
+    // here rather than attempting a ResetUserPasswordCommand that would
+    // either fail (service account lacks delegation) or partially succeed
+    // and leave the customer's directory in an inconsistent state.
+    const pascalCaseName = process.env.PASCAL_CASE_NAME || 'MediaResourceManager';
+    try {
+      const adModeResp = await ssm.send(new GetParameterCommand({
+        Name: `/${pascalCaseName}/Identity/AdMode`
+      }));
+      if (adModeResp.Parameter && adModeResp.Parameter.Value === 'connector') {
+        return jsonResponse(403, {
+          error: 'Password changes are not available in BYO-AD (AD Connector) mode. Please use your organization\'s password tools to change your Active Directory password.',
+          code: 'CONNECTOR_MODE_READ_ONLY',
+        });
+      }
+    } catch (err) {
+      // Parameter missing on pre-#27 stacks - treat as managed mode
+      // (byte-identical to pre-existing behavior). Do not fail closed here;
+      // an SSM outage should not lock users out of password change.
+      console.log('AdMode parameter not found, proceeding as managed mode');
+    }
+
     const { currentPassword, newPassword } = JSON.parse(event.body || '{}');
 
     if (!currentPassword || !newPassword) {
@@ -111,7 +135,6 @@ exports.handler = async (event) => {
     }
 
     // Look up the Managed AD directory ID
-    const pascalCaseName = process.env.PASCAL_CASE_NAME || 'MediaResourceManager';
     const parameterName = `/${pascalCaseName}/Identity/ActiveDirectoryId`;
     const paramResponse = await ssm.send(new GetParameterCommand({ Name: parameterName }));
     const directoryId = paramResponse.Parameter.Value;

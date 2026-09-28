@@ -46,8 +46,15 @@ const AppLayoutAntd: React.FC<AppLayoutAntdProps> = ({
 
   const userEmail = user?.email || user?.attributes?.email || 'User';
 
+  // Change Password is only meaningful when MRM owns the directory. In
+  // Cognito mode the IdP owns the password; in BYO-AD (AD Connector) mode
+  // the customer's AD tools own it. Only Managed AD deployments expose
+  // MRM's password-change flow.
+  const isConnectorMode = !config?.useCognitoAuth && config?.adMode === 'connector';
+  const showChangePassword = !config?.useCognitoAuth && !isConnectorMode;
+
   const userMenuItems: MenuProps['items'] = [
-    ...(config?.useCognitoAuth ? [] : [
+    ...(showChangePassword ? [
       {
         key: 'changepassword',
         icon: <KeyOutlined />,
@@ -55,7 +62,7 @@ const AppLayoutAntd: React.FC<AppLayoutAntdProps> = ({
         onClick: onChangePassword,
       },
       { type: 'divider' as const },
-    ]),
+    ] : []),
     {
       key: 'signout',
       icon: <LogoutOutlined />,

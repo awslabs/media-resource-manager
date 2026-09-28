@@ -49,7 +49,10 @@ interface User {
   department?: string;
   role?: string;
   groups?: string[];
-  enabled: boolean;
+  /** true if AD reports the user as enabled, false if disabled, null when
+   *  MRM cannot determine the state (currently: BYO-AD mode, where the
+   *  ds-data:* APIs are not supported on AD Connector). */
+  enabled: boolean | null;
   createdAt: string;
 }
 
@@ -108,6 +111,13 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
   const [groupToEdit, setGroupToEdit] = useState<Group | null>(null);
   const [groupToDelete, setGroupToDelete] = useState<Group | null>(null);
   const [assignedWorkstations, setAssignedWorkstations] = useState<any[]>([]);
+
+  // BYO-AD (AD Connector) mode: MRM is a read-only tenant of the customer's
+  // Active Directory. User and group lifecycle belongs to the customer's AD
+  // tools; the corresponding UI controls are hidden. Backend also refuses
+  // these write operations with 403 CONNECTOR_MODE_READ_ONLY as defense in
+  // depth.
+  const isConnectorMode = !config?.useCognitoAuth && config?.adMode === 'connector';
 
   // Manage groups/users state
   const [selectedUserForGroups, setSelectedUserForGroups] = useState<User | null>(null);
@@ -976,11 +986,19 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
       width: 160,
       sorter: (a, b) => `${a.firstName} ${a.lastName}`.localeCompare(`${b.firstName} ${b.lastName}`),
       sortOrder: userSortedInfo?.columnKey === 'name' ? userSortedInfo.order : null,
-      render: (_, record) => (
-        <Link onClick={() => (window.location.href = `/users/${record.userId}`)}>
-          {record.firstName} {record.lastName}
-        </Link>
-      ),
+      render: (_, record) => {
+        // Prefer the AD-populated first+last name. Fall back to the local
+        // part of the email, then the userId, so JIT-provisioned service
+        // accounts (which often have no givenName/sn in AD) still show
+        // something meaningful in the Name column instead of an empty link.
+        const humanName = `${record.firstName || ''} ${record.lastName || ''}`.trim();
+        const fallback = record.email ? record.email.split('@')[0] : record.userId;
+        return (
+          <Link onClick={() => (window.location.href = `/users/${record.userId}`)}>
+            {humanName || fallback}
+          </Link>
+        );
+      },
     },
     {
       title: 'Email',
@@ -1007,6 +1025,12 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
       key: 'groups',
       width: 160,
       render: (_, record) => {
+        // BYO-AD mode: group memberships come from AD and require an LDAP
+        // read integration that has not landed yet. Show "-" instead of a
+        // misleading "No groups" that implies MRM checked and found none.
+        if (isConnectorMode) {
+          return <Text type="secondary">-</Text>;
+        }
         if (!record.groups || record.groups.length === 0) {
           return <Text type="secondary">No groups</Text>;
         }
@@ -1028,11 +1052,19 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
       width: 90,
       sorter: (a, b) => (a.enabled ? 1 : 0) - (b.enabled ? 1 : 0),
       sortOrder: userSortedInfo?.columnKey === 'status' ? userSortedInfo.order : null,
-      render: (_, record) => (
-        <Tag color={record.enabled ? 'green' : 'default'}>
-          {record.enabled ? 'Active' : 'Disabled'}
-        </Tag>
-      ),
+      render: (_, record) => {
+        // BYO-AD mode: backend returns enabled=null because ds-data:* is
+        // unsupported on AD Connector. Render "-" instead of a misleading
+        // "Disabled" until the LDAP-based read integration lands.
+        if (record.enabled === null || record.enabled === undefined) {
+          return <Text type="secondary">-</Text>;
+        }
+        return (
+          <Tag color={record.enabled ? 'green' : 'default'}>
+            {record.enabled ? 'Active' : 'Disabled'}
+          </Tag>
+        );
+      },
     },
     {
       title: 'Actions',
@@ -1040,15 +1072,17 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
       width: 180,
       render: (_, record) => (
         <Space size={4}>
-          <Tooltip title="Manage Groups">
-            <Button
-              size="small"
-              icon={<TeamOutlined />}
-              onClick={() => openManageGroupsModal(record)}
-            >
-              Groups
-            </Button>
-          </Tooltip>
+          {!isConnectorMode && (
+            <Tooltip title="Manage Groups">
+              <Button
+                size="small"
+                icon={<TeamOutlined />}
+                onClick={() => openManageGroupsModal(record)}
+              >
+                Groups
+              </Button>
+            </Tooltip>
+          )}
           {autoStartEnabled && (
             <Tooltip title="Configure Schedule">
               <Button
@@ -1192,7 +1226,7 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
                 >
                   Details
                 </Button>
-                {!config?.useCognitoAuth && (
+                {!config?.useCognitoAuth && !isConnectorMode && (
                   <Dropdown
                     menu={{ items: getUserActionMenuItems() }}
                     disabled={selectedUserKeys.length === 0}
@@ -1200,12 +1234,14 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
                     <Button disabled={selectedUserKeys.length === 0}>Edit Users</Button>
                   </Dropdown>
                 )}
-                <Button
-                  disabled={selectedUserKeys.length !== 1}
-                  onClick={() => openManageGroupsModal(selectedUsers[0])}
-                >
-                  Manage Groups
-                </Button>
+                {!isConnectorMode && (
+                  <Button
+                    disabled={selectedUserKeys.length !== 1}
+                    onClick={() => openManageGroupsModal(selectedUsers[0])}
+                  >
+                    Manage Groups
+                  </Button>
+                )}
                 {autoStartEnabled && (
                   <Button
                     icon={<ClockCircleOutlined />}
@@ -1215,14 +1251,16 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
                     Configure Schedules
                   </Button>
                 )}
-                <Button
-                  icon={<SyncOutlined />}
-                  loading={syncingUsers}
-                  onClick={handleSyncFromIdentityCenter}
-                >
-                  Sync from Identity Center
-                </Button>
-                {!config?.useCognitoAuth && (
+                {config?.useCognitoAuth && (
+                  <Button
+                    icon={<SyncOutlined />}
+                    loading={syncingUsers}
+                    onClick={handleSyncFromIdentityCenter}
+                  >
+                    Sync from Identity Center
+                  </Button>
+                )}
+                {!config?.useCognitoAuth && !isConnectorMode && (
                   <Button
                     type="primary"
                     icon={<PlusOutlined />}
@@ -1286,12 +1324,14 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
                 <Tooltip title="Refresh">
                   <Button icon={<ReloadOutlined />} onClick={fetchGroups} loading={groupsLoading} />
                 </Tooltip>
-                <Dropdown
-                  menu={{ items: getGroupActionMenuItems() }}
-                  disabled={selectedGroupKeys.length !== 1}
-                >
-                  <Button disabled={selectedGroupKeys.length !== 1}>Actions</Button>
-                </Dropdown>
+                {!isConnectorMode && (
+                  <Dropdown
+                    menu={{ items: getGroupActionMenuItems() }}
+                    disabled={selectedGroupKeys.length !== 1}
+                  >
+                    <Button disabled={selectedGroupKeys.length !== 1}>Actions</Button>
+                  </Dropdown>
+                )}
                 <Button
                   disabled={selectedGroupKeys.length !== 1}
                   onClick={() => {
@@ -1300,13 +1340,15 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
                 >
                   Details
                 </Button>
-                <Button
-                  type="primary"
-                  icon={<PlusOutlined />}
-                  onClick={() => setShowCreateGroupModal(true)}
-                >
-                  Create Group
-                </Button>
+                {!isConnectorMode && (
+                  <Button
+                    type="primary"
+                    icon={<PlusOutlined />}
+                    onClick={() => setShowCreateGroupModal(true)}
+                  >
+                    Create Group
+                  </Button>
+                )}
               </Space>
             }
             
@@ -1343,9 +1385,11 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
                   <Space direction="vertical" align="center" style={{ padding: 24 }}>
                     <Text strong>No groups</Text>
                     <Text type="secondary">No groups to display.</Text>
-                    <Button type="primary" onClick={() => setShowCreateGroupModal(true)}>
-                      Create Group
-                    </Button>
+                    {!isConnectorMode && (
+                      <Button type="primary" onClick={() => setShowCreateGroupModal(true)}>
+                        Create Group
+                      </Button>
+                    )}
                   </Space>
                 ),
               }}

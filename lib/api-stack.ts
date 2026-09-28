@@ -1790,6 +1790,11 @@ export class ApiStack extends cdk.Stack {
       environment: {
         JWT_SECRET_ARN: jwtSecret.secretArn,
         PASCAL_CASE_NAME: props.pascalCaseName,
+        // USER_TABLE_NAME lets ldap-auth JIT-provision an mrm-users record on
+        // every successful LDAP sign-in (mirroring Cognito's SAML JIT flow),
+        // so admins do not need to pre-sync an AD group into DDB to surface
+        // real users in the workstation-assignment picker.
+        USER_TABLE_NAME: props.userTable.tableName,
         // Admin group name(s) to check for LDAP admin privilege. Comma-separated,
         // case-insensitive, matched against each group's CN (parsed from DN).
         // Defaults to "AWS Delegated Administrators" for backward compatibility
@@ -1825,8 +1830,11 @@ export class ApiStack extends cdk.Stack {
       ],
     }));
 
-    // Grant read access to user table for authentication
-    props.userTable.grantReadData(directLdapAuthFunction);
+    // Grant read+write access to user table so ldap-auth can JIT-provision
+    // the mrm-users record on successful LDAP sign-in. The upsert is scoped
+    // to the authenticated user's own userId and is idempotent - see the
+    // upsertUserRecord() helper in lambda/ldap-auth/index.js.
+    props.userTable.grantReadWriteData(directLdapAuthFunction);
 
     // Grant KMS permissions if tables use customer-managed encryption
     if (props.dataEncryptionKey) {

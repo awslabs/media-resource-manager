@@ -153,6 +153,16 @@ export class IdentityConstruct extends Construct {
       this.directoryId = connectorProps.directoryId;
       dnsIps = cfg.dnsServerIps;
       serviceAccountSecretArn = cfg.serviceAccountSecretArn;
+
+      // Directory Service Data API is deliberately NOT enabled on the AD
+      // Connector: EnableDirectoryDataAccess returns
+      // UnsupportedOperationException on connector-type directories, and
+      // even if it did not, ds-data:DescribeUser / ListGroupMembers do not
+      // proxy through an AD Connector to the customer's AD. BYO-AD user
+      // status and group membership are therefore read via direct LDAP
+      // queries (tracked separately - see the LDAP-based read integration
+      // work). MRM never writes to the customer's AD; user and group
+      // lifecycle in BYO-AD mode is the customer AD team's responsibility.
     } else {
       // ─────── Managed AD path (byte-identical to pre-PR-3 behavior) ───────
       domainName = params.DomainName || 'studio.mrm.internal';
@@ -222,8 +232,10 @@ export class IdentityConstruct extends Construct {
       // ResourceAdmin secret in managed mode.
       serviceAccountSecretArn = resourceAdminSecret.secretArn;
 
-      // Enable Directory Data Access (Data API) — only relevant for Managed AD.
-      this.enableDirectoryDataAccess();
+      // Enable Directory Data Access (Data API) on the Managed AD so the
+      // downstream CreateUser Custom Resources and the runtime user-list /
+      // group-membership readers can call ds-data:*.
+      this.enableDirectoryDataAccess(this.managedAd.ref);
 
       // Create AD users using Custom Resources — only relevant for Managed AD.
       this.createAdUsers(
@@ -257,6 +269,7 @@ export class IdentityConstruct extends Construct {
       dnsIps,
       serviceAccountSecretArn,
       props.pascalCaseName,
+      adMode,
     );
 
     // Common CFN output for the domain name.
@@ -278,15 +291,20 @@ export class IdentityConstruct extends Construct {
   }
 
   /**
-   * Managed-AD-only: enable the Directory Service Data API so subsequent
-   * Custom Resources can create/manage users via `ds-data:*`.
+   * Enable the Directory Service Data API on a directory so downstream
+   * consumers (Custom Resources that create users in managed mode; the
+   * user-group-manager Lambda that lists users in both modes) can call
+   * `ds-data:*`.
+   *
+   * Applies to both directory types:
+   *   - Managed AD: enables read+write - MRM creates ResourceAdmin and
+   *     RM_AdConnectorUser here via CreateUserCommand.
+   *   - AD Connector: enables read - MRM never writes into the customer's
+   *     AD, but the DS Data API read operations (DescribeUser,
+   *     ListGroupMembers) proxy through the connector so the user list,
+   *     enable/disable status, and group membership all work.
    */
-  private enableDirectoryDataAccess() {
-    if (!this.managedAd) {
-      throw new Error('enableDirectoryDataAccess called without a Managed AD');
-    }
-    const managedAd = this.managedAd;
-
+  private enableDirectoryDataAccess(directoryId: string) {
     const enableDataAccessFunction = new lambda.Function(this, 'EnableDataAccessFunction', {
       functionName: `${this.acronym.toLowerCase()}-enable-directory-data-access`,
       runtime: lambda.Runtime.PYTHON_3_12,
@@ -300,14 +318,14 @@ export class IdentityConstruct extends Construct {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['ds:EnableDirectoryDataAccess'],
-        resources: [`arn:aws:ds:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:directory/${managedAd.ref}`],
+        resources: [`arn:aws:ds:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:directory/${directoryId}`],
       })
     );
 
     new cdk.CustomResource(this, 'EnableDirectoryDataAccess', {
       serviceToken: enableDataAccessFunction.functionArn,
       properties: {
-        DirectoryId: managedAd.ref,
+        DirectoryId: directoryId,
       },
     });
   }
@@ -509,6 +527,7 @@ export class IdentityConstruct extends Construct {
     dnsIps: string[],
     serviceAccountSecretArn: string,
     pascalCaseName: string,
+    adMode: 'managed' | 'connector',
   ) {
     // Domain information — same well-known parameter paths in both modes.
     new ssm.StringParameter(this, 'DomainNameParameter', {
@@ -549,6 +568,19 @@ export class IdentityConstruct extends Construct {
         'ARN of the AD service-account secret ({username, password}). Points at '
         + 'the MRM-managed ResourceAdmin secret in adMode=managed, or the '
         + 'customer-supplied secret in adMode=connector.',
+    });
+
+    // Publish the AD mode so downstream code (config-generator building the
+    // frontend config.json, user-group-manager gating write operations) can
+    // branch on it without duplicating the synth-time gate. Well-known path
+    // parallel to `.../Auth/UseCognitoAuth` used by the Cognito toggle.
+    new ssm.StringParameter(this, 'AdModeParameter', {
+      parameterName: `/${pascalCaseName}/Identity/AdMode`,
+      stringValue: adMode,
+      description:
+        "AD deployment mode: 'managed' = MRM owns AWS Managed Microsoft AD "
+        + "and can create/enable/disable/delete users; 'connector' = MRM is a "
+        + "read-only tenant of a customer-supplied AD via AD Connector.",
     });
   }
 

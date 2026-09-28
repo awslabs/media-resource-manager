@@ -154,6 +154,58 @@ async function getDirectoryId() {
   }
 }
 
+/**
+ * Read the AD deployment mode from SSM. Values:
+ *   'managed'   - MRM owns AWS Managed Microsoft AD. Full user/group CRUD
+ *                 via ds-data:* is available.
+ *   'connector' - MRM is a read-only tenant of a customer-supplied AD via
+ *                 AD Connector. All AD writes are refused - the customer's
+ *                 AD team manages lifecycle in their own directory.
+ * Defaults to 'managed' when the parameter is missing so pre-#27 stacks
+ * that never wrote /Identity/AdMode continue to allow writes as before.
+ */
+async function getAdMode() {
+  try {
+    const pascalCaseName = process.env.PASCAL_CASE_NAME || 'MediaResourceManager';
+    const result = await ssm.send(new GetParameterCommand({
+      Name: `/${pascalCaseName}/Identity/AdMode`
+    }));
+    const v = result.Parameter && result.Parameter.Value;
+    return v === 'connector' ? 'connector' : 'managed';
+  } catch (error) {
+    console.log('AdMode parameter not found, defaulting to managed');
+    return 'managed';
+  }
+}
+
+/**
+ * Returns a 403 response payload when the caller attempted an AD write
+ * operation while the deployment is in connector mode. Callers early-return
+ * this response instead of the normal write path. `null` when the operation
+ * is allowed (managed or Cognito mode).
+ *
+ * Motivation: in connector mode MRM is a tenant of the customer's AD. Any
+ * ds-data:CreateUser / DisableUser / DeleteUser / ResetPassword /
+ * AddGroupMember / RemoveGroupMember / CreateGroup / DeleteGroup call would
+ * either fail (service account lacks permission) or succeed and pollute the
+ * customer's directory. Both are wrong - the customer AD team owns user and
+ * group lifecycle. Refuse at the API boundary with a clear message.
+ */
+async function refuseInConnectorMode(operation) {
+  const useCognitoAuth = await getUseCognitoAuth();
+  if (useCognitoAuth) return null; // Cognito path already gated separately
+  const adMode = await getAdMode();
+  if (adMode !== 'connector') return null;
+  return {
+    statusCode: 403,
+    headers: corsHeaders,
+    body: JSON.stringify({
+      error: `${operation} is not available in BYO-AD (AD Connector) mode. User and group lifecycle is managed in your Active Directory by your AD team; MRM only reads from the directory.`,
+      code: 'CONNECTOR_MODE_READ_ONLY',
+    }),
+  };
+}
+
 // Helper function to check if Cognito auth mode is enabled
 async function getUseCognitoAuth() {
   try {
@@ -217,6 +269,70 @@ async function getAdminGroupName() {
   } catch (error) {
     console.log('AdminGroupName parameter not found, defaulting to MRM-Admins');
     return 'MRM-Admins';
+  }
+}
+
+/**
+ * Import the deployment's configured admin AD group(s) as MRM group(s) in
+ * `mrm-groups` DDB so users in the admin group show that group in the UI
+ * and admins can see the same access control primitive they configured
+ * during deployment. Runs on every list-users / list-groups call because
+ * it is idempotent (ConditionExpression: attribute_not_exists) and never
+ * mutates an already-imported record. Cheap - a single conditional Put
+ * per admin group per request that succeeds only once per deployment.
+ *
+ * Deliberately does NOT import the legacy "AWS Delegated Administrators"
+ * fallback (managed-AD default) - only the operator-configured groups
+ * from /Auth/AdminGroupName. Managed-mode deployments where operators
+ * did not override the default keep the current no-admin-MRM-group
+ * behavior, matching pre-v1.3.1 behavior byte-for-byte.
+ *
+ * Cognito mode: no-op. Cognito user pool groups drive admin status there
+ * and are enumerated directly via AdminListGroupsForUser.
+ *
+ * See #37 for the follow-up "Import from AD" UI that lets admins bulk
+ * import arbitrary AD groups, not just the admin group.
+ */
+async function ensureAdminGroupImported() {
+  try {
+    const useCognitoAuth = await getUseCognitoAuth();
+    if (useCognitoAuth) return;
+
+    const adminGroupConfig = await getAdminGroupName();
+    const adminGroups = adminGroupConfig
+      .split(',')
+      .map((g) => g.trim())
+      .filter((g) => g && g.toLowerCase() !== 'aws delegated administrators');
+
+    for (const groupName of adminGroups) {
+      const slug = groupName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/^-+|-+$/g, '');
+      const groupId = `group-admin-${slug}`;
+      try {
+        await dynamodb.send(new PutCommand({
+          TableName: process.env.GROUPS_TABLE_NAME,
+          Item: {
+            groupId,
+            groupName,
+            description: 'Users in this AD group have MRM administrator privileges. Auto-imported from /Auth/AdminGroupName.',
+            importedFromAD: true,
+            adminGroup: true,
+            createdAt: new Date().toISOString(),
+          },
+          ConditionExpression: 'attribute_not_exists(groupId)',
+        }));
+        console.log(`ensureAdminGroupImported: imported admin AD group "${groupName}" as MRM group ${groupId}`);
+      } catch (err) {
+        // ConditionalCheckFailed is the happy path - record already exists.
+        if (err.name !== 'ConditionalCheckFailedException') {
+          console.warn(`ensureAdminGroupImported: put failed for "${groupName}": ${err.name} ${err.message}`);
+        }
+      }
+    }
+  } catch (err) {
+    // Never fail the caller on this - it is a UX polish, not a correctness
+    // requirement. If the import misses this request, it will run again on
+    // the next one.
+    console.warn(`ensureAdminGroupImported: skipped due to ${err.name || 'error'}: ${err.message}`);
   }
 }
 
@@ -431,10 +547,37 @@ async function getUsersFromCognito() {
 // Get users from LDAP/Directory Service (original implementation)
 async function getUsersFromLDAP() {
   try {
+    // Ensure the admin AD group is imported as an MRM group before scanning
+    // so users in the admin group see it as a group membership. Same
+    // idempotent path as getGroups().
+    await ensureAdminGroupImported();
+
     const result = await dynamodb.send(new ScanCommand({
       TableName: process.env.USER_TABLE_NAME
     }));
-    
+
+    // In BYO-AD (AD Connector) mode the ds-data:* APIs are not supported on
+    // the directory - DescribeUser and ListGroupMembers would both throw.
+    // Return the DDB records as-is with status/groups omitted so the UI can
+    // render "-" instead of a misleading "Disabled" / "No groups". The
+    // LDAP-based read integration that restores real state lives in a
+    // separate work stream tracked in a future release.
+    const adMode = await getAdMode();
+    if (adMode === 'connector') {
+      const users = result.Items.map((user) => ({
+        ...user,
+        status: 'unknown',
+        enabled: null,
+        role: user.isAdmin ? 'Administrator' : 'User',
+        groups: [],
+      }));
+      return {
+        statusCode: 200,
+        headers: corsHeaders,
+        body: JSON.stringify(users),
+      };
+    }
+
     // Get directory ID for Directory Service calls
     const directoryId = await getDirectoryId();
     
@@ -517,6 +660,11 @@ async function getUsersFromLDAP() {
 
 async function getGroups(event) {
   try {
+    // Ensure the configured admin AD group is represented as an MRM group
+    // before we scan, so admins do not see an empty Groups page on a fresh
+    // BYO-AD deployment. Idempotent; skipped in Cognito mode.
+    await ensureAdminGroupImported();
+
     const result = await dynamodb.send(new ScanCommand({
       TableName: process.env.GROUPS_TABLE_NAME
     }));
@@ -658,6 +806,8 @@ async function getUserGroupsFromLDAP(userId) {
 }
 
 async function createUser(userData) {
+  const connectorRefusal = await refuseInConnectorMode('Creating users');
+  if (connectorRefusal) return connectorRefusal;
   // Check if Cognito auth mode - user creation is disabled
   const useCognitoAuth = await getUseCognitoAuth();
   if (useCognitoAuth) {
@@ -791,6 +941,8 @@ async function createUser(userData) {
 
 async function assignUsersToGroups(assignmentData) {
   try {
+    const connectorRefusal = await refuseInConnectorMode('Assigning users to groups');
+    if (connectorRefusal) return connectorRefusal;
     const { userIds, groupIds } = assignmentData;
     const useCognitoAuth = await getUseCognitoAuth();
     
@@ -910,6 +1062,8 @@ async function assignUsersToGroupsLDAP(userIds, groupIds) {
 
 async function removeUserFromGroups(userId, data) {
   try {
+    const connectorRefusal = await refuseInConnectorMode('Removing users from groups');
+    if (connectorRefusal) return connectorRefusal;
     const { groupIds } = data;
     const useCognitoAuth = await getUseCognitoAuth();
     
@@ -1026,6 +1180,8 @@ async function removeUserFromGroupsLDAP(userId, groupIds) {
 }
 
 async function createGroup(groupData) {
+  const connectorRefusal = await refuseInConnectorMode('Creating groups');
+  if (connectorRefusal) return connectorRefusal;
   const { groupName, description } = groupData;
   
   try {
@@ -1182,6 +1338,8 @@ async function createGroupLDAP(groupName, description) {
 }
 
 async function disableUsers(data) {
+  const connectorRefusal = await refuseInConnectorMode('Disabling users');
+  if (connectorRefusal) return connectorRefusal;
   // Check if Cognito auth mode - user management is disabled
   const useCognitoAuth = await getUseCognitoAuth();
   if (useCognitoAuth) {
@@ -1223,6 +1381,8 @@ async function disableUsers(data) {
 }
 
 async function enableUsers(data) {
+  const connectorRefusal = await refuseInConnectorMode('Enabling users');
+  if (connectorRefusal) return connectorRefusal;
   // Check if Cognito auth mode - user management is disabled
   const useCognitoAuth = await getUseCognitoAuth();
   if (useCognitoAuth) {
@@ -1267,6 +1427,8 @@ async function enableUsers(data) {
 }
 
 async function deleteUsers(data) {
+  const connectorRefusal = await refuseInConnectorMode('Deleting users');
+  if (connectorRefusal) return connectorRefusal;
   // Check if Cognito auth mode - user management is disabled
   const useCognitoAuth = await getUseCognitoAuth();
   if (useCognitoAuth) {
@@ -1316,6 +1478,8 @@ async function deleteUsers(data) {
 
 async function deleteGroup(groupId) {
   try {
+    const connectorRefusal = await refuseInConnectorMode('Deleting groups');
+    if (connectorRefusal) return connectorRefusal;
     // Get group details first
     const groupResult = await dynamodb.send(new GetCommand({
       TableName: process.env.GROUPS_TABLE_NAME,
@@ -1388,6 +1552,8 @@ async function deleteGroup(groupId) {
 
 async function updateGroup(groupId, data) {
   try {
+    const connectorRefusal = await refuseInConnectorMode('Updating groups');
+    if (connectorRefusal) return connectorRefusal;
     const { groupName, description } = data;
     
     // Get current group details
