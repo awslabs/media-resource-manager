@@ -62,16 +62,22 @@ module.exports = {
         'MAJOR_VERSION=$(echo "$VERSION_ID" | cut -d. -f1)',
         'echo "Detected major version: $MAJOR_VERSION"',
         '',
-        '# Check if DCV Server is already installed',
+        '# Check if DCV Server is already installed.',
+        '# NOTE: systemctl list-unit-files <unknown>.service exits 0 with an',
+        '# empty result on RHEL/Rocky 8 systemd 239, so the presence check must',
+        '# grep the output rather than trust the exit status — see #40.',
         'DCV_INSTALLED=false',
-        'if command -v dcvserver &>/dev/null || systemctl list-unit-files dcvserver.service &>/dev/null 2>&1; then',
+        'if command -v dcvserver &>/dev/null \\',
+        '   || systemctl list-unit-files dcvserver.service 2>/dev/null | grep -q "^dcvserver.service"; then',
         '  DCV_INSTALLED=true',
         '  echo "DCV Server already installed — skipping DCV installation"',
         'fi',
         '',
-        '# Check if DCV Session Manager Agent is already installed',
+        '# Check if DCV Session Manager Agent is already installed.',
+        '# Same false-positive concern as the DCV Server check above — see #40.',
         'SM_AGENT_INSTALLED=false',
-        'if command -v dcv-session-manager-agent &>/dev/null || systemctl list-unit-files dcv-session-manager-agent.service &>/dev/null 2>&1; then',
+        'if command -v dcv-session-manager-agent &>/dev/null \\',
+        '   || systemctl list-unit-files dcv-session-manager-agent.service 2>/dev/null | grep -q "^dcv-session-manager-agent.service"; then',
         '  SM_AGENT_INSTALLED=true',
         '  echo "DCV Session Manager Agent already installed — skipping agent installation"',
         'fi',
@@ -252,7 +258,15 @@ module.exports = {
         '',
         'echo "Phase 1 complete!"'
       ],
-      timeoutSeconds: '1200'
+      // Phase 1 installs a full desktop environment (ubuntu-desktop-minimal on
+      // Ubuntu, Server-with-GUI group on Rocky/RHEL) plus NICE DCV Server and
+      // the Session Manager Agent. On slower instance types or busy apt/dnf
+      // mirrors the desktop install alone can approach the previous 20-minute
+      // ceiling — see #7. Doubling the timeout to 40 minutes gives headroom
+      // without meaningfully changing the failure semantics for a genuinely
+      // stuck install (Step Functions still moves on after the SSM command
+      // times out).
+      timeoutSeconds: '2400'
     }
   }]
 };
