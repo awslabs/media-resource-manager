@@ -1184,16 +1184,6 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
         {/* Header */}
         <Title level={3} style={{ marginBottom: 24 }}>User Management</Title>
 
-        {isConnectorMode && (
-          <Alert
-            type="info"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message="Read-only: this deployment uses BYO-AD (AD Connector)"
-            description="Users and groups shown here are read from your Active Directory. Create, edit, disable, delete, group membership, and password reset are managed in your AD by your directory team. MRM auto-provisions a local record on each user's first sign-in so you can assign workstations to them."
-          />
-        )}
-
         {alert && (
           <Alert
             type={alert.type}
