@@ -481,7 +481,21 @@ Terminal=false
 DESKTOP_EOF
             chown "$USERNAME:$USERNAME" "$DESKTOP_FILE"
             chmod 755 "$DESKTOP_FILE"
-            sudo -u "$USERNAME" gio set "$DESKTOP_FILE" metadata::trusted true 2>/dev/null || true
+            # Mark the shortcut as trusted in GVFS metadata so GNOME does not
+            # gate the first double-click behind an "Untrusted Desktop File —
+            # right-click to Allow Launching" prompt. gio set writes to the
+            # user's GVFS metadata store, which requires a running DBus session
+            # bus; sudo -u alone does not export DBUS_SESSION_BUS_ADDRESS, so
+            # we point gio at the target user's session bus explicitly. When
+            # the bus is not yet available (e.g. mount fires before first
+            # graphical login), the write is skipped and the user hits the
+            # one-time GNOME prompt instead — no worse than pre-fix behavior.
+            USER_UID=$(id -u "$USERNAME" 2>/dev/null || echo "")
+            if [ -n "$USER_UID" ] && [ -S "/run/user/$USER_UID/bus" ]; then
+                sudo -u "$USERNAME" \
+                    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_UID/bus" \
+                    gio set "$DESKTOP_FILE" metadata::trusted true 2>/dev/null || true
+            fi
         fi
     done
 else
