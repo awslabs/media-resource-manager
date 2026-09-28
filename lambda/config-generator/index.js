@@ -48,7 +48,11 @@ exports.handler = async (event) => {
         adMode = value;
       }
     } catch (error) {
-      console.log('AD mode parameter not found, defaulting to managed');
+      // Distinguish "parameter genuinely missing" (ParameterNotFound) from
+      // "Lambda role cannot read the path" (AccessDeniedException) - the
+      // latter is a deploy bug that silently hid connector mode until it
+      // surfaced as write-UI-still-showing on the frontend.
+      console.log(`AD mode parameter lookup failed (${error.name}: ${error.message}), defaulting to managed`);
     }
 
     // Get Cognito values if using Cognito auth

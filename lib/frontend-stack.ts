@@ -144,6 +144,10 @@ export class FrontendStack extends cdk.Stack {
       effect: iam.Effect.ALLOW,
       actions: ['ssm:GetParameter'],
       resources: [
+        // Identity/* covers /Identity/AdMode which the config-generator reads
+        // to expose adMode to the frontend so UI can hide write actions when
+        // MRM is in BYO-AD (AD Connector) mode.
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/Identity/*`,
         `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/Workstation/ApiUrl`,
         `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/Auth/*`,
         `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/Storage/*`,
