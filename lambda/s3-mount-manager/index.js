@@ -466,8 +466,18 @@ if mountpoint -q "$MOUNT_PATH"; then
     # Create desktop shortcut for all users with home directories
     STORAGE_NAME="${storage.name}"
     for USER_HOME in /home/*; do
+        # Skip synthetic entries that a wildcard may produce (e.g. /home/lost+found)
+        [ -d "$USER_HOME" ] || continue
+        USERNAME=$(basename "$USER_HOME")
+        # Ensure ~/Desktop exists. Ubuntu creates it via xdg-user-dirs on first
+        # login, but Rocky Linux 8's minimal desktop install does not, so
+        # without this mkdir the shortcut would be silently skipped there.
+        if [ ! -d "$USER_HOME/Desktop" ]; then
+            mkdir -p "$USER_HOME/Desktop"
+            chown "$USERNAME:$USERNAME" "$USER_HOME/Desktop"
+            chmod 755 "$USER_HOME/Desktop"
+        fi
         if [ -d "$USER_HOME/Desktop" ]; then
-            USERNAME=$(basename "$USER_HOME")
             DESKTOP_FILE="$USER_HOME/Desktop/$STORAGE_NAME.desktop"
             echo "Creating desktop shortcut for $USERNAME..."
             cat > "$DESKTOP_FILE" << DESKTOP_EOF
