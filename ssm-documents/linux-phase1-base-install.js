@@ -62,16 +62,22 @@ module.exports = {
         'MAJOR_VERSION=$(echo "$VERSION_ID" | cut -d. -f1)',
         'echo "Detected major version: $MAJOR_VERSION"',
         '',
-        '# Check if DCV Server is already installed',
+        '# Check if DCV Server is already installed.',
+        '# NOTE: systemctl list-unit-files <unknown>.service exits 0 with an',
+        '# empty result on RHEL/Rocky 8 systemd 239, so the presence check must',
+        '# grep the output rather than trust the exit status — see #40.',
         'DCV_INSTALLED=false',
-        'if command -v dcvserver &>/dev/null || systemctl list-unit-files dcvserver.service &>/dev/null 2>&1; then',
+        'if command -v dcvserver &>/dev/null \\',
+        '   || systemctl list-unit-files dcvserver.service 2>/dev/null | grep -q "^dcvserver.service"; then',
         '  DCV_INSTALLED=true',
         '  echo "DCV Server already installed — skipping DCV installation"',
         'fi',
         '',
-        '# Check if DCV Session Manager Agent is already installed',
+        '# Check if DCV Session Manager Agent is already installed.',
+        '# Same false-positive concern as the DCV Server check above — see #40.',
         'SM_AGENT_INSTALLED=false',
-        'if command -v dcv-session-manager-agent &>/dev/null || systemctl list-unit-files dcv-session-manager-agent.service &>/dev/null 2>&1; then',
+        'if command -v dcv-session-manager-agent &>/dev/null \\',
+        '   || systemctl list-unit-files dcv-session-manager-agent.service 2>/dev/null | grep -q "^dcv-session-manager-agent.service"; then',
         '  SM_AGENT_INSTALLED=true',
         '  echo "DCV Session Manager Agent already installed — skipping agent installation"',
         'fi',
@@ -142,8 +148,12 @@ module.exports = {
         '',
         '  # Install desktop environment if not present',
         '  if ! dnf group list installed 2>/dev/null | grep -qi "Server with GUI"; then',
-        '    # Check if a desktop is already available (gdm or another display manager)',
-        '    if command -v gdm &>/dev/null || command -v lightdm &>/dev/null || systemctl list-unit-files gdm.service &>/dev/null 2>&1; then',
+        '    # Check if a desktop is already available (gdm or another display',
+        '    # manager). Grep the systemctl output rather than trusting its exit',
+        '    # status — see #40 for the same false-positive that hits DCV checks.',
+        '    if command -v gdm &>/dev/null \\',
+        '       || command -v lightdm &>/dev/null \\',
+        '       || systemctl list-unit-files gdm.service 2>/dev/null | grep -q "^gdm.service"; then',
         '      echo "Desktop environment already available — skipping group install"',
         '    else',
         '      echo "Installing Server with GUI group..."',
@@ -155,7 +165,19 @@ module.exports = {
         '  else',
         '    echo "Server with GUI already installed — skipping"',
         '  fi',
-        '  sudo dnf install -y --allowerasing gdm gnome-session gnome-terminal || true',
+        '  # Ensure a usable desktop regardless of which install path above ran:',
+        '  # - gdm/gnome-session/gnome-terminal give a login screen and a session',
+        '  # - nautilus is the file manager; without it there is no GUI way to',
+        '  #   browse S3 mounts or the home directory',
+        '  # - xdg-user-dirs / xdg-user-dirs-gtk create ~/Desktop, ~/Downloads, …',
+        '  #   at first login; on Rocky 8 GNOME does not create them otherwise,',
+        '  #   which then blocks s3-mount-manager from placing its shortcut',
+        '  # Note: GNOME 3.32 does not render icons on the desktop background',
+        '  # regardless of what is in ~/Desktop; users access the shortcut via',
+        '  # Files → Home → Desktop until a follow-up ships desktop-icons.',
+        '  sudo dnf install -y --allowerasing \\',
+        '    gdm gnome-session gnome-terminal \\',
+        '    nautilus xdg-user-dirs xdg-user-dirs-gtk || true',
         '',
         '  echo "Configuring GDM..."',
         '  sudo mkdir -p /etc/gdm',
@@ -252,7 +274,15 @@ module.exports = {
         '',
         'echo "Phase 1 complete!"'
       ],
-      timeoutSeconds: '1200'
+      // Phase 1 installs a full desktop environment (ubuntu-desktop-minimal on
+      // Ubuntu, Server-with-GUI group on Rocky/RHEL) plus NICE DCV Server and
+      // the Session Manager Agent. On slower instance types or busy apt/dnf
+      // mirrors the desktop install alone can approach the previous 20-minute
+      // ceiling — see #7. Doubling the timeout to 40 minutes gives headroom
+      // without meaningfully changing the failure semantics for a genuinely
+      // stuck install (Step Functions still moves on after the SSM command
+      // times out).
+      timeoutSeconds: '2400'
     }
   }]
 };

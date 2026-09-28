@@ -466,8 +466,18 @@ if mountpoint -q "$MOUNT_PATH"; then
     # Create desktop shortcut for all users with home directories
     STORAGE_NAME="${storage.name}"
     for USER_HOME in /home/*; do
+        # Skip synthetic entries that a wildcard may produce (e.g. /home/lost+found)
+        [ -d "$USER_HOME" ] || continue
+        USERNAME=$(basename "$USER_HOME")
+        # Ensure ~/Desktop exists. Ubuntu creates it via xdg-user-dirs on first
+        # login, but Rocky Linux 8's minimal desktop install does not, so
+        # without this mkdir the shortcut would be silently skipped there.
+        if [ ! -d "$USER_HOME/Desktop" ]; then
+            mkdir -p "$USER_HOME/Desktop"
+            chown "$USERNAME:$USERNAME" "$USER_HOME/Desktop"
+            chmod 755 "$USER_HOME/Desktop"
+        fi
         if [ -d "$USER_HOME/Desktop" ]; then
-            USERNAME=$(basename "$USER_HOME")
             DESKTOP_FILE="$USER_HOME/Desktop/$STORAGE_NAME.desktop"
             echo "Creating desktop shortcut for $USERNAME..."
             cat > "$DESKTOP_FILE" << DESKTOP_EOF
@@ -481,7 +491,21 @@ Terminal=false
 DESKTOP_EOF
             chown "$USERNAME:$USERNAME" "$DESKTOP_FILE"
             chmod 755 "$DESKTOP_FILE"
-            sudo -u "$USERNAME" gio set "$DESKTOP_FILE" metadata::trusted true 2>/dev/null || true
+            # Mark the shortcut as trusted in GVFS metadata so GNOME does not
+            # gate the first double-click behind an "Untrusted Desktop File —
+            # right-click to Allow Launching" prompt. gio set writes to the
+            # user's GVFS metadata store, which requires a running DBus session
+            # bus; sudo -u alone does not export DBUS_SESSION_BUS_ADDRESS, so
+            # we point gio at the target user's session bus explicitly. When
+            # the bus is not yet available (e.g. mount fires before first
+            # graphical login), the write is skipped and the user hits the
+            # one-time GNOME prompt instead — no worse than pre-fix behavior.
+            USER_UID=$(id -u "$USERNAME" 2>/dev/null || echo "")
+            if [ -n "$USER_UID" ] && [ -S "/run/user/$USER_UID/bus" ]; then
+                sudo -u "$USERNAME" \
+                    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$USER_UID/bus" \
+                    gio set "$DESKTOP_FILE" metadata::trusted true 2>/dev/null || true
+            fi
         fi
     done
 else
