@@ -14,6 +14,8 @@ const { ImagebuilderClient, CreateImagePipelineCommand, CreateImageRecipeCommand
         DeleteDistributionConfigurationCommand, DeleteComponentCommand, UpdateInfrastructureConfigurationCommand,
         UpdateImagePipelineCommand, ListImagesCommand, DeleteImageCommand, ListImageBuildVersionsCommand,
         ListImageRecipesCommand } = require('@aws-sdk/client-imagebuilder');
+const { validateDisplayName, toImageBuilderName, toComponentName, toAmiNameBase,
+        buildImageMatchPatterns, imageMatchesAnyPattern } = require('./naming');
 
 // STS client for getting account ID
 const stsClient = new STSClient({ region: process.env.AWS_REGION });
@@ -889,11 +891,30 @@ async function copyImageToRegions(copyData, event) {
 async function createImagePipeline(pipelineData, event) {
   const { name, description, baseImageId, platform, instanceType, components } = pipelineData;
   const pipelineId = crypto.randomUUID();
-  
-  // Prefix Image Builder resource names with the product acronym (lowercase)
-  // This makes log groups identifiable for cleanup: /aws/imagebuilder/{acronym}-{name}-*
+
+  // Validate names before creating anything, so a bad name never leaves
+  // orphaned Image Builder resources behind (#48).
+  const nameError = validateDisplayName(name, 'Pipeline name');
+  const scriptNameError = (components || [])
+    .filter(component => component.type === 'CUSTOM_SCRIPT')
+    .map(component => validateDisplayName(component.name, 'Custom script name'))
+    .find(Boolean);
+  const inputError = nameError || scriptNameError ||
+    (typeof baseImageId !== 'string' || !baseImageId ? 'Base image is required.' : null);
+  if (inputError) {
+    return {
+      statusCode: 400,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+      body: JSON.stringify({ error: inputError })
+    };
+  }
+
+  // Image Builder resource names: {acronym}-{cleaned name}-{kind}-{id}. The
+  // acronym prefix makes log groups identifiable for cleanup
+  // (/aws/imagebuilder/{acronym}-*). The display name is stored unchanged.
   const acronym = (process.env.ACRONYM || 'mrm').toLowerCase();
-  const prefixedName = `${acronym}-${name}`;
+  const resourceName = (kind) => toImageBuilderName(acronym, name, kind, pipelineId);
+  const amiName = `${toAmiNameBase(name)}-{{imagebuilder:buildDate}}`;
   
   // Standard tags applied to all Image Builder resources for identification and cleanup
   const pascalCaseName = process.env.PASCAL_CASE_NAME || 'MediaResourceManager';
@@ -1081,7 +1102,7 @@ async function createImagePipeline(pipelineData, event) {
     
     // Build infrastructure configuration parameters
     const infraConfigParams = {
-      name: `${prefixedName}-infra-${pipelineId.substring(0, 8)}`,
+      name: resourceName('infra'),
       instanceProfileName: process.env.IMAGE_BUILDER_INSTANCE_PROFILE,
       instanceTypes: [resolvedInstanceType],
       subnetId: selectedSubnet,
@@ -1133,7 +1154,7 @@ async function createImagePipeline(pipelineData, event) {
       {
         region: primaryRegion,
         amiDistributionConfiguration: {
-          name: `${name}-{{imagebuilder:buildDate}}`,
+          name: amiName,
           description: description || `AMI created from ${name} pipeline`,
           amiTags: {
             'CreatedBy': process.env.PASCAL_CASE_NAME || 'MediaResourceManager',
@@ -1152,7 +1173,7 @@ async function createImagePipeline(pipelineData, event) {
         distributions.push({
           region: hub.region,
           amiDistributionConfiguration: {
-            name: `${name}-{{imagebuilder:buildDate}}`,
+            name: amiName,
             description: description || `AMI created from ${name} pipeline (distributed to ${hub.region})`,
             amiTags: {
               'CreatedBy': process.env.PASCAL_CASE_NAME || 'MediaResourceManager',
@@ -1170,7 +1191,7 @@ async function createImagePipeline(pipelineData, event) {
     console.log('Creating distribution config for', distributions.length, 'region(s):', distributions.map(d => d.region));
     
     const distConfig = await imageBuilderClient.send(new CreateDistributionConfigurationCommand({
-      name: `${prefixedName}-dist-${pipelineId.substring(0, 8)}`,
+      name: resourceName('dist'),
       distributions: distributions,
       tags: managedByTags,
     }));
@@ -1217,7 +1238,7 @@ async function createImagePipeline(pipelineData, event) {
       console.log(`Base OS "${baseOsVersion}" lacks a preinstalled SSM agent - adding userDataOverride bootstrap`);
     }
     const imageRecipe = await imageBuilderClient.send(new CreateImageRecipeCommand({
-      name: `${prefixedName}-recipe-${pipelineId.substring(0, 8)}`,
+      name: resourceName('recipe'),
       semanticVersion: '1.0.0',
       parentImage: resolvedBaseImageId,
       components: componentArns,
@@ -1242,7 +1263,7 @@ async function createImagePipeline(pipelineData, event) {
 
     // 5. Create Image Pipeline
     const pipeline = await imageBuilderClient.send(new CreateImagePipelineCommand({
-      name: `${prefixedName}-pipeline-${pipelineId.substring(0, 8)}`,
+      name: resourceName('pipeline'),
       description: description || `Pipeline for creating ${name} images`,
       imageRecipeArn: imageRecipe.imageRecipeArn,
       infrastructureConfigurationArn: infraConfig.infrastructureConfigurationArn,
@@ -1317,7 +1338,7 @@ async function createCustomComponent(component, pipelineId, platform = 'Windows'
   };
 
   const componentResult = await imageBuilderClient.send(new CreateComponentCommand({
-    name: `${component.name}-${pipelineId.substring(0, 8)}`,
+    name: toComponentName(component.name, pipelineId),
     semanticVersion: '1.0.0',
     platform: platform,
     data: JSON.stringify(componentDocument),
@@ -1636,38 +1657,18 @@ async function deletePipeline(pipelineId, event) {
         owner: 'Self'
       }));
       
-      // Build list of patterns to match
-      const matchPatterns = [];
-      
-      // Extract recipe name from ARN (e.g., "digital-developers-recipe-bff2eb2d" from the ARN)
-      if (pipeline.imageRecipeArn?.S) {
-        const recipeName = pipeline.imageRecipeArn.S.split('/')[1]?.split('/')[0];
-        if (recipeName) {
-          matchPatterns.push(recipeName.toLowerCase());
-        }
-      }
-      
-      // Also match by pipeline ID suffix (the UUID portion)
-      const pipelineIdSuffix = pipelineId.substring(0, 8);
-      if (pipelineIdSuffix) {
-        matchPatterns.push(pipelineIdSuffix.toLowerCase());
-      }
-      
-      // Match by sanitized pipeline name
-      const pipelineName = pipeline.name?.S;
-      if (pipelineName) {
-        // Sanitize name the same way we do when creating recipes
-        const sanitizedName = pipelineName.toLowerCase().replace(/[^a-z0-9-]/g, '-').replace(/-+/g, '-');
-        matchPatterns.push(sanitizedName);
-      }
+      // Match on the recipe name from the ARN, the pipelineId prefix, and a
+      // cleaned-up display name. Covers pipelines created before and after #48.
+      const matchPatterns = buildImageMatchPatterns({
+        pipelineId,
+        imageRecipeArn: pipeline.imageRecipeArn?.S,
+        displayName: pipeline.name?.S,
+      });
       
       console.log(`Searching for ImageBuilder images matching patterns: ${matchPatterns.join(', ')}`);
       
-      // Filter images that match any of our patterns
-      const matchingImages = (allImages.imageVersionList || []).filter(image => {
-        const imageName = (image.name || '').toLowerCase();
-        return matchPatterns.some(pattern => imageName.includes(pattern));
-      });
+      const matchingImages = (allImages.imageVersionList || [])
+        .filter(image => imageMatchesAnyPattern(image.name, matchPatterns));
       
       console.log(`Found ${matchingImages.length} matching ImageBuilder images to delete`);
 
@@ -1842,7 +1843,8 @@ async function updatePipeline(pipelineId, updateData, event) {
     const currentRecipeArn = pipeline.imageRecipeArn?.S;
     // ARN format: arn:aws:imagebuilder:region:account:image-recipe/name/version
     const recipeArnParts = currentRecipeArn?.split('/') || [];
-    const currentRecipeName = recipeArnParts[1] || `${pipeline.name?.S}-recipe-${pipelineId.substring(0, 8)}`;
+    const acronym = (process.env.ACRONYM || 'mrm').toLowerCase();
+    const currentRecipeName = recipeArnParts[1] || toImageBuilderName(acronym, pipeline.name?.S, 'recipe', pipelineId);
     
     // List existing recipe versions to find the highest version
     let highestVersion = { major: 1, minor: 0, patch: 0 };
