@@ -470,7 +470,8 @@ const ImageCreationAntd: React.FC<ImageCreationAntdProps> = ({
       <div>
         <Text strong style={{ display: 'block', marginBottom: 8 }}>Base Image *</Text>
         <Text type="secondary" style={{ display: 'block', marginBottom: 12 }}>
-          Select the operating system for your image pipeline
+          Select the operating system for your image pipeline. Windows and Linux pipelines always build on the
+          latest AWS image for the version you choose.
         </Text>
         <Tabs
           activeKey={activePlatformTab}
