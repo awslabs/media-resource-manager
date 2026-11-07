@@ -61,6 +61,20 @@ interface SoftwareComponent {
   versionNumber?: string;
 }
 
+// Returned by edit and build when a pipeline's recipe moved to a newer AWS
+// base AMI (#49).
+interface BaseImageUpdate {
+  previousAmiId: string | null;
+  amiId: string;
+  baseOsVersion?: string;
+}
+
+const describeBaseImageUpdate = (update: BaseImageUpdate) => {
+  const os = update.baseOsVersion ? ` (${update.baseOsVersion})` : '';
+  const from = update.previousAmiId ? ` from ${update.previousAmiId}` : '';
+  return `Base image updated${from} to ${update.amiId}${os}.`;
+};
+
 interface PipelinesAntdProps {
   user: any;
   isAdmin: boolean;
@@ -240,9 +254,10 @@ const PipelinesAntd: React.FC<PipelinesAntdProps> = ({
 
       if (response.ok) {
         const data = await response.json();
+        const baseNote = data.baseImageUpdate ? ` ${describeBaseImageUpdate(data.baseImageUpdate)}` : '';
         setAlert({
           type: 'success',
-          message: `Pipeline updated successfully. New recipe version: ${data.recipeVersion}`,
+          message: `Pipeline updated successfully. New recipe version: ${data.recipeVersion}.${baseNote}`,
         });
         setShowEditModal(false);
         setEditingPipeline(null);
@@ -303,19 +318,39 @@ const PipelinesAntd: React.FC<PipelinesAntdProps> = ({
       const token = getAuthToken();
       if (!token) throw new Error('No current user');
 
-      await Promise.all(
-        selectedPipelines.map((pipeline) =>
-          apiCall(`/images/pipelines/${pipeline.pipelineId}/execute`, {
+      // Check each response. A build can be refused, for example when a
+      // pipeline's custom base AMI no longer exists (#49).
+      const results = await Promise.all(
+        selectedPipelines.map(async (pipeline) => {
+          const response = await apiCall(`/images/pipelines/${pipeline.pipelineId}/execute`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${token}` },
-          })
-        )
+          });
+          const data = await response.json().catch(() => ({}));
+          return { pipeline, ok: response.ok, data };
+        })
       );
 
-      setAlert({
-        type: 'success',
-        message: `${selectedPipelines.length} pipeline build(s) started successfully`,
-      });
+      const failures = results.filter((result) => !result.ok);
+      const baseNotes = results
+        .filter((result) => result.ok && result.data.baseImageUpdate)
+        .map((result) => `${result.pipeline.name}: ${describeBaseImageUpdate(result.data.baseImageUpdate)}`);
+      const started = results.length - failures.length;
+
+      if (failures.length === 0) {
+        setAlert({
+          type: 'success',
+          message: [`${started} pipeline build(s) started successfully.`, ...baseNotes].join(' '),
+        });
+      } else {
+        const failureNotes = failures.map(
+          (result) => `${result.pipeline.name}: ${result.data.error || 'Failed to start build'}`
+        );
+        setAlert({
+          type: started > 0 ? 'warning' : 'error',
+          message: [`Started ${started} of ${results.length} build(s).`, ...failureNotes, ...baseNotes].join(' '),
+        });
+      }
       fetchPipelines();
     } catch (error) {
       console.error('Error starting pipeline builds:', error);

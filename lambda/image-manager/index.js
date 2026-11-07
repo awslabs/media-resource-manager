@@ -13,9 +13,10 @@ const { ImagebuilderClient, CreateImagePipelineCommand, CreateImageRecipeCommand
         DeleteImagePipelineCommand, DeleteImageRecipeCommand, DeleteInfrastructureConfigurationCommand,
         DeleteDistributionConfigurationCommand, DeleteComponentCommand, UpdateInfrastructureConfigurationCommand,
         UpdateImagePipelineCommand, ListImagesCommand, DeleteImageCommand, ListImageBuildVersionsCommand,
-        ListImageRecipesCommand } = require('@aws-sdk/client-imagebuilder');
+        ListImageRecipesCommand, GetDistributionConfigurationCommand } = require('@aws-sdk/client-imagebuilder');
 const { validateDisplayName, toImageBuilderName, toComponentName, toAmiNameBase,
         buildImageMatchPatterns, imageMatchesAnyPattern } = require('./naming');
+const { BASE_IMAGE_SOURCES, BaseImageError, isSymbolicSource, resolvePipelineBase } = require('./base-image');
 
 // STS client for getting account ID
 const stsClient = new STSClient({ region: process.env.AWS_REGION });
@@ -267,11 +268,9 @@ async function handleICEErrorAndRetry(pipelineId, pipelineArn) {
         }));
         
         // Retry pipeline execution
-        await imageBuilderClient.send(new StartImagePipelineExecutionCommand({
+        return await imageBuilderClient.send(new StartImagePipelineExecutionCommand({
           imagePipelineArn: pipelineArn
         }));
-        
-        return;
       }
     }
     
@@ -290,6 +289,87 @@ const dynamoDocClient = DynamoDBDocumentClient.from(dynamoClient);
 const ec2Client = new EC2Client({ region: process.env.AWS_REGION });
 const ssmClient = new SSMClient({ region: process.env.AWS_REGION });
 const imageBuilderClient = new ImagebuilderClient({ region: process.env.AWS_REGION });
+
+// ---------------------------------------------------------------------------
+// Base image lookups (#49). base-image.js holds the decision logic; these are
+// the AWS calls it needs.
+// ---------------------------------------------------------------------------
+
+const AMI_NOT_FOUND_ERRORS = new Set(['InvalidAMIID.NotFound', 'InvalidAMIID.Unavailable', 'InvalidAMIID.Malformed']);
+
+// Returns the EC2 image, or null when the AMI no longer exists. Other errors
+// (throttling, permissions) are rethrown so they are never mistaken for a
+// retired AMI.
+async function describeImageOrNull(amiId) {
+  try {
+    const result = await ec2Client.send(new DescribeImagesCommand({ ImageIds: [amiId] }));
+    return result.Images?.[0] || null;
+  } catch (error) {
+    if (AMI_NOT_FOUND_ERRORS.has(error.name) || AMI_NOT_FOUND_ERRORS.has(error.Code)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+// The BaseImage AMI tag on the pipeline's distribution configuration. Set to
+// the symbolic base ID (or the AMI ID for custom bases) since v1.0.0.
+async function getDistributionBaseImageTag(distributionConfigurationArn) {
+  if (!distributionConfigurationArn) {
+    return undefined;
+  }
+  try {
+    const result = await imageBuilderClient.send(new GetDistributionConfigurationCommand({
+      distributionConfigurationArn
+    }));
+    const distributions = result.distributionConfiguration?.distributions || [];
+    const primary = distributions.find(d => d.region === process.env.AWS_REGION) || distributions[0];
+    return primary?.amiDistributionConfiguration?.amiTags?.BaseImage;
+  } catch (error) {
+    if (error.name === 'ResourceNotFoundException') {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+// Latest AWS AMI for a built-in base image family.
+async function resolveLatestAmi(source) {
+  const definition = BASE_IMAGE_SOURCES[source];
+  if (definition.ssmParameter) {
+    const ssmResult = await ssmClient.send(new GetParameterCommand({ Name: definition.ssmParameter }));
+    return ssmResult.Parameter.Value;
+  }
+
+  const { owner, namePattern } = definition.describeImages;
+  const result = await ec2Client.send(new DescribeImagesCommand({
+    Owners: [owner],
+    Filters: [
+      { Name: 'name', Values: [namePattern] },
+      { Name: 'state', Values: ['available'] },
+      { Name: 'architecture', Values: ['x86_64'] }
+    ]
+  }));
+  const newestFirst = (result.Images || []).sort((a, b) => new Date(b.CreationDate) - new Date(a.CreationDate));
+  if (newestFirst.length === 0) {
+    throw new Error(`Could not find the latest ${definition.label} AMI`);
+  }
+  return newestFirst[0].ImageId;
+}
+
+const baseImageDeps = {
+  getDistributionBaseImageTag,
+  describeImage: describeImageOrNull,
+  resolveLatestAmi,
+};
+
+function baseImageErrorResponse(error) {
+  return {
+    statusCode: error.statusCode,
+    headers: { 'Content-Type': 'application/json', ...corsHeaders },
+    body: JSON.stringify({ error: error.message, code: error.code })
+  };
+}
 
 /**
  * Get list of active regional hubs for multi-region AMI distribution
@@ -924,67 +1004,13 @@ async function createImagePipeline(pipelineData, event) {
   };
   
   try {
-    // Resolve symbolic base image IDs to actual AMI IDs
-    let resolvedBaseImageId = baseImageId;
-    
-    if (baseImageId === 'windows-2025') {
-      const ssmResult = await ssmClient.send(new GetParameterCommand({
-        Name: '/aws/service/ami-windows-latest/Windows_Server-2025-English-Full-Base'
-      }));
-      resolvedBaseImageId = ssmResult.Parameter.Value;
-    } else if (baseImageId === 'windows-2022') {
-      const ssmResult = await ssmClient.send(new GetParameterCommand({
-        Name: '/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base'
-      }));
-      resolvedBaseImageId = ssmResult.Parameter.Value;
-    } else if (baseImageId === 'windows-2019') {
-      const ssmResult = await ssmClient.send(new GetParameterCommand({
-        Name: '/aws/service/ami-windows-latest/Windows_Server-2019-English-Full-Base'
-      }));
-      resolvedBaseImageId = ssmResult.Parameter.Value;
-    } else if (baseImageId === 'ubuntu-22.04') {
-      const ssmResult = await ssmClient.send(new GetParameterCommand({
-        Name: '/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id'
-      }));
-      resolvedBaseImageId = ssmResult.Parameter.Value;
-    } else if (baseImageId === 'rocky-8') {
-      // Rocky Linux 8 - use EC2 DescribeImages to get latest (owner: 792107900819)
-      // Note: Rocky 8 is required for DaVinci Resolve compatibility
-      const rocky8Result = await ec2Client.send(new DescribeImagesCommand({
-        Owners: ['792107900819'],
-        Filters: [
-          { Name: 'name', Values: ['Rocky-8-EC2-Base-8*x86_64*'] },
-          { Name: 'state', Values: ['available'] },
-          { Name: 'architecture', Values: ['x86_64'] }
-        ]
-      }));
-      const rocky8Images = rocky8Result.Images?.sort((a, b) => 
-        new Date(b.CreationDate) - new Date(a.CreationDate)
-      ) || [];
-      if (rocky8Images.length > 0) {
-        resolvedBaseImageId = rocky8Images[0].ImageId;
-      } else {
-        throw new Error('Could not find Rocky Linux 8 AMI');
-      }
-    } else if (baseImageId === 'rocky-9') {
-      // Rocky Linux 9 - use EC2 DescribeImages to get latest (owner: 792107900819)
-      const rocky9Result = await ec2Client.send(new DescribeImagesCommand({
-        Owners: ['792107900819'],
-        Filters: [
-          { Name: 'name', Values: ['Rocky-9-EC2-Base-9*x86_64*'] },
-          { Name: 'state', Values: ['available'] },
-          { Name: 'architecture', Values: ['x86_64'] }
-        ]
-      }));
-      const rocky9Images = rocky9Result.Images?.sort((a, b) => 
-        new Date(b.CreationDate) - new Date(a.CreationDate)
-      ) || [];
-      if (rocky9Images.length > 0) {
-        resolvedBaseImageId = rocky9Images[0].ImageId;
-      } else {
-        throw new Error('Could not find Rocky Linux 9 AMI');
-      }
-    }
+    // Resolve symbolic base image IDs (windows-2025, rocky-8, ...) to the
+    // latest AMI. An AMI ID passes through unchanged and stays pinned. The
+    // choice itself is stored as baseImageSource so later edits and builds can
+    // re-resolve it after AWS retires this AMI (#49).
+    const resolvedBaseImageId = isSymbolicSource(baseImageId)
+      ? await resolveLatestAmi(baseImageId)
+      : baseImageId;
     
     // Determine platform from input or derive from base image
     const resolvedPlatform = platform || (baseImageId.startsWith('ubuntu') || baseImageId.startsWith('linux') || baseImageId.startsWith('rocky') ? 'Linux' : 'Windows');
@@ -1282,6 +1308,7 @@ async function createImagePipeline(pipelineData, event) {
         name: { S: name },
         description: { S: description || '' },
         baseImageId: { S: resolvedBaseImageId },
+        baseImageSource: { S: baseImageId },
         baseOsVersion: { S: baseOsVersion },
         platform: { S: resolvedPlatform },
         pipelineArn: { S: pipeline.imagePipelineArn },
@@ -1724,6 +1751,215 @@ async function deletePipeline(pipelineId, event) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Recipe versions and base image refresh (#49)
+// ---------------------------------------------------------------------------
+
+// Recipe component list from a pipeline's component records: AWS CLI first,
+// and only components that already have an Image Builder ARN.
+function toRecipeComponents(components) {
+  const sortedComponents = [...(components || [])].sort((a, b) => {
+    const aIsAwsCli = a.name?.toLowerCase().includes('aws-cli') || a.name?.toLowerCase().includes('aws cli');
+    const bIsAwsCli = b.name?.toLowerCase().includes('aws-cli') || b.name?.toLowerCase().includes('aws cli');
+    if (aIsAwsCli && !bIsAwsCli) return -1;
+    if (!aIsAwsCli && bIsAwsCli) return 1;
+    return 0;
+  });
+
+  const componentArns = [];
+  const updatedComponents = [];
+  for (const component of sortedComponents) {
+    if (component.componentArn) {
+      componentArns.push({ componentArn: component.componentArn });
+      updatedComponents.push(component);
+    }
+  }
+  return { componentArns, updatedComponents };
+}
+
+// Which AMI the pipeline's next recipe version should use. System pipelines
+// (macOS DCV-Ready bases) are managed by CDK and keep their stored base.
+async function resolveBaseForPipeline(pipeline) {
+  if (pipeline.isSystemPipeline?.BOOL === true) {
+    return {
+      system: true,
+      amiId: pipeline.baseImageId?.S,
+      baseOsVersion: pipeline.baseOsVersion?.S,
+      changed: false,
+    };
+  }
+
+  const base = await resolvePipelineBase({
+    baseImageSource: pipeline.baseImageSource?.S,
+    baseImageId: pipeline.baseImageId?.S,
+    distributionConfigurationArn: pipeline.distributionConfigurationArn?.S,
+  }, baseImageDeps);
+
+  const baseOsVersion = base.changed
+    ? await getOsVersionFromAmi(base.amiId)
+    : pipeline.baseOsVersion?.S;
+  return { ...base, system: false, baseOsVersion };
+}
+
+// Create the next patch version of the pipeline's recipe and point the
+// pipeline at it. Earlier versions are kept for audit and rollback.
+async function createNextRecipeVersion(pipeline, pipelineId, { componentArns, parentImage, baseOsVersion, description }) {
+  if (!componentArns || componentArns.length === 0) {
+    throw new Error('Pipeline has no components with an Image Builder ARN, so a recipe version cannot be created');
+  }
+
+  // ARN format: arn:aws:imagebuilder:region:account:image-recipe/name/version
+  const recipeArnParts = pipeline.imageRecipeArn?.S?.split('/') || [];
+  const acronym = (process.env.ACRONYM || 'mrm').toLowerCase();
+  const currentRecipeName = recipeArnParts[1] || toImageBuilderName(acronym, pipeline.name?.S, 'recipe', pipelineId);
+
+  // List existing recipe versions to find the highest version
+  let highestVersion = { major: 1, minor: 0, patch: 0 };
+  try {
+    const existingRecipes = await imageBuilderClient.send(new ListImageRecipesCommand({
+      owner: 'Self',
+      filters: [{ name: 'name', values: [currentRecipeName] }]
+    }));
+
+    for (const recipe of existingRecipes.imageRecipeSummaryList || []) {
+      const versionMatch = recipe.arn?.match(/\/(\d+)\.(\d+)\.(\d+)$/);
+      if (versionMatch) {
+        const [, major, minor, patch] = versionMatch.map(Number);
+        if (major > highestVersion.major ||
+            (major === highestVersion.major && minor > highestVersion.minor) ||
+            (major === highestVersion.major && minor === highestVersion.minor && patch > highestVersion.patch)) {
+          highestVersion = { major, minor, patch };
+        }
+      }
+    }
+    console.log(`Found highest existing version: ${highestVersion.major}.${highestVersion.minor}.${highestVersion.patch}`);
+  } catch (listError) {
+    console.log('Could not list existing recipes, starting from 1.0.0:', listError.message);
+  }
+
+  const newVersion = `${highestVersion.major}.${highestVersion.minor}.${highestVersion.patch + 1}`;
+  console.log(`Creating new recipe version: ${currentRecipeName} v${newVersion} on ${parentImage}`);
+
+  // Use 200GB for all platforms to support large software packages like Adobe Creative Cloud
+  const volumeSize = 200;
+
+  // RHEL-family bases need an SSM agent bootstrap or the build never starts (issue #15)
+  const ssmAgentUserData = buildSsmAgentUserDataOverride(baseOsVersion);
+  if (ssmAgentUserData) {
+    console.log(`Base OS "${baseOsVersion}" lacks a preinstalled SSM agent - adding userDataOverride bootstrap`);
+  }
+  const newRecipe = await imageBuilderClient.send(new CreateImageRecipeCommand({
+    name: currentRecipeName,
+    semanticVersion: newVersion,
+    parentImage,
+    components: componentArns,
+    description,
+    ...(ssmAgentUserData ? {
+      additionalInstanceConfiguration: {
+        userDataOverride: ssmAgentUserData
+      }
+    } : {}),
+    blockDeviceMappings: [
+      {
+        deviceName: '/dev/sda1',
+        ebs: {
+          volumeSize: volumeSize,
+          volumeType: 'gp3',
+          deleteOnTermination: true
+        }
+      }
+    ]
+  }));
+  console.log(`New recipe created: ${newRecipe.imageRecipeArn}`);
+
+  await imageBuilderClient.send(new UpdateImagePipelineCommand({
+    imagePipelineArn: pipeline.pipelineArn?.S,
+    imageRecipeArn: newRecipe.imageRecipeArn,
+    infrastructureConfigurationArn: pipeline.infrastructureConfigurationArn?.S,
+    distributionConfigurationArn: pipeline.distributionConfigurationArn?.S,
+    status: 'ENABLED',
+    enhancedImageMetadataEnabled: true
+  }));
+  console.log('Pipeline updated to use new recipe');
+
+  return { imageRecipeArn: newRecipe.imageRecipeArn, version: newVersion };
+}
+
+// Persist recipe and base image state on the pipeline record. baseImageSource
+// is saved the first time it is worked out for an older record, so detection
+// runs only once.
+async function saveRecipeState(pipelineId, { imageRecipeArn, components, base }) {
+  const assignments = ['updatedAt = :updatedAt'];
+  const values = { ':updatedAt': { S: new Date().toISOString() } };
+
+  if (imageRecipeArn) {
+    assignments.push('imageRecipeArn = :recipeArn');
+    values[':recipeArn'] = { S: imageRecipeArn };
+  }
+  if (components) {
+    assignments.push('components = :components');
+    values[':components'] = { S: JSON.stringify(components) };
+  }
+  if (base && !base.system) {
+    assignments.push('baseImageSource = :baseImageSource');
+    values[':baseImageSource'] = { S: base.source };
+    if (base.changed) {
+      assignments.push('baseImageId = :baseImageId', 'baseOsVersion = :baseOsVersion');
+      values[':baseImageId'] = { S: base.amiId };
+      values[':baseOsVersion'] = { S: base.baseOsVersion || 'Unknown' };
+    }
+  }
+
+  await dynamoClient.send(new UpdateItemCommand({
+    TableName: process.env.PIPELINES_TABLE_NAME,
+    Key: { pipelineId: { S: pipelineId } },
+    UpdateExpression: `SET ${assignments.join(', ')}`,
+    ExpressionAttributeValues: values
+  }));
+}
+
+// What changed about the base image, for API responses. Undefined when the
+// base did not change.
+function baseImageUpdateSummary(base) {
+  if (!base.changed) {
+    return undefined;
+  }
+  return {
+    previousAmiId: base.previousAmiId || null,
+    amiId: base.amiId,
+    baseOsVersion: base.baseOsVersion,
+  };
+}
+
+// Before a build: if the pipeline follows a built-in base and AWS has
+// published a newer AMI, move the recipe onto it. Custom bases stay pinned.
+// When nothing changed, no new recipe version is created.
+async function ensureRecipeUsesCurrentBase(pipeline, pipelineId) {
+  const base = await resolveBaseForPipeline(pipeline);
+  if (base.system) {
+    return base;
+  }
+
+  if (!base.changed) {
+    if (base.sourceWasDetected) {
+      await saveRecipeState(pipelineId, { base });
+    }
+    return base;
+  }
+
+  const storedComponents = pipeline.components?.S ? JSON.parse(pipeline.components.S) : [];
+  const { componentArns } = toRecipeComponents(storedComponents);
+  const recipe = await createNextRecipeVersion(pipeline, pipelineId, {
+    componentArns,
+    parentImage: base.amiId,
+    baseOsVersion: base.baseOsVersion,
+    description: `Recipe for ${pipeline.name?.S} pipeline (base image updated to ${base.amiId})`,
+  });
+  await saveRecipeState(pipelineId, { imageRecipeArn: recipe.imageRecipeArn, base });
+  console.log(`Pipeline ${pipelineId} base image updated from ${base.previousAmiId} to ${base.amiId} (recipe v${recipe.version})`);
+  return base;
+}
+
 async function executePipeline(pipelineId) {
   try {
     const dbResult = await dynamoClient.send(new GetItemCommand({
@@ -1739,19 +1975,24 @@ async function executePipeline(pipelineId) {
       };
     }
 
-    const pipelineArn = dbResult.Item.pipelineArn.S;
-    
+    const pipeline = dbResult.Item;
+    const pipelineArn = pipeline.pipelineArn.S;
+
+    // Build on the current base AMI so a retired AMI never breaks builds (#49)
+    const base = await ensureRecipeUsesCurrentBase(pipeline, pipelineId);
+
+    let execution;
     try {
-      const execution = await imageBuilderClient.send(new StartImagePipelineExecutionCommand({
+      execution = await imageBuilderClient.send(new StartImagePipelineExecutionCommand({
         imagePipelineArn: pipelineArn
       }));
     } catch (error) {
       if (error.message && error.message.includes('InsufficientInstanceCapacity')) {
         console.log('ICE error during pipeline execution, attempting subnet switch...');
-        await handleICEErrorAndRetry(pipelineId, pipelineArn);
-        return;
+        execution = await handleICEErrorAndRetry(pipelineId, pipelineArn);
+      } else {
+        throw error;
       }
-      throw error;
     }
 
     // Update status to BUILDING
@@ -1771,10 +2012,15 @@ async function executePipeline(pipelineId) {
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
       body: JSON.stringify({
         message: 'Pipeline execution started',
-        executionId: execution.imageBuildVersionArn
+        executionId: execution?.imageBuildVersionArn,
+        baseImageUpdate: baseImageUpdateSummary(base)
       })
     };
   } catch (error) {
+    if (error instanceof BaseImageError) {
+      console.warn(`Pipeline ${pipelineId} cannot be built: ${error.message}`);
+      return baseImageErrorResponse(error);
+    }
     console.error('Error executing pipeline:', error);
     return {
       statusCode: 500,
@@ -1811,25 +2057,7 @@ async function updatePipeline(pipelineId, updateData, event) {
       };
     }
 
-    // Build component ARNs for the new recipe
-    const componentArns = [];
-    const updatedComponents = [];
-    
-    // Sort components to ensure AWS CLI comes first
-    const sortedComponents = [...components].sort((a, b) => {
-      const aIsAwsCli = a.name?.toLowerCase().includes('aws-cli') || a.name?.toLowerCase().includes('aws cli');
-      const bIsAwsCli = b.name?.toLowerCase().includes('aws-cli') || b.name?.toLowerCase().includes('aws cli');
-      if (aIsAwsCli && !bIsAwsCli) return -1;
-      if (!aIsAwsCli && bIsAwsCli) return 1;
-      return 0;
-    });
-
-    for (const component of sortedComponents) {
-      if (component.componentArn) {
-        componentArns.push({ componentArn: component.componentArn });
-        updatedComponents.push(component);
-      }
-    }
+    const { componentArns, updatedComponents } = toRecipeComponents(components);
 
     if (componentArns.length === 0) {
       return {
@@ -1839,110 +2067,37 @@ async function updatePipeline(pipelineId, updateData, event) {
       };
     }
 
-    // Parse current recipe ARN to get base name
-    const currentRecipeArn = pipeline.imageRecipeArn?.S;
-    // ARN format: arn:aws:imagebuilder:region:account:image-recipe/name/version
-    const recipeArnParts = currentRecipeArn?.split('/') || [];
-    const acronym = (process.env.ACRONYM || 'mrm').toLowerCase();
-    const currentRecipeName = recipeArnParts[1] || toImageBuilderName(acronym, pipeline.name?.S, 'recipe', pipelineId);
-    
-    // List existing recipe versions to find the highest version
-    let highestVersion = { major: 1, minor: 0, patch: 0 };
-    try {
-      const existingRecipes = await imageBuilderClient.send(new ListImageRecipesCommand({
-        owner: 'Self',
-        filters: [{ name: 'name', values: [currentRecipeName] }]
-      }));
-      
-      for (const recipe of existingRecipes.imageRecipeSummaryList || []) {
-        // Extract version from ARN
-        const versionMatch = recipe.arn?.match(/\/(\d+)\.(\d+)\.(\d+)$/);
-        if (versionMatch) {
-          const [, major, minor, patch] = versionMatch.map(Number);
-          if (major > highestVersion.major ||
-              (major === highestVersion.major && minor > highestVersion.minor) ||
-              (major === highestVersion.major && minor === highestVersion.minor && patch > highestVersion.patch)) {
-            highestVersion = { major, minor, patch };
-          }
-        }
-      }
-      console.log(`Found highest existing version: ${highestVersion.major}.${highestVersion.minor}.${highestVersion.patch}`);
-    } catch (listError) {
-      console.log('Could not list existing recipes, starting from 1.0.0:', listError.message);
-    }
-    
-    // Increment patch version
-    const newVersion = `${highestVersion.major}.${highestVersion.minor}.${highestVersion.patch + 1}`;
-    
-    console.log(`Creating new recipe version: ${currentRecipeName} v${newVersion}`);
-    
-    // Use 200GB for all platforms to support large software packages like Adobe Creative Cloud
-    const volumeSize = 200;
-    
-    // RHEL-family bases need an SSM agent bootstrap or the build never starts (issue #15)
-    const rebuildSsmAgentUserData = buildSsmAgentUserDataOverride(pipeline.baseOsVersion?.S);
-    if (rebuildSsmAgentUserData) {
-      console.log(`Base OS "${pipeline.baseOsVersion?.S}" lacks a preinstalled SSM agent - adding userDataOverride bootstrap`);
-    }
-    const newRecipe = await imageBuilderClient.send(new CreateImageRecipeCommand({
-      name: currentRecipeName,
-      semanticVersion: newVersion,
-      parentImage: pipeline.baseImageId?.S,
-      components: componentArns,
+    // Build the new recipe version on the current base AMI. A built-in base
+    // moves to the latest AWS AMI for its family; a custom base stays pinned
+    // and fails with a clear 409 if it no longer exists (#49).
+    const base = await resolveBaseForPipeline(pipeline);
+    const recipe = await createNextRecipeVersion(pipeline, pipelineId, {
+      componentArns,
+      parentImage: base.amiId,
+      baseOsVersion: base.baseOsVersion,
       description: `Updated recipe for ${pipeline.name?.S} pipeline`,
-      ...(rebuildSsmAgentUserData ? {
-        additionalInstanceConfiguration: {
-          userDataOverride: rebuildSsmAgentUserData
-        }
-      } : {}),
-      blockDeviceMappings: [
-        {
-          deviceName: '/dev/sda1',
-          ebs: {
-            volumeSize: volumeSize,
-            volumeType: 'gp3',
-            deleteOnTermination: true
-          }
-        }
-      ]
-    }));
-
-    console.log(`New recipe created: ${newRecipe.imageRecipeArn}`);
-
-    // Update pipeline to use new recipe
-    await imageBuilderClient.send(new UpdateImagePipelineCommand({
-      imagePipelineArn: pipeline.pipelineArn?.S,
-      imageRecipeArn: newRecipe.imageRecipeArn,
-      infrastructureConfigurationArn: pipeline.infrastructureConfigurationArn?.S,
-      distributionConfigurationArn: pipeline.distributionConfigurationArn?.S,
-      status: 'ENABLED',
-      enhancedImageMetadataEnabled: true
-    }));
-
-    console.log(`Pipeline updated to use new recipe`);
-
-    // Update DynamoDB record
-    await dynamoClient.send(new UpdateItemCommand({
-      TableName: process.env.PIPELINES_TABLE_NAME,
-      Key: { pipelineId: { S: pipelineId } },
-      UpdateExpression: 'SET imageRecipeArn = :recipeArn, components = :components, updatedAt = :updatedAt',
-      ExpressionAttributeValues: {
-        ':recipeArn': { S: newRecipe.imageRecipeArn },
-        ':components': { S: JSON.stringify(updatedComponents) },
-        ':updatedAt': { S: new Date().toISOString() }
-      }
-    }));
+    });
+    await saveRecipeState(pipelineId, {
+      imageRecipeArn: recipe.imageRecipeArn,
+      components: updatedComponents,
+      base,
+    });
 
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
       body: JSON.stringify({
         message: 'Pipeline updated successfully',
-        newRecipeArn: newRecipe.imageRecipeArn,
-        recipeVersion: newVersion
+        newRecipeArn: recipe.imageRecipeArn,
+        recipeVersion: recipe.version,
+        baseImageUpdate: baseImageUpdateSummary(base)
       })
     };
   } catch (error) {
+    if (error instanceof BaseImageError) {
+      console.warn(`Pipeline ${pipelineId} cannot be updated: ${error.message}`);
+      return baseImageErrorResponse(error);
+    }
     console.error('Error updating pipeline:', error);
     return {
       statusCode: 500,
