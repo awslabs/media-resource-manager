@@ -202,6 +202,8 @@ const WorkstationManagementAntd: React.FC<WorkstationManagementAntdProps> = ({
   const [loadingAmiOptions, setLoadingAmiOptions] = useState(true);
   const [allowedInstanceTypes, setAllowedInstanceTypes] = useState<AllowedInstanceTypes | null>(null);
   const [regionalHubs, setRegionalHubs] = useState<any[]>([]);
+  // Image to select when the page is opened from Images > Create Workstation.
+  const [pendingImageSelection, setPendingImageSelection] = useState<{ imageId?: string; groupKey?: string } | null>(null);
 
   // Instance type catalog from API
   const { catalog: instanceTypeCatalog } = useInstanceTypeCatalog();
@@ -236,12 +238,20 @@ const WorkstationManagementAntd: React.FC<WorkstationManagementAntdProps> = ({
   // Check for create parameter in URL
   useEffect(() => {
     if (searchParams.get('create') === 'true') {
-      const preselectedImageId = searchParams.get('imageId');
-      const preselectedPipelineId = searchParams.get('pipelineId');
+      // Images > Create Workstation links with imageId=<ami-id> for an image in
+      // one region, or pipelineId=<pipelineId>::<image name> (a group key) for
+      // an image in several regions. Pipeline images are listed under their
+      // group key, so the link is matched to an option once the image list has
+      // loaded (#53).
+      const imageId = searchParams.get('imageId') || undefined;
+      const groupKey = searchParams.get('pipelineId') || undefined;
+      if (imageId || groupKey) {
+        setPendingImageSelection({ imageId, groupKey });
+      }
       
       createForm.setFieldsValue({
-        amiId: preselectedImageId || '',
-        pipelineId: preselectedPipelineId || '',
+        amiId: undefined,
+        pipelineId: '',
         instanceType: '',
         assignmentType: '',
         assignedUserId: '',
@@ -257,6 +267,42 @@ const WorkstationManagementAntd: React.FC<WorkstationManagementAntdProps> = ({
       setSearchParams(searchParams, { replace: true });
     }
   }, [searchParams, setSearchParams]);
+
+  // Select the image from an Images > Create Workstation link once the image
+  // list has loaded, the same way choosing it by hand does.
+  useEffect(() => {
+    if (!pendingImageSelection || loadingAmiOptions) return;
+    const { imageId, groupKey } = pendingImageSelection;
+    setPendingImageSelection(null);
+
+    const optionValues = new Set(
+      amiOptions.flatMap((group: any) => (group.options || []).map((option: any) => option.value))
+    );
+    // A pipeline AMI is listed under its group key; other images under their AMI ID.
+    const amiRecord = imageId ? amiData.get(imageId) : undefined;
+    const candidates = [
+      groupKey,
+      amiRecord?.pipelineId ? `${amiRecord.pipelineId}::${amiRecord.name}` : undefined,
+      imageId,
+    ];
+    const value = candidates.find((candidate) => candidate && optionValues.has(candidate));
+    if (!value) {
+      console.warn('Image from the Create Workstation link was not found in the image list:', pendingImageSelection);
+      return;
+    }
+
+    const ami = amiData.get(value);
+    const regions: string[] = ami?.regions?.length
+      ? ami.regions.map((r: { region: string }) => r.region)
+      : ami?.region ? [ami.region] : [];
+    createForm.setFieldsValue({
+      amiId: value,
+      instanceType: getDefaultInstanceType(ami?.platform?.toLowerCase() || 'windows'),
+      pipelineId: ami?.pipelineId || '',
+      // An image that exists in only one region can only launch there.
+      ...(regions.length === 1 ? { region: regions[0] } : {}),
+    });
+  }, [pendingImageSelection, loadingAmiOptions, amiOptions, amiData]);
 
   // Auto-refresh when there are workstations in transitional states
   useEffect(() => {
@@ -2057,6 +2103,7 @@ const WorkstationManagementAntd: React.FC<WorkstationManagementAntdProps> = ({
         open={showCreateModal}
         onCancel={() => {
           setShowCreateModal(false);
+          setPendingImageSelection(null);
           createForm.resetFields();
         }}
         onOk={handleCreateWorkstation}
