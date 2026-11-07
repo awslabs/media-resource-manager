@@ -16,7 +16,8 @@ const { ImagebuilderClient, CreateImagePipelineCommand, CreateImageRecipeCommand
         ListImageRecipesCommand, GetDistributionConfigurationCommand } = require('@aws-sdk/client-imagebuilder');
 const { validateDisplayName, toImageBuilderName, toComponentName, toAmiNameBase,
         buildImageMatchPatterns, imageMatchesAnyPattern } = require('./naming');
-const { BASE_IMAGE_SOURCES, BaseImageError, isSymbolicSource, resolvePipelineBase } = require('./base-image');
+const { BASE_IMAGE_SOURCES, BaseImageError, isSymbolicSource, resolvePipelineBase,
+        resolveRequestedBase } = require('./base-image');
 
 // STS client for getting account ID
 const stsClient = new STSClient({ region: process.env.AWS_REGION });
@@ -362,6 +363,63 @@ const baseImageDeps = {
   describeImage: describeImageOrNull,
   resolveLatestAmi,
 };
+
+const RAW_MACOS_AMI_PARAMETERS = [
+  '/aws/service/ec2-macos/tahoe/arm64_mac/latest/image_id',
+  '/aws/service/ec2-macos/sequoia/arm64_mac/latest/image_id',
+  '/aws/service/ec2-macos/sonoma/arm64_mac/latest/image_id',
+  '/aws/service/ec2-macos/ventura/arm64_mac/latest/image_id',
+  '/aws/service/ec2-macos/monterey/arm64_mac/latest/image_id'
+];
+const RAW_MACOS_BASE_ERROR = 'Cannot use raw AWS macOS AMI as base image. macOS requires SIP to be disabled for DCV to work. Please use the DCV-Ready macOS base AMI created by the system pipeline, or a golden image derived from it.';
+
+// Returns an error message when amiId can't be used as a macOS pipeline base,
+// or null when it can. Raw AWS macOS AMIs need SIP disabled for DCV to work,
+// which only the system DCV-Ready pipeline does. Used on create and when an
+// admin changes a pipeline's base image.
+async function macOsBaseImageError(amiId, knownImage) {
+  // The latest raw AWS macOS AMIs, published as SSM parameters
+  for (const paramName of RAW_MACOS_AMI_PARAMETERS) {
+    try {
+      const ssmResult = await ssmClient.send(new GetParameterCommand({ Name: paramName }));
+      if (ssmResult.Parameter.Value === amiId) {
+        return RAW_MACOS_BASE_ERROR;
+      }
+    } catch (ssmError) {
+      // Parameter doesn't exist or can't be read, continue checking
+    }
+  }
+
+  // Also check if the AMI has the DCVReady tag (indicating it's from our system pipeline)
+  // or if it's owned by us (a user golden image derived from DCV-Ready)
+  try {
+    const image = knownImage ||
+      (await ec2Client.send(new DescribeImagesCommand({ ImageIds: [amiId] }))).Images?.[0];
+    if (image) {
+      const isDcvReady = image.Tags?.some(tag => tag.Key === 'DCVReady' && tag.Value === 'true');
+      const accountId = await getAccountId();
+      const isOwnedBySelf = image.OwnerId === accountId;
+      const isFromPipeline = image.Tags?.some(tag => tag.Key === 'PipelineId');
+      // EC2 reports AWS-published images with ImageOwnerAlias 'amazon'.
+      // OwnerId is always the numeric account ID.
+      const isAmazonOwned = image.ImageOwnerAlias === 'amazon' || image.OwnerId === 'amazon';
+
+      // If it's an Amazon-owned macOS AMI without DCVReady tag, reject it
+      if (isAmazonOwned && !isDcvReady) {
+        return RAW_MACOS_BASE_ERROR;
+      }
+
+      // If it's our own AMI but not from a pipeline and not DCVReady, warn but allow
+      // (This allows flexibility for advanced users who know what they're doing)
+      if (isOwnedBySelf && !isFromPipeline && !isDcvReady) {
+        console.warn(`macOS pipeline using custom AMI ${amiId} without DCVReady tag - user assumes responsibility for DCV configuration`);
+      }
+    }
+  } catch (describeError) {
+    console.warn('Could not verify macOS base image:', describeError.message);
+  }
+  return null;
+}
 
 function baseImageErrorResponse(error) {
   return {
@@ -1018,65 +1076,13 @@ async function createImagePipeline(pipelineData, event) {
     // For macOS pipelines, validate that the base image is NOT a raw AWS macOS AMI
     // Raw macOS AMIs require SIP disable which can only be done by the system DCV-Ready pipeline
     if (resolvedPlatform === 'macOS') {
-      // Check if this is a raw AWS macOS AMI from SSM parameters
-      const rawMacOsParams = [
-        '/aws/service/ec2-macos/tahoe/arm64_mac/latest/image_id',
-        '/aws/service/ec2-macos/sequoia/arm64_mac/latest/image_id',
-        '/aws/service/ec2-macos/sonoma/arm64_mac/latest/image_id',
-        '/aws/service/ec2-macos/ventura/arm64_mac/latest/image_id',
-        '/aws/service/ec2-macos/monterey/arm64_mac/latest/image_id'
-      ];
-      
-      for (const paramName of rawMacOsParams) {
-        try {
-          const ssmResult = await ssmClient.send(new GetParameterCommand({ Name: paramName }));
-          if (ssmResult.Parameter.Value === resolvedBaseImageId) {
-            return {
-              statusCode: 400,
-              headers: { 'Content-Type': 'application/json', ...corsHeaders },
-              body: JSON.stringify({ 
-                error: 'Cannot use raw AWS macOS AMI as base image. macOS requires SIP to be disabled for DCV to work. Please use the DCV-Ready macOS base AMI created by the system pipeline, or a golden image derived from it.',
-                requiresDcvReadyBase: true
-              })
-            };
-          }
-        } catch (ssmError) {
-          // Parameter doesn't exist or can't be read, continue checking
-        }
-      }
-      
-      // Also check if the AMI has the DCVReady tag (indicating it's from our system pipeline)
-      // or if it's owned by us (a user golden image derived from DCV-Ready)
-      try {
-        const describeResult = await ec2Client.send(new DescribeImagesCommand({ ImageIds: [resolvedBaseImageId] }));
-        const image = describeResult.Images?.[0];
-        
-        if (image) {
-          const isDcvReady = image.Tags?.some(tag => tag.Key === 'DCVReady' && tag.Value === 'true');
-          const accountId = await getAccountId();
-          const isOwnedBySelf = image.OwnerId === accountId;
-          const isFromPipeline = image.Tags?.some(tag => tag.Key === 'PipelineId');
-          
-          // If it's an Amazon-owned macOS AMI without DCVReady tag, reject it
-          if (image.OwnerId === 'amazon' && !isDcvReady) {
-            return {
-              statusCode: 400,
-              headers: { 'Content-Type': 'application/json', ...corsHeaders },
-              body: JSON.stringify({ 
-                error: 'Cannot use raw AWS macOS AMI as base image. macOS requires SIP to be disabled for DCV to work. Please use the DCV-Ready macOS base AMI created by the system pipeline, or a golden image derived from it.',
-                requiresDcvReadyBase: true
-              })
-            };
-          }
-          
-          // If it's our own AMI but not from a pipeline and not DCVReady, warn but allow
-          // (This allows flexibility for advanced users who know what they're doing)
-          if (isOwnedBySelf && !isFromPipeline && !isDcvReady) {
-            console.warn(`macOS pipeline using custom AMI ${resolvedBaseImageId} without DCVReady tag - user assumes responsibility for DCV configuration`);
-          }
-        }
-      } catch (describeError) {
-        console.warn('Could not verify macOS base image:', describeError.message);
+      const macOsError = await macOsBaseImageError(resolvedBaseImageId);
+      if (macOsError) {
+        return {
+          statusCode: 400,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          body: JSON.stringify({ error: macOsError, requiresDcvReadyBase: true })
+        };
       }
     }
     
@@ -1426,6 +1432,7 @@ async function getPipelines() {
       status: item.status?.S,
       description: item.description?.S,
       baseImageId: item.baseImageId?.S,
+      baseImageSource: item.baseImageSource?.S,
       baseOsVersion: item.baseOsVersion?.S,
       platform: item.platform?.S || 'Windows',
       components: item.components?.S ? JSON.parse(item.components.S) : [],
@@ -1801,6 +1808,20 @@ async function resolveBaseForPipeline(pipeline) {
   return { ...base, system: false, baseOsVersion };
 }
 
+// A base image an admin chose in Edit pipeline. Same platform only; macOS
+// bases get the same DCV-Ready check as on create.
+async function resolveRequestedPipelineBase(pipeline, requestedSource) {
+  const base = await resolveRequestedBase(
+    { platform: pipeline.platform?.S || 'Windows', baseImageId: pipeline.baseImageId?.S },
+    requestedSource,
+    { ...baseImageDeps, macOsBaseImageError }
+  );
+  const baseOsVersion = base.changed
+    ? await getOsVersionFromAmi(base.amiId)
+    : pipeline.baseOsVersion?.S;
+  return { ...base, system: false, baseOsVersion };
+}
+
 // Create the next patch version of the pipeline's recipe and point the
 // pipeline at it. Earlier versions are kept for audit and rollback.
 async function createNextRecipeVersion(pipeline, pipelineId, { componentArns, parentImage, baseOsVersion, description }) {
@@ -2047,7 +2068,7 @@ async function updatePipeline(pipelineId, updateData, event) {
     }
 
     const pipeline = dbResult.Item;
-    const { components } = updateData;
+    const { components, baseImageSource: requestedBaseImageSource } = updateData;
     
     if (!components || !Array.isArray(components)) {
       return {
@@ -2067,10 +2088,30 @@ async function updatePipeline(pipelineId, updateData, event) {
       };
     }
 
-    // Build the new recipe version on the current base AMI. A built-in base
-    // moves to the latest AWS AMI for its family; a custom base stays pinned
-    // and fails with a clear 409 if it no longer exists (#49).
-    const base = await resolveBaseForPipeline(pipeline);
+    // An admin can choose a new base image here, for example when a custom
+    // base AMI was deleted. Without one, the new recipe version uses the
+    // current base: a built-in base moves to the latest AWS AMI for its
+    // family, and a custom base stays pinned and fails with a clear 409 if it
+    // no longer exists (#49).
+    const changingBase = requestedBaseImageSource !== undefined &&
+      requestedBaseImageSource !== null &&
+      requestedBaseImageSource !== pipeline.baseImageSource?.S;
+    if (changingBase && pipeline.isSystemPipeline?.BOOL === true) {
+      return {
+        statusCode: 400,
+        headers: { 'Content-Type': 'application/json', ...corsHeaders },
+        body: JSON.stringify({
+          error: "System pipelines are managed by MRM, and their base image can't be changed.",
+          code: 'SYSTEM_PIPELINE_BASE_IMAGE'
+        })
+      };
+    }
+    const base = changingBase
+      ? await resolveRequestedPipelineBase(pipeline, requestedBaseImageSource)
+      : await resolveBaseForPipeline(pipeline);
+    if (changingBase) {
+      console.log(`Pipeline ${pipelineId} base image source changed from ${pipeline.baseImageSource?.S || '(none)'} to ${base.source} (${base.amiId})`);
+    }
     const recipe = await createNextRecipeVersion(pipeline, pipelineId, {
       componentArns,
       parentImage: base.amiId,

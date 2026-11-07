@@ -6,7 +6,14 @@
  */
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const baseImage = require('../lambda/image-manager/base-image.js');
-const { BaseImageError, detectBaseImageSource, resolvePipelineBase, sourceFromImage } = baseImage;
+const {
+  BaseImageError,
+  detectBaseImageSource,
+  resolvePipelineBase,
+  sourceFromImage,
+  platformOfImage,
+  resolveRequestedBase,
+} = baseImage;
 
 const ACCOUNT_ID = '123456789012';
 const RETIRED_AMI = 'ami-0aaaaaaaaaaaaaaa1';
@@ -14,7 +21,16 @@ const LATEST_AMI = 'ami-0bbbbbbbbbbbbbbb2';
 const CUSTOM_AMI = 'ami-0ccccccccccccccc3';
 const DIST_ARN = 'arn:aws:imagebuilder:us-east-1:123456789012:distribution-configuration/mrm-test-dist-abcd1234';
 
-type Image = { ImageId: string; OwnerId: string; Name: string; State?: string; ImageOwnerAlias?: string };
+type Image = {
+  ImageId: string;
+  OwnerId: string;
+  Name: string;
+  State?: string;
+  ImageOwnerAlias?: string;
+  Architecture?: string;
+  Platform?: string;
+  Tags?: { Key: string; Value: string }[];
+};
 
 function makeDeps({ tag, images = {}, latest = LATEST_AMI }: {
   tag?: string;
@@ -185,5 +201,109 @@ describe('sourceFromImage', () => {
     expect(sourceFromImage({
       ImageId: 'ami-8', OwnerId: '999999999999', Name: 'Windows_Server-2025-English-Full-Base-copy',
     })).toBe('ami-8');
+  });
+});
+
+describe('platformOfImage', () => {
+  it('detects Windows, Linux, and macOS images', () => {
+    expect(platformOfImage({ Platform: 'windows', Name: 'Windows_Server-2025' })).toBe('Windows');
+    expect(platformOfImage({ Name: 'Rocky-8-EC2-Base-8.10' })).toBe('Linux');
+    expect(platformOfImage({ Architecture: 'arm64_mac', Name: 'amzn-ec2-macos-15.5' })).toBe('macOS');
+    expect(platformOfImage({ Name: 'golden', Tags: [{ Key: 'Platform', Value: 'macOS' }] })).toBe('macOS');
+  });
+});
+
+describe('resolveRequestedBase (Change base image in Edit pipeline)', () => {
+  const GOLDEN_MAC = 'ami-0fffffffffffffff6';
+  const dcvReadyMac: Image = {
+    ImageId: GOLDEN_MAC,
+    OwnerId: ACCOUNT_ID,
+    Name: 'macOS-Sonoma-DCV-Ready-2026-10-01',
+    Architecture: 'arm64_mac',
+    State: 'available',
+    Tags: [{ Key: 'DCVReady', Value: 'true' }],
+  };
+
+  function changeDeps(images: Record<string, Image> = {}, macOsError: string | null = null) {
+    return {
+      ...makeDeps({ images }),
+      macOsBaseImageError: jest.fn(async () => macOsError),
+    };
+  }
+
+  it('switches to a built-in base on the same platform and resolves the latest AMI', async () => {
+    const deps = changeDeps();
+    const result = await resolveRequestedBase({ platform: 'Windows', baseImageId: CUSTOM_AMI }, 'windows-2025', deps);
+    expect(result).toEqual({
+      source: 'windows-2025',
+      sourceWasDetected: false,
+      amiId: LATEST_AMI,
+      previousAmiId: CUSTOM_AMI,
+      changed: true,
+    });
+  });
+
+  it('allows a different version of the same platform', async () => {
+    const deps = changeDeps();
+    const result = await resolveRequestedBase({ platform: 'Linux', baseImageId: RETIRED_AMI }, 'rocky-9', deps);
+    expect(result.source).toBe('rocky-9');
+  });
+
+  it('rejects a built-in base for another platform with a 400', async () => {
+    const deps = changeDeps();
+    const pending = resolveRequestedBase({ platform: 'Windows', baseImageId: CUSTOM_AMI }, 'rocky-8', deps);
+    await expect(pending).rejects.toMatchObject({ code: 'BASE_IMAGE_PLATFORM_MISMATCH', statusCode: 400 });
+    await expect(pending).rejects.toThrow(/must be a Windows image/);
+    expect(deps.resolveLatestAmi).not.toHaveBeenCalled();
+  });
+
+  it('accepts a DCV-Ready macOS image for a macOS pipeline and pins it', async () => {
+    const deps = changeDeps({ [GOLDEN_MAC]: dcvReadyMac });
+    const result = await resolveRequestedBase({ platform: 'macOS', baseImageId: RETIRED_AMI }, GOLDEN_MAC, deps);
+    expect(result).toMatchObject({ source: GOLDEN_MAC, amiId: GOLDEN_MAC, changed: true });
+    expect(deps.macOsBaseImageError).toHaveBeenCalledWith(GOLDEN_MAC, dcvReadyMac);
+    expect(deps.resolveLatestAmi).not.toHaveBeenCalled();
+  });
+
+  it('rejects a macOS image that fails the DCV-Ready check', async () => {
+    const deps = changeDeps({ [GOLDEN_MAC]: dcvReadyMac }, 'Cannot use raw AWS macOS AMI as base image.');
+    await expect(resolveRequestedBase({ platform: 'macOS', baseImageId: RETIRED_AMI }, GOLDEN_MAC, deps))
+      .rejects.toMatchObject({ code: 'BASE_IMAGE_NOT_DCV_READY', statusCode: 400 });
+  });
+
+  it('rejects a macOS image for a Linux pipeline', async () => {
+    const deps = changeDeps({ [GOLDEN_MAC]: dcvReadyMac });
+    await expect(resolveRequestedBase({ platform: 'Linux', baseImageId: RETIRED_AMI }, GOLDEN_MAC, deps))
+      .rejects.toMatchObject({ code: 'BASE_IMAGE_PLATFORM_MISMATCH' });
+    expect(deps.macOsBaseImageError).not.toHaveBeenCalled();
+  });
+
+  it('rejects an AMI that does not exist', async () => {
+    const deps = changeDeps();
+    await expect(resolveRequestedBase({ platform: 'macOS', baseImageId: RETIRED_AMI }, GOLDEN_MAC, deps))
+      .rejects.toMatchObject({ code: 'BASE_IMAGE_NOT_FOUND', statusCode: 400 });
+  });
+
+  it('rejects values that are neither a built-in ID nor an AMI ID', async () => {
+    const deps = changeDeps();
+    for (const value of ['windows-2016', 'ami-xyz', '', 42]) {
+      await expect(resolveRequestedBase({ platform: 'Windows', baseImageId: CUSTOM_AMI }, value, deps))
+        .rejects.toMatchObject({ code: 'INVALID_BASE_IMAGE', statusCode: 400 });
+    }
+  });
+
+  it('is an instance of BaseImageError so handlers return its status code', async () => {
+    const deps = changeDeps();
+    await expect(resolveRequestedBase({ platform: 'Windows' }, 'rocky-8', deps)).rejects.toBeInstanceOf(BaseImageError);
+  });
+});
+
+describe('error messages point to Edit pipeline', () => {
+  it('tells the admin to choose a new base image instead of recreating the pipeline', async () => {
+    const deps = makeDeps({});
+    await expect(resolvePipelineBase({ baseImageSource: CUSTOM_AMI, baseImageId: CUSTOM_AMI }, deps))
+      .rejects.toThrow('Open Edit pipeline and choose a new base image.');
+    await expect(resolvePipelineBase({ baseImageId: RETIRED_AMI }, deps))
+      .rejects.toThrow('Open Edit pipeline and choose a new base image.');
   });
 });
