@@ -56,6 +56,8 @@ interface ImagePipeline {
   updatedAt: string;
   pipelineArn: string;
   isSystemPipeline?: boolean;
+  // Why the last build failed, when it did.
+  statusMessage?: string;
 }
 
 interface SoftwareComponent {
@@ -584,9 +586,16 @@ const PipelinesAntd: React.FC<PipelinesAntdProps> = ({
       key: 'status',
       sorter: (a, b) => a.status.localeCompare(b.status),
       sortOrder: sortedInfo?.columnKey === 'status' ? sortedInfo.order : null,
-      render: (status) => (
-        <Tag color={getStatusColor(status)}>{formatStatus(status)}</Tag>
-      ),
+      render: (status, record) => {
+        const tag = <Tag color={getStatusColor(status)}>{formatStatus(status)}</Tag>;
+        // Show why a build failed. The reason is stored with the pipeline
+        // but was never displayed (#54).
+        return record.statusMessage && status?.toUpperCase().includes('FAILED') ? (
+          <Tooltip title={record.statusMessage}>{tag}</Tooltip>
+        ) : (
+          tag
+        );
+      },
     },
     {
       title: 'Created',
