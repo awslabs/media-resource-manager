@@ -939,9 +939,11 @@ NagSuppressions.addStackSuppressions(regionalHubStack, [
   },
   {
     id: 'AwsSolutions-IAM5',
-    reason: 'Wildcard permissions needed for cross-region CloudFormation deployment and resource management',
+    reason: 'Wildcard permissions needed for cross-region CloudFormation deployment and resource management. ' +
+      'The template generator reads the template of regional hub stacks, which can be in any region.',
     appliesTo: [
       'Resource::*',
+      { regex: '/^Resource::arn:aws:cloudformation:\\*:\\d{12}:stack\\/[A-Za-z0-9]+-Regional-Hub-\\*\\/\\*$/' },
     ],
   },
   {

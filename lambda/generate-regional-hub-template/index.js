@@ -4,8 +4,10 @@
 const { S3Client, PutObjectCommand, GetObjectCommand, HeadBucketCommand, CreateBucketCommand, PutBucketEncryptionCommand, PutPublicAccessBlockCommand } = require('@aws-sdk/client-s3');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { STSClient, GetCallerIdentityCommand } = require('@aws-sdk/client-sts');
+const { CloudFormationClient, GetTemplateCommand } = require('@aws-sdk/client-cloudformation');
 const fs = require('fs');
 const path = require('path');
+const { keepDeployedIamNames } = require('./deployed-names');
 
 // Import SSM document content for regional deployment
 // These are symlinked from ssm-documents/ folder
@@ -92,6 +94,18 @@ function buildIamName(productName, acronym, purpose, suffix, regionCode) {
   if (full.length <= 64) return full;
   // Fall back to acronym prefix to stay within IAM's 64-char limit
   return `${acronym}-Regional-${purpose}-${suffix}-${regionCode}`;
+}
+
+// Read the template a regional hub's stack runs now.
+async function getDeployedTemplate(region, stackName) {
+  const cfn = new CloudFormationClient({ region });
+  try {
+    const { TemplateBody } = await cfn.send(new GetTemplateCommand({ StackName: stackName, TemplateStage: 'Original' }));
+    return JSON.parse(TemplateBody);
+  } catch (error) {
+    // Stop rather than rename the hub's IAM roles and instance profiles.
+    throw new Error(`Could not read the current template of ${stackName}: ${error.message}`);
+  }
 }
 
 // Cache account ID to avoid repeated STS calls
@@ -240,7 +254,9 @@ exports.handler = async (event) => {
     // Note: dcvCertificateArn is no longer used - TLS cert is replicated from primary region
     enableWindows = true,
     enableLinux = true,
-    enableMacOS = false
+    enableMacOS = false,
+    // Set by update-regional-hub. The hub's stack already exists.
+    isUpdate = false
   } = event;
   
   const productName = process.env.PRODUCT_NAME;
@@ -280,6 +296,12 @@ exports.handler = async (event) => {
     primaryRegion,
     lambdaAssets
   });
+
+  // An update keeps the IAM names the stack already uses (see deployed-names.js).
+  if (isUpdate) {
+    const kept = keepDeployedIamNames(template, await getDeployedTemplate(region, stackName));
+    if (kept.length) console.log(`Keeping the deployed IAM names of ${kept.join(', ')}`);
+  }
   
   // Upload template to S3
   const templateKey = `templates/${region}/${stackName}-${Date.now()}.json`;
@@ -326,6 +348,9 @@ exports.handler = async (event) => {
     templateVersion: process.env.TEMPLATE_VERSION || ''
   };
 };
+
+// Exported for tests.
+exports.generateCloudFormationTemplate = generateCloudFormationTemplate;
 
 function generateCloudFormationTemplate(config) {
   const {
@@ -1851,6 +1876,8 @@ function generateCloudFormationTemplate(config) {
       },
 
       // ==================== SSM DOCUMENTS FOR WORKSTATION PROVISIONING ====================
+      // UpdateMethod NewVersion updates a document in place. The default, Replace,
+      // fails on update because each document has a fixed name.
       // Windows SSM Documents (only when enableWindows is true)
       ...(enableWindows ? {
         WindowsDcvInstallDocument: {
@@ -1859,6 +1886,7 @@ function generateCloudFormationTemplate(config) {
             Name: { 'Fn::Sub': '${ProductName}-Windows-DCV-Install' },
             DocumentType: 'Command',
             DocumentFormat: 'JSON',
+            UpdateMethod: 'NewVersion',
             Content: windowsDcvInstallContent
           }
         },
@@ -1868,6 +1896,7 @@ function generateCloudFormationTemplate(config) {
             Name: { 'Fn::Sub': '${ProductName}-Windows-DisableCtrlAltDel' },
             DocumentType: 'Command',
             DocumentFormat: 'JSON',
+            UpdateMethod: 'NewVersion',
             Content: windowsDisableCtrlAltDelContent
           }
         },
@@ -1877,6 +1906,7 @@ function generateCloudFormationTemplate(config) {
             Name: { 'Fn::Sub': '${ProductName}-Windows-SetupFsxScheduler' },
             DocumentType: 'Command',
             DocumentFormat: 'JSON',
+            UpdateMethod: 'NewVersion',
             Content: windowsSetupFsxSchedulerContent
           }
         },
@@ -1886,6 +1916,7 @@ function generateCloudFormationTemplate(config) {
             Name: { 'Fn::Sub': '${ProductName}-Windows-AutoLoginConfigure' },
             DocumentType: 'Command',
             DocumentFormat: 'JSON',
+            UpdateMethod: 'NewVersion',
             Content: windowsAutoLoginConfigureContent
           }
         }
@@ -1899,6 +1930,7 @@ function generateCloudFormationTemplate(config) {
             Name: { 'Fn::Sub': '${ProductName}-Linux-Phase1-BaseInstall' },
             DocumentType: 'Command',
             DocumentFormat: 'JSON',
+            UpdateMethod: 'NewVersion',
             Content: linuxPhase1BaseInstallContent
           }
         },
@@ -1908,6 +1940,7 @@ function generateCloudFormationTemplate(config) {
             Name: { 'Fn::Sub': '${ProductName}-Linux-Phase2-GpuSetup' },
             DocumentType: 'Command',
             DocumentFormat: 'JSON',
+            UpdateMethod: 'NewVersion',
             Content: linuxPhase2GpuSetupContent
           }
         },
@@ -1917,6 +1950,7 @@ function generateCloudFormationTemplate(config) {
             Name: { 'Fn::Sub': '${ProductName}-Linux-Phase3-StartServices' },
             DocumentType: 'Command',
             DocumentFormat: 'JSON',
+            UpdateMethod: 'NewVersion',
             Content: linuxPhase3StartServicesContent
           }
         }
@@ -1931,6 +1965,7 @@ function generateCloudFormationTemplate(config) {
             Name: { 'Fn::Sub': '${ProductName}-MacOS-Phase1-ConfigureDCV-V2' },
             DocumentType: 'Command',
             DocumentFormat: 'JSON',
+            UpdateMethod: 'NewVersion',
             Content: macosPhase1ConfigureDcvContent
           }
         },
@@ -1940,6 +1975,7 @@ function generateCloudFormationTemplate(config) {
             Name: { 'Fn::Sub': '${ProductName}-MacOS-Phase2-AutoLogin' },
             DocumentType: 'Command',
             DocumentFormat: 'JSON',
+            UpdateMethod: 'NewVersion',
             Content: macosPhase2AutoLoginContent
           }
         }
@@ -2117,7 +2153,8 @@ function generateCloudFormationTemplate(config) {
       // Workstation instance profile name (needed for macOS which doesn't use launch template)
       WorkstationInstanceProfileName: {
         Description: 'Name of the Workstation Instance Profile',
-        Value: buildIamName(productName, acronym, 'Workstation', 'Profile', regionCode)
+        // Ref, not the generated name: an update may keep an older name.
+        Value: { Ref: 'WorkstationInstanceProfile' }
       },
       // DCV Lambda outputs (for cross-region invocation from primary region state machines)
       ...(lambdaAssets.dcvSessionManager && lambdaAssets.dcvSessionManager.bucket ? {

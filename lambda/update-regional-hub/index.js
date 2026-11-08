@@ -104,7 +104,9 @@ exports.handler = async (event) => {
         dcvCertificateArn,
         enableWindows,
         enableLinux,
-        enableMacOS
+        enableMacOS,
+        // Keeps the IAM names the hub's stack already uses.
+        isUpdate: true
       })
     }));
     

@@ -136,6 +136,14 @@ export class RegionalHubStack extends cdk.Stack {
       resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/*`]
     }));
 
+    // On update, read the hub's current template to keep its IAM names.
+    // Hubs can be in any region.
+    this.generateTemplateFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['cloudformation:GetTemplate'],
+      resources: [`arn:aws:cloudformation:*:${this.account}:stack/${props.acronym}-Regional-Hub-*/*`]
+    }));
+
     // ===========================================
     // CROSS-REGION LAMBDA FUNCTIONS
     // ===========================================
