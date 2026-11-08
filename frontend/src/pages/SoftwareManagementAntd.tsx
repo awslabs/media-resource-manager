@@ -37,6 +37,7 @@ import InstallScriptChat from '../components/InstallScriptChat';
 import AddSoftwareWizardAntd from '../components/AddSoftwareWizardAntd';
 import { apiCall } from '../utils/api';
 import { getAuthToken, isBedrockEnabled } from '../utils/auth';
+import { installerTooLargeMessage } from '../utils/upload';
 
 const { Title, Text, Link } = Typography;
 const { TextArea } = Input;
@@ -111,6 +112,7 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
   // Replacement installer chosen in Edit Software, and its upload progress.
   const [replacementFile, setReplacementFile] = useState<File | null>(null);
   const [replaceProgress, setReplaceProgress] = useState<number | null>(null);
+  const [replacementError, setReplacementError] = useState<string | null>(null);
   const replacementInputRef = React.useRef<HTMLInputElement>(null);
   const [searchText, setSearchText] = useState('');
   const [platformFilter, setPlatformFilter] = useState<string | null>(null);
@@ -316,6 +318,7 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
       setEditScript('');
       setReplacementFile(null);
       setReplaceProgress(null);
+      setReplacementError(null);
       setShowEditModal(true);
     }
   };
@@ -326,6 +329,7 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
     setEditScript('');
     setReplacementFile(null);
     setReplaceProgress(null);
+    setReplacementError(null);
   };
 
   const canReplaceInstaller = (item: SoftwareComponent | null) =>
@@ -684,8 +688,11 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
                         style={{ display: 'none' }}
                         onChange={(e) => {
                           const file = e.target.files?.[0];
-                          if (file) setReplacementFile(file);
                           e.target.value = '';
+                          if (!file) return;
+                          const tooLarge = installerTooLargeMessage(file);
+                          setReplacementError(tooLarge);
+                          if (!tooLarge) setReplacementFile(file);
                         }}
                       />
                       <Button
@@ -710,6 +717,16 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
                       ? 'Same file name: the current installer is replaced in place, and pipelines that use this software get the new file on their next build.'
                       : 'Different file name: saving creates a new component version. Pipelines keep the previous version until you select the new one in Edit pipeline.'}
                   </Text>
+                )}
+                {replacementError && (
+                  <Alert
+                    type="error"
+                    showIcon
+                    closable
+                    onClose={() => setReplacementError(null)}
+                    style={{ marginTop: 8 }}
+                    message={replacementError}
+                  />
                 )}
                 {replaceProgress !== null && (
                   <Progress percent={replaceProgress} size="small" status={replaceProgress < 100 ? 'active' : 'success'} />
