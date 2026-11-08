@@ -28,11 +28,13 @@ exports.handler = async (event) => {
   const denial = requireAdmin(event);
   if (denial) return denial;
 
+  let region;
+  let markedUpdating = false;
   try {
     // Parse request body
     const body = typeof event.body === 'string' ? JSON.parse(event.body) : event.body;
     
-    const { region } = body;
+    ({ region } = body);
     
     // Validate required fields
     if (!region) {
@@ -63,23 +65,29 @@ exports.handler = async (event) => {
     const enableWindows = body.enableWindows !== undefined ? body.enableWindows : hub.enableWindows;
     const enableLinux = body.enableLinux !== undefined ? body.enableLinux : hub.enableLinux;
     const enableMacOS = body.enableMacOS !== undefined ? body.enableMacOS : hub.enableMacOS;
-    const dcvDomainName = body.dcvDomainName !== undefined ? body.dcvDomainName : hub.dcvDomainName;
-    const dcvCertificateArn = body.dcvCertificateArn !== undefined ? body.dcvCertificateArn : hub.dcvCertificateArn;
+    // Some hub records store these as booleans rather than strings. Pass only
+    // a real value, so the update doesn't turn `true` into a custom domain.
+    const textOrUndefined = (value) => (typeof value === 'string' && value.trim() ? value.trim() : undefined);
+    const dcvDomainName = textOrUndefined(body.dcvDomainName !== undefined ? body.dcvDomainName : hub.dcvDomainName);
+    const dcvCertificateArn = textOrUndefined(body.dcvCertificateArn !== undefined ? body.dcvCertificateArn : hub.dcvCertificateArn);
     
-    // Update status to 'updating'
+    // Update status to 'updating'. updateStartedAt lets the list and get APIs
+    // tell this update's stack result from an earlier one.
+    const startedAt = new Date().toISOString();
     await docClient.send(new UpdateCommand({
       TableName: REGIONAL_HUBS_TABLE,
       Key: { region },
-      UpdateExpression: 'SET #status = :status, updatedAt = :updatedAt, enableWindows = :enableWindows, enableLinux = :enableLinux, enableMacOS = :enableMacOS',
+      UpdateExpression: 'SET #status = :status, updatedAt = :updatedAt, updateStartedAt = :updatedAt, enableWindows = :enableWindows, enableLinux = :enableLinux, enableMacOS = :enableMacOS REMOVE pendingTemplateVersion',
       ExpressionAttributeNames: { '#status': 'status' },
       ExpressionAttributeValues: {
         ':status': 'updating',
-        ':updatedAt': new Date().toISOString(),
+        ':updatedAt': startedAt,
         ':enableWindows': enableWindows,
         ':enableLinux': enableLinux,
         ':enableMacOS': enableMacOS
       }
     }));
+    markedUpdating = true;
     
     // Step 1: Generate new CloudFormation template
     console.log('Generating updated CloudFormation template...');
@@ -144,11 +152,12 @@ exports.handler = async (event) => {
       await docClient.send(new UpdateCommand({
         TableName: REGIONAL_HUBS_TABLE,
         Key: { region },
-        UpdateExpression: 'SET #status = :status, updatedAt = :updatedAt',
+        UpdateExpression: 'SET #status = :status, updatedAt = :updatedAt, templateVersion = :templateVersion REMOVE updateStartedAt, lastError',
         ExpressionAttributeNames: { '#status': 'status' },
         ExpressionAttributeValues: {
           ':status': 'available',
-          ':updatedAt': new Date().toISOString()
+          ':updatedAt': new Date().toISOString(),
+          ':templateVersion': templateResult.templateVersion || ''
         }
       }));
       
@@ -159,6 +168,14 @@ exports.handler = async (event) => {
       });
     }
     
+    // Saved as the hub's templateVersion once the stack update succeeds.
+    await docClient.send(new UpdateCommand({
+      TableName: REGIONAL_HUBS_TABLE,
+      Key: { region },
+      UpdateExpression: 'SET pendingTemplateVersion = :templateVersion',
+      ExpressionAttributeValues: { ':templateVersion': templateResult.templateVersion || '' }
+    }));
+
     return response(202, {
       message: 'Regional hub update initiated',
       region,
@@ -168,6 +185,24 @@ exports.handler = async (event) => {
     
   } catch (error) {
     console.error('Error updating regional hub:', error);
+    // Don't leave the hub in 'updating' when the update never got going.
+    if (markedUpdating) {
+      try {
+        await docClient.send(new UpdateCommand({
+          TableName: REGIONAL_HUBS_TABLE,
+          Key: { region },
+          UpdateExpression: 'SET #status = :status, updatedAt = :updatedAt, lastError = :error REMOVE updateStartedAt, pendingTemplateVersion',
+          ExpressionAttributeNames: { '#status': 'status' },
+          ExpressionAttributeValues: {
+            ':status': 'update_failed',
+            ':updatedAt': new Date().toISOString(),
+            ':error': error.message || 'Unknown error'
+          }
+        }));
+      } catch (statusError) {
+        console.error('Could not record the failed update:', statusError);
+      }
+    }
     return response(500, { error: error.message });
   }
 };

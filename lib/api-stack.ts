@@ -26,6 +26,7 @@ import { Construct } from 'constructs';
 import { StorageStack } from './storage-stack';
 import { DataSyncStack } from './datasync-stack';
 import { lambdaCodeWithShared } from './lambda-code';
+import { regionalHubTemplateVersion } from './regional-hub-version';
 
 export interface ApiStackProps extends cdk.StackProps {
   productName: string;
@@ -1571,6 +1572,7 @@ export class ApiStack extends cdk.Stack {
         WORKSTATION_TABLE_NAME: props.workstationTable.tableName,
         VPC_ID: props.vpc.vpcId,
         DCV_ENDPOINT: sessionManagerNlbDns,
+        REGIONAL_HUB_TEMPLATE_VERSION: regionalHubTemplateVersion(),
       },
     });
 
@@ -1594,6 +1596,7 @@ export class ApiStack extends cdk.Stack {
         VPC_ID: props.vpc.vpcId,
         DCV_ENDPOINT: sessionManagerNlbDns,
         PASCAL_CASE_NAME: props.pascalCaseName,
+        REGIONAL_HUB_TEMPLATE_VERSION: regionalHubTemplateVersion(),
       },
     });
 
@@ -1655,9 +1658,10 @@ export class ApiStack extends cdk.Stack {
       },
     });
 
-    // Grant DynamoDB permissions to regional hub functions
-    props.regionalHubsTable.grantReadData(listRegionalHubsFunction);
-    props.regionalHubsTable.grantReadData(getRegionalHubFunction);
+    // Grant DynamoDB permissions to regional hub functions. List and get
+    // also write: they record the result of a finished hub update.
+    props.regionalHubsTable.grantReadWriteData(listRegionalHubsFunction);
+    props.regionalHubsTable.grantReadWriteData(getRegionalHubFunction);
     props.regionalHubsTable.grantReadWriteData(createRegionalHubFunction);
     props.regionalHubsTable.grantReadWriteData(deleteRegionalHubFunction);
     props.regionalHubsTable.grantReadWriteData(updateRegionalHubFunction);
@@ -1674,6 +1678,15 @@ export class ApiStack extends cdk.Stack {
       props.dataEncryptionKey.grantEncryptDecrypt(deleteRegionalHubFunction);
       props.dataEncryptionKey.grantEncryptDecrypt(updateRegionalHubFunction);
     }
+
+    // List and get check the stack of a hub that is updating, in the hub's region.
+    const regionalHubStackStatusPolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['cloudformation:DescribeStacks'],
+      resources: [`arn:aws:cloudformation:*:${this.account}:stack/${props.acronym}-Regional-Hub-*/*`],
+    });
+    listRegionalHubsFunction.addToRolePolicy(regionalHubStackStatusPolicy);
+    getRegionalHubFunction.addToRolePolicy(regionalHubStackStatusPolicy);
 
     // Grant EC2 permissions for region/AZ validation
     createRegionalHubFunction.addToRolePolicy(new iam.PolicyStatement({

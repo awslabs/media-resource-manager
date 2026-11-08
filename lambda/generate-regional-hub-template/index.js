@@ -320,7 +320,10 @@ exports.handler = async (event) => {
     templateUrl,
     templateKey,
     parameters,
-    region
+    region,
+    // Fingerprint of the code this template was built from (TEMPLATE_VERSION,
+    // set by CDK). Saved on the hub once the stack create or update succeeds.
+    templateVersion: process.env.TEMPLATE_VERSION || ''
   };
 };
 

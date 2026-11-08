@@ -844,12 +844,14 @@ NagSuppressions.addStackSuppressions(apiStack, [
   },
   {
     id: 'AwsSolutions-IAM5',
-    reason: 'Wildcard permissions needed for workstation management operations',
+    reason: 'Wildcard permissions needed for workstation management operations. The list and get regional hub ' +
+      'functions read the status of regional hub stacks, which can be in any region.',
     appliesTo: [
       'Resource::*',
       'Resource::<*>/*',
       'Resource::arn:aws:ssm:*:*:parameter/*',
       'Action::s3:*',
+      { regex: '/^Resource::arn:aws:cloudformation:\\*:\\d{12}:stack\\/[A-Za-z0-9]+-Regional-Hub-\\*\\/\\*$/' },
     ],
   },
   {
