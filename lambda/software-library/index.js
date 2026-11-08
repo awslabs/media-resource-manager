@@ -4,10 +4,11 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, PutCommand, DeleteCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { ImagebuilderClient, CreateComponentCommand, DeleteComponentCommand, ListImageRecipesCommand, GetImageRecipeCommand, GetComponentCommand } = require('@aws-sdk/client-imagebuilder');
-const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { STSClient, GetCallerIdentityCommand } = require('@aws-sdk/client-sts');
 const { requireAdmin } = require('./authz');
+const { isMissingObjectError, parseS3Uri, validateMediaFileName, rewriteComponentMedia } = require('./media');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -81,14 +82,56 @@ exports.handler = async (event) => {
   }
 };
 
+// Pre-signed upload URL for an installer.
+//
+// New entry (Add Software wizard): { softwareId, fileName } uploads to
+// software/{softwareId}/{fileName}.
+//
+// Replacing an existing entry's installer: { replaceSoftwareId, fileName }.
+// A file with the same name goes to the exact key the entry's component
+// already downloads from, so the component and every pipeline using it pick
+// up the new file without any other change (replacesInPlace: true). A
+// different name goes to a new key, and the caller saves it with
+// PUT /images/software/{id}, which creates a new component version.
 async function generateUploadUrl(body) {
-  const { softwareId, fileName, contentType } = body;
-  
-  if (!softwareId || !fileName) {
-    return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'softwareId and fileName are required' }) };
+  const { softwareId, replaceSoftwareId, fileName, contentType } = body || {};
+
+  const fileNameError = validateMediaFileName(fileName);
+  if (fileNameError) {
+    return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: fileNameError }) };
   }
-  
-  const s3Key = `software/${softwareId}/${fileName}`;
+
+  let s3Key;
+  let replacesInPlace = false;
+  if (replaceSoftwareId) {
+    const existing = (await docClient.send(new GetCommand({
+      TableName: process.env.SOFTWARE_LIBRARY_TABLE_NAME,
+      Key: { softwareId: replaceSoftwareId }
+    }))).Item;
+    if (!existing) {
+      return { statusCode: 404, headers: corsHeaders, body: JSON.stringify({ error: 'Software not found' }) };
+    }
+    const current = parseS3Uri(existing.mediaS3Uri);
+    if (!current || current.bucket !== UPLOADS_BUCKET || !current.key.startsWith('software/')) {
+      return {
+        statusCode: 400,
+        headers: corsHeaders,
+        body: JSON.stringify({ error: 'This software has no uploaded installer to replace.' })
+      };
+    }
+    if (fileName === existing.mediaFileName) {
+      s3Key = current.key;
+      replacesInPlace = true;
+    } else {
+      s3Key = `software/${replaceSoftwareId}/${fileName}`;
+    }
+  } else {
+    if (typeof softwareId !== 'string' || !/^[A-Za-z0-9-]{1,64}$/.test(softwareId)) {
+      return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'softwareId and fileName are required' }) };
+    }
+    s3Key = `software/${softwareId}/${fileName}`;
+  }
+
   const command = new PutObjectCommand({
     Bucket: UPLOADS_BUCKET,
     Key: s3Key,
@@ -101,13 +144,35 @@ async function generateUploadUrl(body) {
   return {
     statusCode: 200,
     headers: corsHeaders,
-    body: JSON.stringify({ uploadUrl, s3Uri, s3Key })
+    body: JSON.stringify({ uploadUrl, s3Uri, s3Key, replacesInPlace })
   };
+}
+
+// Whether an entry's uploaded installer still exists. true or false when
+// known; null when the check itself failed (for example throttling), so the
+// UI never reports a file as missing without evidence.
+async function checkMediaMissing(item) {
+  const location = parseS3Uri(item?.mediaS3Uri);
+  if (!location) return undefined;
+  try {
+    await s3Client.send(new HeadObjectCommand({ Bucket: location.bucket, Key: location.key }));
+    return false;
+  } catch (error) {
+    if (isMissingObjectError(error)) return true;
+    console.warn(`Could not check installer ${item.mediaS3Uri}:`, error.name, error.message);
+    return null;
+  }
+}
+
+async function withMediaStatus(item) {
+  const mediaMissing = await checkMediaMissing(item);
+  return mediaMissing === undefined ? item : { ...item, mediaMissing };
 }
 
 async function listSoftware() {
   const result = await docClient.send(new ScanCommand({ TableName: process.env.SOFTWARE_LIBRARY_TABLE_NAME }));
-  return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ items: result.Items || [] }) };
+  const items = await Promise.all((result.Items || []).map(withMediaStatus));
+  return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ items }) };
 }
 
 async function getSoftware(softwareId) {
@@ -119,7 +184,7 @@ async function getSoftware(softwareId) {
   if (!result.Item) {
     return { statusCode: 404, headers: corsHeaders, body: JSON.stringify({ error: 'Software not found' }) };
   }
-  return { statusCode: 200, headers: corsHeaders, body: JSON.stringify(result.Item) };
+  return { statusCode: 200, headers: corsHeaders, body: JSON.stringify(await withMediaStatus(result.Item)) };
 }
 
 
@@ -314,8 +379,62 @@ async function updateSoftware(softwareId, updates) {
   // Platform from update or existing (default Windows for backward compatibility)
   const platform = updates.platform || existing.platform || 'Windows';
   
-  // If script is provided and changed, create a new component version
+  // mediaMissing is computed on read, never stored.
+  delete updates.mediaMissing;
+
+  // A new installer for this entry (Replace installer in Edit Software, with
+  // a different file name). It must be the file uploaded for this entry
+  // through generateUploadUrl({ replaceSoftwareId }).
+  const mediaChanged = Boolean(updates.mediaS3Uri) && updates.mediaS3Uri !== existing.mediaS3Uri;
+  if (mediaChanged) {
+    const location = parseS3Uri(updates.mediaS3Uri);
+    const fileNameError = validateMediaFileName(updates.mediaFileName);
+    if (existing.sourceType !== 'script' || !existing.mediaS3Uri) {
+      return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'This software has no uploaded installer to replace.' }) };
+    }
+    if (fileNameError || !location || location.bucket !== UPLOADS_BUCKET ||
+        location.key !== `software/${softwareId}/${updates.mediaFileName}`) {
+      return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'Invalid replacement installer.' }) };
+    }
+  }
+
+  // The new component document, when a new component version is needed:
+  // the script changed, or the installer was replaced with a different file.
+  let componentDocument = null;
   if (updates.script && existing.sourceType === 'script') {
+    componentDocument = buildComponentDocument(
+      updates.script,
+      updates.mediaS3Uri || existing.mediaS3Uri,
+      updates.mediaFileName || existing.mediaFileName,
+      platform,
+      updates.parameters || existing.parameters
+    );
+  } else if (mediaChanged) {
+    // Keep the current script and point the component at the new file.
+    const current = await imagebuilderClient.send(new GetComponentCommand({
+      componentBuildVersionArn: existing.componentArn
+    }));
+    let currentDocument = null;
+    try {
+      currentDocument = JSON.parse(current.component?.data || '');
+    } catch (parseError) {
+      currentDocument = null;
+    }
+    componentDocument = currentDocument &&
+      rewriteComponentMedia(currentDocument, updates.mediaS3Uri, updates.mediaFileName, platform);
+    if (!componentDocument) {
+      return {
+        statusCode: 400,
+        headers: corsHeaders,
+        body: JSON.stringify({
+          error: 'The installer for this component cannot be replaced automatically. Enter the installation script as well to create a new version.'
+        })
+      };
+    }
+  }
+
+  let recipesUsingPreviousVersion = [];
+  if (componentDocument) {
     // Auto-increment the actual component version
     newComponentVersion = incrementVersion(existing.componentVersion || '1.0.0');
     
@@ -328,13 +447,6 @@ async function updateSoftware(softwareId, updates) {
     const baseName = (updates.name || existing.name).toLowerCase().replace(/[^a-z0-9]/g, '-');
     const platformSuffix = platform === 'Linux' ? '-linux' : platform === 'macOS' ? '-macos' : '';
     const componentName = `${baseName}${platformSuffix}`;
-    const componentDocument = buildComponentDocument(
-      updates.script,
-      updates.mediaS3Uri || existing.mediaS3Uri,
-      updates.mediaFileName || existing.mediaFileName,
-      platform,
-      updates.parameters || existing.parameters
-    );
     
     try {
       const createComponentResponse = await imagebuilderClient.send(new CreateComponentCommand({
@@ -362,6 +474,7 @@ async function updateSoftware(softwareId, updates) {
           }
         } else {
           console.log('Old component still in use by recipes, keeping it:', dependentRecipes.map(r => r.name).join(', '));
+          recipesUsingPreviousVersion = [...new Set(dependentRecipes.map(r => r.name))];
         }
       }
     } catch (error) {
@@ -388,6 +501,7 @@ async function updateSoftware(softwareId, updates) {
   
   // Don't store the script in DynamoDB (it's in the component)
   delete item.script;
+  delete item.mediaMissing;
   
   await docClient.send(new PutCommand({
     TableName: process.env.SOFTWARE_LIBRARY_TABLE_NAME,
@@ -400,7 +514,12 @@ async function updateSoftware(softwareId, updates) {
     body: JSON.stringify({
       ...item,
       previousComponentArn: oldComponentArn !== newComponentArn ? oldComponentArn : undefined,
-      versionIncremented: oldComponentArn !== newComponentArn
+      versionIncremented: oldComponentArn !== newComponentArn,
+      mediaReplaced: mediaChanged,
+      // Recipes still on the previous component version. Their pipelines
+      // keep the old installer until the new version is selected in Edit
+      // pipeline.
+      recipesUsingPreviousVersion
     }) 
   };
 }

@@ -19,6 +19,7 @@ import {
   Col,
   Card,
   Tooltip,
+  Progress,
 } from 'antd';
 import {
   ReloadOutlined,
@@ -27,6 +28,8 @@ import {
   PlusOutlined,
   RobotOutlined,
   HomeOutlined,
+  UploadOutlined,
+  WarningOutlined,
 } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import AppLayoutAntd from '../components/AppLayoutAntd';
@@ -53,7 +56,27 @@ interface SoftwareComponent {
   mediaS3Uri?: string;
   mediaFileName?: string;
   sourceType?: string;
+  // Set by the API for entries with an uploaded installer: true when the
+  // file no longer exists, null when it couldn't be checked (#54).
+  mediaMissing?: boolean | null;
 }
+
+// Upload a file to a pre-signed S3 URL, reporting progress (0-100).
+const uploadToPresignedUrl = (url: string, file: File, onProgress: (percent: number) => void) =>
+  new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+    });
+    xhr.addEventListener('load', () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      else reject(new Error(`Upload failed with status ${xhr.status}`));
+    });
+    xhr.addEventListener('error', () => reject(new Error('Upload failed')));
+    xhr.open('PUT', url);
+    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+    xhr.send(file);
+  });
 
 interface SoftwareManagementProps {
   config?: any;
@@ -84,6 +107,11 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
   const [editSoftware, setEditSoftware] = useState<SoftwareComponent | null>(null);
   const [editScript, setEditScript] = useState('');
   const [updating, setUpdating] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  // Replacement installer chosen in Edit Software, and its upload progress.
+  const [replacementFile, setReplacementFile] = useState<File | null>(null);
+  const [replaceProgress, setReplaceProgress] = useState<number | null>(null);
+  const replacementInputRef = React.useRef<HTMLInputElement>(null);
   const [searchText, setSearchText] = useState('');
   const [platformFilter, setPlatformFilter] = useState<string | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
@@ -174,6 +202,12 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
     return filtered;
   }, [softwareLibrary, searchText, platformFilter, categoryFilter]);
 
+  // Entries whose uploaded installer no longer exists (#54).
+  const missingInstallers = useMemo(
+    () => softwareLibrary.filter((item) => item.mediaMissing === true),
+    [softwareLibrary]
+  );
+
   const columns: ColumnsType<SoftwareComponent> = [
     {
       title: 'Name',
@@ -183,9 +217,16 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
       sortOrder: sortedInfo?.columnKey === 'name' ? sortedInfo.order : null,
       width: 200,
       render: (name: string, record: SoftwareComponent) => (
-        <Link onClick={() => (window.location.href = `/software/${record.softwareId}`)}>
-          {name}
-        </Link>
+        <Space size={4} wrap>
+          <Link onClick={() => (window.location.href = `/software/${record.softwareId}`)}>
+            {name}
+          </Link>
+          {record.mediaMissing === true && (
+            <Tooltip title={`The installer ${record.mediaFileName} no longer exists. Edit this entry to replace it.`}>
+              <Tag color="warning" icon={<WarningOutlined />}>Installer missing</Tag>
+            </Tooltip>
+          )}
+        </Space>
       ),
     },
     {
@@ -268,12 +309,54 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
     }
   };
 
-  const openEditModal = () => {
-    if (selectedItems.length === 1) {
-      setEditSoftware({ ...selectedItems[0] });
+  const openEditModal = (item?: SoftwareComponent) => {
+    const target = item || (selectedItems.length === 1 ? selectedItems[0] : null);
+    if (target) {
+      setEditSoftware({ ...target });
       setEditScript('');
+      setReplacementFile(null);
+      setReplaceProgress(null);
       setShowEditModal(true);
     }
+  };
+
+  const closeEditModal = () => {
+    setShowEditModal(false);
+    setEditSoftware(null);
+    setEditScript('');
+    setReplacementFile(null);
+    setReplaceProgress(null);
+  };
+
+  const canReplaceInstaller = (item: SoftwareComponent | null) =>
+    Boolean(item && item.sourceType === 'script' && item.mediaS3Uri);
+
+  // Upload the replacement installer chosen in Edit Software. A file with the
+  // same name overwrites the current one in place, so existing pipelines use
+  // it on their next build. A different name returns its new location, which
+  // is saved with the entry and creates a new component version.
+  const uploadReplacementInstaller = async (
+    item: SoftwareComponent,
+    file: File,
+    token: string
+  ): Promise<{ s3Uri: string; replacesInPlace: boolean }> => {
+    const urlResponse = await apiCall('/images/software/upload-url', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        replaceSoftwareId: item.softwareId,
+        fileName: file.name,
+        contentType: file.type || 'application/octet-stream',
+      }),
+    });
+    if (!urlResponse.ok) {
+      const errorData = await urlResponse.json().catch(() => ({}));
+      throw new Error(errorData.error || 'Failed to get upload URL');
+    }
+    const { uploadUrl, s3Uri, replacesInPlace } = await urlResponse.json();
+    setReplaceProgress(0);
+    await uploadToPresignedUrl(uploadUrl, file, setReplaceProgress);
+    return { s3Uri, replacesInPlace: Boolean(replacesInPlace) };
   };
 
   const updateSoftware = async () => {
@@ -284,8 +367,19 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
       if (!token) return;
 
       const payload: Record<string, any> = { ...editSoftware };
+      delete payload.mediaMissing;
       if (editScript.trim()) {
         payload.script = editScript;
+      }
+
+      let replacedInPlace = false;
+      if (replacementFile) {
+        const upload = await uploadReplacementInstaller(editSoftware, replacementFile, token);
+        replacedInPlace = upload.replacesInPlace;
+        if (!upload.replacesInPlace) {
+          payload.mediaS3Uri = upload.s3Uri;
+          payload.mediaFileName = replacementFile.name;
+        }
       }
 
       const response = await apiCall(`/images/software/${editSoftware.softwareId}`, {
@@ -295,9 +389,21 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
       });
 
       if (response.ok) {
-        setShowEditModal(false);
-        setEditSoftware(null);
-        setEditScript('');
+        const result = await response.json().catch(() => ({}));
+        const notes: string[] = [];
+        if (replacedInPlace) {
+          notes.push(`Installer for ${editSoftware.name} replaced. Pipelines that use it get the new file on their next build.`);
+        } else if (result.mediaReplaced) {
+          notes.push(`Installer for ${editSoftware.name} replaced, and a new component version was created.`);
+        }
+        if (result.versionIncremented && result.recipesUsingPreviousVersion?.length) {
+          notes.push(
+            `These pipeline recipes still use the previous version: ${result.recipesUsingPreviousVersion.join(', ')}. ` +
+            'Select the new version in Edit pipeline to use it.'
+          );
+        }
+        setNotice(notes.length ? notes.join(' ') : null);
+        closeEditModal();
         setSelectedRowKeys([]);
         setSelectedItems([]);
         loadSoftwareLibrary();
@@ -348,7 +454,7 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
             <Button
               icon={<EditOutlined />}
               disabled={selectedRowKeys.length !== 1}
-              onClick={openEditModal}
+              onClick={() => openEditModal()}
             >
               Edit
             </Button>
@@ -376,6 +482,26 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
             closable
             onClose={() => setError(null)}
             style={{ marginBottom: 16 }}
+          />
+        )}
+
+        {notice && (
+          <Alert
+            message={notice}
+            type="success"
+            closable
+            onClose={() => setNotice(null)}
+            style={{ marginBottom: 16 }}
+          />
+        )}
+
+        {missingInstallers.length > 0 && (
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={`${missingInstallers.length === 1 ? '1 software entry has' : `${missingInstallers.length} software entries have`} a missing installer: ${missingInstallers.map((item) => item.name).join(', ')}.`}
+            description="Pipelines that use these entries fail until the installer is replaced. Select an entry, click Edit, then Replace installer."
           />
         )}
 
@@ -478,9 +604,7 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
         title="Edit Software"
         open={showEditModal}
         onCancel={() => {
-          setShowEditModal(false);
-          setEditSoftware(null);
-          setEditScript('');
+          if (!updating) closeEditModal();
         }}
         onOk={updateSoftware}
         confirmLoading={updating}
@@ -540,8 +664,56 @@ const SoftwareManagementAntd: React.FC<SoftwareManagementProps> = ({
             </Form.Item>
 
             {editSoftware.mediaFileName && (
-              <Form.Item label="Media File" tooltip="Read-only">
-                <Input value={editSoftware.mediaFileName} disabled />
+              <Form.Item label="Installer">
+                {editSoftware.mediaMissing === true && !replacementFile && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 8 }}
+                    message="This installer no longer exists. Pipelines that use this software fail until you replace it."
+                  />
+                )}
+                <Space wrap>
+                  <Text>{replacementFile ? replacementFile.name : editSoftware.mediaFileName}</Text>
+                  {replacementFile && <Tag color="blue">New</Tag>}
+                  {canReplaceInstaller(editSoftware) && (
+                    <>
+                      <input
+                        ref={replacementInputRef}
+                        type="file"
+                        style={{ display: 'none' }}
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) setReplacementFile(file);
+                          e.target.value = '';
+                        }}
+                      />
+                      <Button
+                        size="small"
+                        icon={<UploadOutlined />}
+                        disabled={updating}
+                        onClick={() => replacementInputRef.current?.click()}
+                      >
+                        {replacementFile ? 'Choose a different file' : 'Replace installer'}
+                      </Button>
+                      {replacementFile && (
+                        <Button size="small" type="link" disabled={updating} onClick={() => setReplacementFile(null)}>
+                          Keep current installer
+                        </Button>
+                      )}
+                    </>
+                  )}
+                </Space>
+                {replacementFile && (
+                  <Text type="secondary" style={{ display: 'block', marginTop: 4 }}>
+                    {replacementFile.name === editSoftware.mediaFileName
+                      ? 'Same file name: the current installer is replaced in place, and pipelines that use this software get the new file on their next build.'
+                      : 'Different file name: saving creates a new component version. Pipelines keep the previous version until you select the new one in Edit pipeline.'}
+                  </Text>
+                )}
+                {replaceProgress !== null && (
+                  <Progress percent={replaceProgress} size="small" status={replaceProgress < 100 ? 'active' : 'success'} />
+                )}
               </Form.Item>
             )}
 
