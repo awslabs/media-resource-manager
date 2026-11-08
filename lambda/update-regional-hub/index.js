@@ -5,6 +5,7 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { requireAdmin } = require('./authz');
+const { redactForLog } = require('./log-redact');
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -19,7 +20,7 @@ const ACRONYM = process.env.ACRONYM;
  * Regenerates the CloudFormation template and updates the stack
  */
 exports.handler = async (event) => {
-  console.log('UpdateRegionalHub API event:', JSON.stringify(event, null, 2));
+  console.log('UpdateRegionalHub API event:', JSON.stringify(redactForLog(event), null, 2));
 
   // SECURITY: updating a regional hub regenerates the CloudFormation
   // template and triggers a stack update in another region.

@@ -7,6 +7,7 @@ const { DirectoryServiceClient, DescribeDirectoriesCommand } = require('@aws-sdk
 const { DirectoryServiceDataClient, ListGroupMembersCommand, DescribeUserCommand, ListGroupsForMemberCommand } = require('@aws-sdk/client-directory-service-data');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { CognitoIdentityProviderClient, AdminGetUserCommand } = require('@aws-sdk/client-cognito-identity-provider');
+const { redactForLog } = require('./log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -73,7 +74,7 @@ async function getCognitoUserPoolId() {
 }
 
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  console.log('Event:', JSON.stringify(redactForLog(event), null, 2));
   
   const { httpMethod: method, path } = event;
   

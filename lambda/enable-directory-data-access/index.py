@@ -41,7 +41,7 @@ def send_cfn_response(event, context, status, data=None):
     safe_urlopen(req)
 
 def handler(event, context):
-    print(f"Event: {json.dumps(event)}")
+    print(f"Event: {json.dumps({**event, 'ResponseURL': '[REDACTED]'} if 'ResponseURL' in event else event)}")
     
     try:
         if event['RequestType'] == 'Create':

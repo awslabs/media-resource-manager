@@ -5,6 +5,7 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { EC2Client, DescribeVpcsCommand, DescribeSubnetsCommand, DescribeSecurityGroupsCommand } = require('@aws-sdk/client-ec2');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
+const { redactForLog } = require('./log-redact');
 
 const dynamoClient = new DynamoDBClient({});
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -18,7 +19,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-  console.log('GetRegionalHub event:', JSON.stringify(event, null, 2));
+  console.log('GetRegionalHub event:', JSON.stringify(redactForLog(event), null, 2));
   
   try {
     const region = event.pathParameters?.region;

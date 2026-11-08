@@ -4,6 +4,7 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, ScanCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
 const { EC2Client, DescribeVpcsCommand } = require('@aws-sdk/client-ec2');
+const { redactForLog } = require('./log-redact');
 
 const dynamoClient = new DynamoDBClient({});
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -16,7 +17,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-  console.log('ListRegionalHubs event:', JSON.stringify(event, null, 2));
+  console.log('ListRegionalHubs event:', JSON.stringify(redactForLog(event), null, 2));
   
   try {
     // Get all regional hubs from DynamoDB

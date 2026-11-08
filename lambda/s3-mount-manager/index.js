@@ -13,6 +13,7 @@ const { DynamoDBDocumentClient, GetCommand } = require('@aws-sdk/lib-dynamodb');
 const { SSMClient, SendCommandCommand, GetCommandInvocationCommand } = require('@aws-sdk/client-ssm');
 const { EC2Client, DescribeInstancesCommand } = require('@aws-sdk/client-ec2');
 const { requireAdmin } = require('./authz');
+const { redactForLog } = require('./log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -29,7 +30,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-    console.log('S3 Mount Manager Event:', JSON.stringify(event, null, 2));
+    console.log('S3 Mount Manager Event:', JSON.stringify(redactForLog(event), null, 2));
 
     // SECURITY: mount/unmount operations attach or detach a storage volume
     // from another user's workstation. Gate API Gateway invocations on

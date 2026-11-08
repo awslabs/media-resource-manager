@@ -4,6 +4,7 @@
 const { S3Client, ListBucketsCommand, GetBucketLocationCommand } = require('@aws-sdk/client-s3');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { requireAdmin } = require('./authz');
+const { redactForLog } = require('./log-redact');
 
 const s3Client = new S3Client({ region: process.env.AWS_REGION });
 const ssmClient = new SSMClient({ region: process.env.AWS_REGION });
@@ -44,7 +45,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-  console.log('StorageConfig event:', JSON.stringify(event, null, 2));
+  console.log('StorageConfig event:', JSON.stringify(redactForLog(event), null, 2));
 
   const path = event.path || event.resource || '';
 

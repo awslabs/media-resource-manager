@@ -11,7 +11,7 @@ const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient());
 const ssm = new SSMClient();
 
 exports.handler = async (event) => {
-    console.log('Cleanup event:', JSON.stringify(event, null, 2));
+    console.log('Cleanup event:', JSON.stringify({ ...event, ResponseURL: event.ResponseURL && '[REDACTED]' }, null, 2));
 
     if (event.RequestType === 'Delete') {
         try {

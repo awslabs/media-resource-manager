@@ -679,7 +679,7 @@ def lambda_handler(event, context):
                         
                         with safe_urlopen(connection_request, context=ssl_context, timeout=10) as response:
                             connection_data = json.loads(response.read().decode())
-                            print(f"Connection data: {connection_data}")
+                            print(f"Connection data received for session {created_session_id} (fields: {sorted(connection_data)})")
                             break  # Success - exit the loop
                             
                     except urllib.error.HTTPError as e:
@@ -755,7 +755,7 @@ def lambda_handler(event, context):
                             
                             with safe_urlopen(connection_request, context=ssl_context, timeout=10) as response:
                                 connection_data = json.loads(response.read().decode())
-                                print(f"Connection data: {connection_data}")
+                                print(f"Connection data received for session {created_session_id} (fields: {sorted(connection_data)})")
                                 break
                         except urllib.error.HTTPError as e:
                             error_body = e.read().decode() if e.fp else ''

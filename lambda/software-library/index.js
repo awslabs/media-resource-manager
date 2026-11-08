@@ -9,6 +9,7 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { STSClient, GetCallerIdentityCommand } = require('@aws-sdk/client-sts');
 const { requireAdmin } = require('./authz');
 const { isMissingObjectError, parseS3Uri, validateMediaFileName, validateUploadedMedia, rewriteComponentMedia } = require('./media');
+const { redactForLog } = require('./log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -44,7 +45,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  console.log('Event:', JSON.stringify(redactForLog(event), null, 2));
   
   try {
     const { httpMethod, resource, pathParameters } = event;

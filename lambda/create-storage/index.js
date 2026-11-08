@@ -8,6 +8,7 @@ const { S3Client, HeadBucketCommand } = require('@aws-sdk/client-s3');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const crypto = require('crypto');
 const { requireAdmin } = require('./authz');
+const { redactForLog } = require('./log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -117,7 +118,7 @@ async function validateRegion(region, storageType) {
 }
 
 exports.handler = async (event) => {
-  console.log('CreateStorage event:', JSON.stringify(event, null, 2));
+  console.log('CreateStorage event:', JSON.stringify(redactForLog(event), null, 2));
   
   // SECURITY: creating storage provisions AWS resources (S3 buckets, FSx
   // volumes, EFS shares) and mutates the storage table. Admin only.

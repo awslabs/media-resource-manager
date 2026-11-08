@@ -11,6 +11,7 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { EC2Client, TerminateInstancesCommand, DescribeInstancesCommand } = require('@aws-sdk/client-ec2');
 const { requireAdmin } = require('./authz');
+const { redactForLog } = require('./log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -25,7 +26,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  console.log('Event:', JSON.stringify(redactForLog(event), null, 2));
 
   try {
     // Handle OPTIONS preflight

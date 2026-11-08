@@ -28,7 +28,7 @@ const iam = new IAMClient();
 const licenseManager = new LicenseManagerClient();
 
 exports.handler = async (event, context) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  console.log('Event:', JSON.stringify({ ...event, ResponseURL: event.ResponseURL && '[REDACTED]' }, null, 2));
   
   const requestType = event.RequestType;
   const props = event.ResourceProperties;

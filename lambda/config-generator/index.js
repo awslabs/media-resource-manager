@@ -10,7 +10,7 @@ const ssm = new SSMClient({});
 const cognito = new CognitoIdentityProviderClient({});
 
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  console.log('Event:', JSON.stringify({ ...event, ResponseURL: event.ResponseURL && '[REDACTED]' }, null, 2));
   
   if (event.RequestType === 'Delete') {
     return { PhysicalResourceId: 'config-generator' };
