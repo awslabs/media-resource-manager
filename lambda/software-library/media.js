@@ -28,8 +28,9 @@ function parseS3Uri(uri) {
  * of the S3 key, and it is placed inside a double-quoted MEDIA_PATH
  * assignment in the build script (Bash or PowerShell). So it must not
  * contain path separators, or characters those quotes don't neutralize:
- * double quote, backtick, $, or control characters. Spaces and parentheses
- * are fine.
+ * double quote, backtick, $, or control characters. PowerShell also treats
+ * the curly double quotes U+201C to U+201E as a double quote, so those (and
+ * U+201F) are rejected too. Spaces and parentheses are fine.
  */
 function validateMediaFileName(fileName) {
   if (typeof fileName !== 'string' || !fileName.trim()) {
@@ -42,8 +43,25 @@ function validateMediaFileName(fileName) {
     return 'fileName must not contain path separators';
   }
   // eslint-disable-next-line no-control-regex
-  if (/["`$\u0000-\u001f\u007f]/.test(fileName)) {
+  if (/["`$\u0000-\u001f\u007f\u201c-\u201f]/.test(fileName)) {
     return 'fileName must not contain quotes, backticks, $, or control characters';
+  }
+  return null;
+}
+
+/**
+ * Validate the installer of a new library entry from the client. It must be a
+ * file uploaded through POST /images/software/upload-url, which puts it in the
+ * uploads bucket at software/{id}/{fileName}. Returns an error message, or
+ * null.
+ */
+function validateUploadedMedia(mediaS3Uri, mediaFileName, uploadsBucket) {
+  const fileNameError = validateMediaFileName(mediaFileName);
+  if (fileNameError) return fileNameError;
+  const location = parseS3Uri(mediaS3Uri);
+  const key = location && /^software\/[A-Za-z0-9-]{1,64}\/(.+)$/.exec(location.key);
+  if (!location || !uploadsBucket || location.bucket !== uploadsBucket || !key || key[1] !== mediaFileName) {
+    return 'mediaS3Uri must be an installer uploaded to the Software Library';
   }
   return null;
 }
@@ -95,6 +113,7 @@ module.exports = {
   isMissingObjectError,
   parseS3Uri,
   validateMediaFileName,
+  validateUploadedMedia,
   mediaPaths,
   rewriteComponentMedia,
 };

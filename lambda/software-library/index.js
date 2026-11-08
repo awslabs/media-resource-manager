@@ -8,7 +8,7 @@ const { S3Client, PutObjectCommand, DeleteObjectCommand, HeadObjectCommand } = r
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { STSClient, GetCallerIdentityCommand } = require('@aws-sdk/client-sts');
 const { requireAdmin } = require('./authz');
-const { isMissingObjectError, parseS3Uri, validateMediaFileName, rewriteComponentMedia } = require('./media');
+const { isMissingObjectError, parseS3Uri, validateMediaFileName, validateUploadedMedia, rewriteComponentMedia } = require('./media');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -159,7 +159,7 @@ async function checkMediaMissing(item) {
     return false;
   } catch (error) {
     if (isMissingObjectError(error)) return true;
-    console.warn(`Could not check installer ${item.mediaS3Uri}:`, error.name, error.message);
+    console.warn('Could not check installer %s:', item.mediaS3Uri, error.name, error.message);
     return null;
   }
 }
@@ -189,6 +189,15 @@ async function getSoftware(softwareId) {
 
 
 async function createSoftware(software) {
+  // The installer name goes into the build script, so only accept a file
+  // uploaded through generateUploadUrl, which validated the name.
+  if (software?.mediaS3Uri || software?.mediaFileName) {
+    const mediaError = validateUploadedMedia(software.mediaS3Uri, software.mediaFileName, UPLOADS_BUCKET);
+    if (mediaError) {
+      return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: mediaError }) };
+    }
+  }
+
   const softwareId = require('crypto').randomUUID();
   const timestamp = new Date().toISOString();
   

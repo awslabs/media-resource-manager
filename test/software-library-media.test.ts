@@ -7,7 +7,7 @@
  */
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const media = require('../lambda/software-library/media.js');
-const { isMissingObjectError, parseS3Uri, validateMediaFileName, rewriteComponentMedia } = media;
+const { isMissingObjectError, parseS3Uri, validateMediaFileName, validateUploadedMedia, rewriteComponentMedia } = media;
 
 const BUCKET = 'mrm-image-builder-uploads-123456789012-us-east-1';
 const OLD_URI = `s3://${BUCKET}/software/abc-123/DaVinci_Resolve_20.3.1_Linux.zip`;
@@ -62,10 +62,54 @@ describe('validateMediaFileName', () => {
     }
   });
 
+  it('rejects the curly double quotes PowerShell treats as a double quote', () => {
+    for (const name of ['Setup\u201d; Start-Process calc; \u201c.exe', 'a\u201c.exe', 'a\u201e.exe', 'a\u201f.exe']) {
+      expect(validateMediaFileName(name)).toMatch(/quotes, backticks, \$, or control characters/);
+    }
+  });
+
   it('rejects missing and overlong names', () => {
     expect(validateMediaFileName(undefined)).toBe('fileName is required');
     expect(validateMediaFileName('   ')).toBe('fileName is required');
     expect(validateMediaFileName(`${'x'.repeat(252)}.zip`)).toBe('fileName must be 255 characters or fewer');
+  });
+});
+
+describe('validateUploadedMedia', () => {
+  const NAME = 'DaVinci_Resolve_20.3.1_Linux.zip';
+  const LOCATION_ERROR = 'mediaS3Uri must be an installer uploaded to the Software Library';
+
+  it('accepts a file uploaded to software/{id}/{fileName} in the uploads bucket', () => {
+    expect(validateUploadedMedia(OLD_URI, NAME, BUCKET)).toBeNull();
+  });
+
+  it('rejects an invalid file name before checking the location', () => {
+    expect(validateUploadedMedia(`s3://${BUCKET}/software/abc-123/a$b.zip`, 'a$b.zip', BUCKET))
+      .toMatch(/quotes, backticks, \$, or control characters/);
+    expect(validateUploadedMedia(OLD_URI, undefined, BUCKET)).toBe('fileName is required');
+  });
+
+  it('rejects files outside the uploads bucket or the software/{id}/ prefix', () => {
+    for (const uri of [
+      `s3://other-bucket/software/abc-123/${NAME}`,
+      `s3://${BUCKET}/${NAME}`,
+      `s3://${BUCKET}/other/abc-123/${NAME}`,
+      `s3://${BUCKET}/software/${NAME}`,
+      `s3://${BUCKET}/software/abc_123/${NAME}`,
+      `s3://${BUCKET}/software/abc-123/nested/${NAME}`,
+      `https://example.com/${NAME}`,
+      undefined,
+    ]) {
+      expect(validateUploadedMedia(uri, NAME, BUCKET)).toBe(LOCATION_ERROR);
+    }
+  });
+
+  it('rejects a location whose file name differs from mediaFileName', () => {
+    expect(validateUploadedMedia(OLD_URI, 'Other.zip', BUCKET)).toBe(LOCATION_ERROR);
+  });
+
+  it('rejects everything when the uploads bucket is not configured', () => {
+    expect(validateUploadedMedia(OLD_URI, NAME, undefined)).toBe(LOCATION_ERROR);
   });
 });
 
