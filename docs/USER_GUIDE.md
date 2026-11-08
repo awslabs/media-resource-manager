@@ -21,6 +21,7 @@ This guide covers how to use the Media Resource Manager web console for both adm
     - [Software Library](#software-library)
     - [AI Script Generator](#ai-script-generator)
   - [Storage Management](#storage-management)
+  - [Updating Regional Hubs](#updating-regional-hubs)
   - [Settings](#settings)
 - [Tips & Best Practices](#tips--best-practices)
 
@@ -402,6 +403,24 @@ Storage can be attached when creating a workstation or added later:
 2. Select storage resource
 3. Specify mount point
 4. Save changes
+
+### Updating Regional Hubs
+
+Each regional hub runs its own copy of MRM's regional code, such as the regional DCV session manager. Upgrading MRM doesn't change that copy, so a hub needs an update to get fixes in that code.
+
+When a hub runs older code than your deployment, administrators see:
+
+- A banner at the top of every page, with a **Go to Regions** button. Dismissing it hides it for the rest of the browser session.
+- A badge on **Regions** in the sidebar.
+- An **Update available** tag on the hub on the **Regions** page.
+
+To update a hub:
+
+1. Go to **Regions**
+2. Click **Update** on the hub's row, then **Update** to confirm
+3. The status changes to **Updating**, then back to **Available** when the update finishes. The page refreshes until then.
+
+The update rebuilds the hub's CloudFormation template from the current code and updates its stack. Workstations in the region keep running, and the existing DCV Session Manager and Connection Gateway instances aren't replaced. If the update fails, the status shows **Update failed** with the reason, and you can click **Update** again.
 
 ### Settings
 
