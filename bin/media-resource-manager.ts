@@ -23,6 +23,8 @@ import { RegionalHubStack } from '../lib/regional-hub-stack';
 import { DataSyncStack } from '../lib/datasync-stack';
 import { ObservabilityStack } from '../lib/observability-stack';
 import { AgentCoreStack } from '../lib/agentcore-stack';
+import { LogRetentionStack } from '../lib/log-retention-stack';
+import * as logs from 'aws-cdk-lib/aws-logs';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
@@ -563,6 +565,63 @@ const eventBridgeStack = new EventBridgeStack(app, `${naming.acronym}-Events`, {
 eventBridgeStack.addDependency(apiStack);
 eventBridgeStack.addDependency(frontendStack);
 eventBridgeStack.addDependency(workstationStartStack);
+
+// Lambda log retention: days to keep Lambda log events, set in cdk.json
+// context or parameters.json. 0 leaves retention unmanaged and skips the
+// stack. Read directly rather than with getContextOrParameter, whose `||`
+// would replace 0 with the default.
+const LAMBDA_LOG_RETENTION_DEFAULT_DAYS = 365;
+const lambdaLogRetentionRaw =
+  app.node.tryGetContext('lambdaLogRetentionDays') ?? parametersContext['lambdaLogRetentionDays'];
+const lambdaLogRetentionDays = lambdaLogRetentionRaw === undefined || lambdaLogRetentionRaw === ''
+  ? LAMBDA_LOG_RETENTION_DEFAULT_DAYS
+  : Number(lambdaLogRetentionRaw);
+const allowedLogRetentionDays = Object.values(logs.RetentionDays)
+  .filter((days): days is number => typeof days === 'number' && days !== logs.RetentionDays.INFINITE);
+if (lambdaLogRetentionDays !== 0 && !allowedLogRetentionDays.includes(lambdaLogRetentionDays)) {
+  throw new Error(
+    `lambdaLogRetentionDays must be 0 (off) or one of ${allowedLogRetentionDays.join(', ')} ` +
+    `(got: ${lambdaLogRetentionRaw})`
+  );
+}
+if (lambdaLogRetentionDays > 0) {
+  const logRetentionStack = new LogRetentionStack(app, `${naming.acronym}-Log-Retention`, {
+    env,
+    pascalCaseName: naming.pascalCase,
+    acronym: naming.acronym,
+    retentionDays: lambdaLogRetentionDays as logs.RetentionDays,
+    regionalHubsTable: infrastructureStack.database.regionalHubsTable,
+    dataEncryptionKey: infrastructureStack.security.dataEncryptionKey,
+  });
+  // Deploy last, so every function exists when retention is applied.
+  for (const child of app.node.children) {
+    if (child instanceof cdk.Stack && child !== logRetentionStack) {
+      logRetentionStack.addStackDependency(child);
+    }
+  }
+  NagSuppressions.addStackSuppressions(logRetentionStack, [
+    {
+      id: 'AwsSolutions-IAM4',
+      reason: 'AWS managed policy for Lambda logging, used by the function and the custom resource provider',
+      appliesTo: ['Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'],
+    },
+    {
+      id: 'AwsSolutions-IAM5',
+      reason:
+        'lambda:ListFunctions and logs:DescribeLogGroups do not support narrower resources. ListTags, CreateLogGroup, ' +
+        'and PutRetentionPolicy are limited to names starting with this deployment\'s prefixes, in any region, ' +
+        'because regional hubs can be in any region. The rest are CDK grants for the table index and the provider.',
+      appliesTo: [
+        'Resource::*',
+        'Resource::<DatabaseRegionalHubsTable7E863452.Arn>/index/*',
+        { regex: '/^Resource::arn:aws:lambda:\\*:\\d{12}:function:[A-Za-z0-9]+-\\*$/' },
+        { regex: '/^Resource::arn:aws:logs:\\*:\\d{12}:log-group:\\*$/' },
+        { regex: '/^Resource::arn:aws:logs:\\*:\\d{12}:log-group:\\/aws\\/lambda\\/[A-Za-z0-9]+-\\*$/' },
+        { regex: '/^Resource::<LambdaLogRetentionFunction[0-9A-F]+\\.Arn>:\\*$/' },
+      ],
+    },
+  ]);
+}
 
 
 
