@@ -63,8 +63,12 @@ export class ImageBuilderConstruct extends Construct {
       serverAccessLogsPrefix: 'uploads-access-logs/',
       lifecycleRules: [
         {
-          id: 'DeleteOldUploads',
-          expiration: cdk.Duration.days(30),
+          // Software Library installers are stored here under software/ and
+          // must not expire. Library entries keep pointing at them, and every
+          // pipeline that uses one fails once the file is gone (#54). Only
+          // replaced or deleted object versions and abandoned multipart
+          // uploads are cleaned up.
+          id: 'DeleteOldVersionsAndIncompleteUploads',
           noncurrentVersionExpiration: cdk.Duration.days(7),
           abortIncompleteMultipartUploadAfter: cdk.Duration.days(7)
         }

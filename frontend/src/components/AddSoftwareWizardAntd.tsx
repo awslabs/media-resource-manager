@@ -49,6 +49,7 @@ import {
 } from '@ant-design/icons';
 import { apiCall } from '../utils/api';
 import { getAuthToken, isBedrockEnabled } from '../utils/auth';
+import { installerTooLargeMessage } from '../utils/upload';
 
 const { Text, Paragraph } = Typography;
 const { TextArea } = Input;
@@ -173,10 +174,17 @@ const AddSoftwareWizardAntd: React.FC<AddSoftwareWizardAntdProps> = ({
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file) {
-      setSelectedFile(file);
-      setMediaFileName(file.name);
+    if (!file) return;
+    const tooLarge = installerTooLargeMessage(file);
+    if (tooLarge) {
+      // Keep any earlier selection, and clear the input so the same file can be picked again.
+      setError(tooLarge);
+      event.target.value = '';
+      return;
     }
+    setError(null);
+    setSelectedFile(file);
+    setMediaFileName(file.name);
   };
 
   const uploadMediaFile = async (): Promise<{ s3Uri: string; fileName: string } | null> => {

@@ -564,6 +564,15 @@ export class ApiStack extends cdk.Stack {
       resources: [`arn:aws:s3:::${props.imageBuilderUploadsBucket}/software/*`],
     }));
 
+    // The library reports installers that no longer exist (#54). S3 returns
+    // 404 for a missing object only when the caller can list the bucket;
+    // without this it returns 403 and the file's state is unknown.
+    softwareLibraryFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:ListBucket'],
+      resources: [`arn:aws:s3:::${props.imageBuilderUploadsBucket}`],
+    }));
+
     // Grant KMS permissions if encryption key is provided
     if (props.dataEncryptionKey) {
       props.dataEncryptionKey.grantEncryptDecrypt(softwareLibraryFunction);

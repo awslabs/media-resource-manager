@@ -286,11 +286,16 @@ Pipelines use [EC2 Image Builder](https://docs.aws.amazon.com/imagebuilder/lates
 3. Build progress is tracked in the pipeline status (Building → Completed or Failed)
 4. When complete, the resulting AMI appears on the **Images** page
 
+Pipelines on a built-in base image (Windows Server, Ubuntu, Rocky Linux) always build on the latest AWS image for that OS. If AWS has published a newer image since the last build, MRM moves the pipeline to it before building, and the confirmation message shows the new image ID. Pipelines on an image from the **Images** page (for example a macOS DCV-Ready image or a golden image) keep using that exact image. If it has been deleted, the build is refused and you can choose a new base image from the message.
+
 **Editing a pipeline:**
 
 1. Select a pipeline and click **Edit**
 2. You can add, remove, or update software component versions
-3. Saving creates a new recipe version in Image Builder
+3. To change the base image, click **Change** next to **Base Image** and choose a new one. Only base images for the pipeline's platform are listed, because its components are built for that platform. You can move between versions, for example Windows Server 2022 to 2025 or Rocky Linux 8 to 9. Check that the pipeline's software supports the new version before you build.
+4. Saving creates a new recipe version in Image Builder. Earlier versions and AMIs you already built are not changed.
+
+System pipelines (macOS DCV-Ready base image builders) are managed by MRM, and their base image can't be changed.
 
 **Deleting a pipeline:**
 

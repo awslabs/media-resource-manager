@@ -30,6 +30,7 @@ import type { ColumnsType } from 'antd/es/table';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken } from '../utils/auth';
 import { apiCall } from '../utils/api';
+import { BUILT_IN_BASE_IMAGES, toMacosBaseImages, type BaseImage } from '../utils/baseImages';
 
 const { Title, Text } = Typography;
 
@@ -45,12 +46,18 @@ interface ImagePipeline {
   description?: string;
   status: 'CREATED' | 'BUILDING' | 'COMPLETED' | 'FAILED' | string;
   baseImageId: string;
+  // What the admin chose: a built-in ID such as 'windows-2025', or an AMI ID.
+  // Missing on pipelines created before v1.4.0 until their next edit or build.
+  baseImageSource?: string;
   baseOsVersion?: string;
+  platform?: string;
   components: PipelineComponent[];
   createdAt: string;
   updatedAt: string;
   pipelineArn: string;
   isSystemPipeline?: boolean;
+  // Why the last build failed, when it did.
+  statusMessage?: string;
 }
 
 interface SoftwareComponent {
@@ -59,6 +66,31 @@ interface SoftwareComponent {
   componentArn: string;
   componentVersion?: string;
   versionNumber?: string;
+}
+
+// Returned by edit and build when a pipeline's recipe moved to a newer AWS
+// base AMI (#49).
+interface BaseImageUpdate {
+  previousAmiId: string | null;
+  amiId: string;
+  baseOsVersion?: string;
+}
+
+const describeBaseImageUpdate = (update: BaseImageUpdate) => {
+  const os = update.baseOsVersion ? ` (${update.baseOsVersion})` : '';
+  const from = update.previousAmiId ? ` from ${update.previousAmiId}` : '';
+  return `Base image updated${from} to ${update.amiId}${os}.`;
+};
+
+// Error codes that mean the pipeline needs a new base image before it can be
+// edited or built.
+const BASE_IMAGE_MISSING_CODES = ['BASE_IMAGE_UNAVAILABLE', 'BASE_IMAGE_SOURCE_UNKNOWN'];
+
+interface PageAlert {
+  type: 'success' | 'error' | 'info' | 'warning';
+  message: string;
+  // Offers to open Edit pipeline with the base image picker shown.
+  changeBaseImageFor?: string;
 }
 
 interface PipelinesAntdProps {
@@ -87,7 +119,12 @@ const PipelinesAntd: React.FC<PipelinesAntdProps> = ({
   const [deleting, setDeleting] = useState(false);
   const [building, setBuilding] = useState(false);
   const [updating, setUpdating] = useState(false);
-  const [alert, setAlert] = useState<{ type: 'success' | 'error' | 'info' | 'warning'; message: string } | null>(null);
+  const [alert, setAlert] = useState<PageAlert | null>(null);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [showBasePicker, setShowBasePicker] = useState(false);
+  const [editBaseImageSource, setEditBaseImageSource] = useState<string | undefined>(undefined);
+  const [macosImages, setMacosImages] = useState<BaseImage[]>([]);
+  const [loadingMacosImages, setLoadingMacosImages] = useState(false);
   const [filterText, setFilterText] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
 
@@ -210,14 +247,71 @@ const PipelinesAntd: React.FC<PipelinesAntdProps> = ({
     } catch (e) {}
   };
 
-  const handleEditClick = () => {
-    if (selectedRowKeys.length !== 1) return;
-    const pipeline = selectedPipelines[0];
+  const fetchMacosImages = async () => {
+    setLoadingMacosImages(true);
+    try {
+      const token = getAuthToken();
+      if (!token) return;
+      const response = await apiCall('/images', {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.ok) {
+        setMacosImages(toMacosBaseImages(await response.json()));
+      }
+    } catch (error) {
+      console.error('Failed to load macOS images:', error);
+    } finally {
+      setLoadingMacosImages(false);
+    }
+  };
+
+  const openEditModal = (pipeline: ImagePipeline, options: { showBasePicker?: boolean } = {}) => {
     setEditingPipeline(pipeline);
     setEditPipelineComponents([...pipeline.components]);
+    setEditBaseImageSource(pipeline.baseImageSource);
+    setShowBasePicker(Boolean(options.showBasePicker) && !pipeline.isSystemPipeline);
+    setEditError(null);
     fetchSoftwareLibrary();
+    if (pipeline.platform === 'macOS') {
+      fetchMacosImages();
+    }
     setShowEditModal(true);
   };
+
+  const closeEditModal = () => {
+    setShowEditModal(false);
+    setEditingPipeline(null);
+    setEditError(null);
+    setShowBasePicker(false);
+  };
+
+  const handleEditClick = () => {
+    if (selectedRowKeys.length !== 1) return;
+    openEditModal(selectedPipelines[0]);
+  };
+
+  // Base images an admin can switch to: same platform only, because a
+  // pipeline's components are built for its platform.
+  const baseImageChoices = useMemo(() => {
+    if (!editingPipeline) return [];
+    const platform = editingPipeline.platform || 'Windows';
+    const choices = platform === 'macOS'
+      ? macosImages.map((img) => ({ label: `${img.name} (${img.id})`, value: img.id }))
+      : BUILT_IN_BASE_IMAGES
+          .filter((img) => img.platform === platform)
+          .map((img) => ({ label: img.name, value: img.id }));
+    // Keep the current base visible even if it is no longer listed.
+    const current = editingPipeline.baseImageSource;
+    if (current && !choices.some((choice) => choice.value === current)) {
+      choices.unshift({ label: `${current} (current)`, value: current });
+    }
+    return choices;
+  }, [editingPipeline, macosImages]);
+
+  const baseImageChanged = Boolean(
+    showBasePicker && editBaseImageSource && editBaseImageSource !== editingPipeline?.baseImageSource
+  );
 
   const handleUpdatePipeline = async () => {
     if (!editingPipeline) return;
@@ -235,26 +329,32 @@ const PipelinesAntd: React.FC<PipelinesAntdProps> = ({
         },
         body: JSON.stringify({
           components: editPipelineComponents,
+          ...(baseImageChanged ? { baseImageSource: editBaseImageSource } : {}),
         }),
       });
 
       if (response.ok) {
         const data = await response.json();
+        const baseNote = data.baseImageUpdate ? ` ${describeBaseImageUpdate(data.baseImageUpdate)}` : '';
         setAlert({
           type: 'success',
-          message: `Pipeline updated successfully. New recipe version: ${data.recipeVersion}`,
+          message: `Pipeline updated successfully. New recipe version: ${data.recipeVersion}.${baseNote}`,
         });
-        setShowEditModal(false);
-        setEditingPipeline(null);
+        closeEditModal();
         setSelectedRowKeys([]);
         fetchPipelines();
       } else {
-        const errorData = await response.json();
-        throw new Error(errorData.error || 'Failed to update pipeline');
+        // Keep the dialog open and show the error in it. If the base image is
+        // gone, show the picker so the admin can choose a new one.
+        const errorData = await response.json().catch(() => ({}));
+        if (BASE_IMAGE_MISSING_CODES.includes(errorData.code) && !editingPipeline.isSystemPipeline) {
+          setShowBasePicker(true);
+        }
+        setEditError(errorData.error || 'Failed to update pipeline');
       }
     } catch (error) {
       console.error('Error updating pipeline:', error);
-      setAlert({ type: 'error', message: `Failed to update pipeline: ${(error as Error).message}` });
+      setEditError(`Failed to update pipeline: ${(error as Error).message}`);
     } finally {
       setUpdating(false);
     }
@@ -303,19 +403,43 @@ const PipelinesAntd: React.FC<PipelinesAntdProps> = ({
       const token = getAuthToken();
       if (!token) throw new Error('No current user');
 
-      await Promise.all(
-        selectedPipelines.map((pipeline) =>
-          apiCall(`/images/pipelines/${pipeline.pipelineId}/execute`, {
+      // Check each response. A build can be refused, for example when a
+      // pipeline's custom base AMI no longer exists (#49).
+      const results = await Promise.all(
+        selectedPipelines.map(async (pipeline) => {
+          const response = await apiCall(`/images/pipelines/${pipeline.pipelineId}/execute`, {
             method: 'POST',
             headers: { Authorization: `Bearer ${token}` },
-          })
-        )
+          });
+          const data = await response.json().catch(() => ({}));
+          return { pipeline, ok: response.ok, data };
+        })
       );
 
-      setAlert({
-        type: 'success',
-        message: `${selectedPipelines.length} pipeline build(s) started successfully`,
-      });
+      const failures = results.filter((result) => !result.ok);
+      const baseNotes = results
+        .filter((result) => result.ok && result.data.baseImageUpdate)
+        .map((result) => `${result.pipeline.name}: ${describeBaseImageUpdate(result.data.baseImageUpdate)}`);
+      const started = results.length - failures.length;
+
+      if (failures.length === 0) {
+        setAlert({
+          type: 'success',
+          message: [`${started} pipeline build(s) started successfully.`, ...baseNotes].join(' '),
+        });
+      } else {
+        const failureNotes = failures.map(
+          (result) => `${result.pipeline.name}: ${result.data.error || 'Failed to start build'}`
+        );
+        const needsNewBase = failures.find(
+          (result) => BASE_IMAGE_MISSING_CODES.includes(result.data.code) && !result.pipeline.isSystemPipeline
+        );
+        setAlert({
+          type: started > 0 ? 'warning' : 'error',
+          message: [`Started ${started} of ${results.length} build(s).`, ...failureNotes, ...baseNotes].join(' '),
+          changeBaseImageFor: needsNewBase?.pipeline.pipelineId,
+        });
+      }
       fetchPipelines();
     } catch (error) {
       console.error('Error starting pipeline builds:', error);
@@ -462,9 +586,16 @@ const PipelinesAntd: React.FC<PipelinesAntdProps> = ({
       key: 'status',
       sorter: (a, b) => a.status.localeCompare(b.status),
       sortOrder: sortedInfo?.columnKey === 'status' ? sortedInfo.order : null,
-      render: (status) => (
-        <Tag color={getStatusColor(status)}>{formatStatus(status)}</Tag>
-      ),
+      render: (status, record) => {
+        const tag = <Tag color={getStatusColor(status)}>{formatStatus(status)}</Tag>;
+        // Show why a build failed. The reason is stored with the pipeline
+        // but was never displayed (#54).
+        return record.statusMessage && status?.toUpperCase().includes('FAILED') ? (
+          <Tooltip title={record.statusMessage}>{tag}</Tooltip>
+        ) : (
+          tag
+        );
+      },
     },
     {
       title: 'Created',
@@ -548,6 +679,22 @@ const PipelinesAntd: React.FC<PipelinesAntdProps> = ({
             message={alert.message}
             closable
             onClose={() => setAlert(null)}
+            action={
+              alert.changeBaseImageFor ? (
+                <Button
+                  size="small"
+                  onClick={() => {
+                    const pipeline = pipelines.find((p) => p.pipelineId === alert.changeBaseImageFor);
+                    if (pipeline) {
+                      setAlert(null);
+                      openEditModal(pipeline, { showBasePicker: true });
+                    }
+                  }}
+                >
+                  Change base image
+                </Button>
+              ) : undefined
+            }
             style={{ marginBottom: 16 }}
           />
         )}
@@ -652,12 +799,9 @@ const PipelinesAntd: React.FC<PipelinesAntdProps> = ({
 
       {/* Edit Pipeline Modal */}
       <Modal
-        title="Edit Pipeline Components"
+        title="Edit Pipeline"
         open={showEditModal}
-        onCancel={() => {
-          setShowEditModal(false);
-          setEditingPipeline(null);
-        }}
+        onCancel={closeEditModal}
         onOk={handleUpdatePipeline}
         confirmLoading={updating}
         okText="Update Pipeline"
@@ -666,9 +810,19 @@ const PipelinesAntd: React.FC<PipelinesAntdProps> = ({
       >
         <Alert
           type="info"
-          message="Updating components will create a new recipe version. The pipeline will use the updated recipe for future builds."
+          message="Saving creates a new recipe version. The pipeline uses the updated recipe for future builds."
           style={{ marginBottom: 16 }}
         />
+
+        {editError && (
+          <Alert
+            type="error"
+            message={editError}
+            closable
+            onClose={() => setEditError(null)}
+            style={{ marginBottom: 16 }}
+          />
+        )}
 
         {editingPipeline && (
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
@@ -677,7 +831,42 @@ const PipelinesAntd: React.FC<PipelinesAntdProps> = ({
             </div>
             <div>
               <Text strong>Base Image:</Text> {editingPipeline.baseOsVersion || editingPipeline.baseImageId}
+              {!editingPipeline.isSystemPipeline && !showBasePicker && (
+                <Button type="link" size="small" onClick={() => setShowBasePicker(true)}>
+                  Change
+                </Button>
+              )}
             </div>
+
+            {showBasePicker && (
+              <div>
+                <Text strong>New Base Image:</Text>
+                <Select
+                  style={{ width: '100%', marginTop: 4 }}
+                  placeholder="Choose a base image"
+                  value={editBaseImageSource}
+                  onChange={(value) => setEditBaseImageSource(value)}
+                  options={baseImageChoices}
+                  loading={loadingMacosImages}
+                  showSearch
+                  optionFilterProp="label"
+                  notFoundContent={loadingMacosImages ? 'Loading images...' : 'No base images available'}
+                />
+                <Text type="secondary" style={{ display: 'block', marginTop: 4 }}>
+                  Only {editingPipeline.platform || 'Windows'} base images are listed, because this pipeline's
+                  components are built for {editingPipeline.platform || 'Windows'}. Built-in bases always use the
+                  latest AWS image.
+                </Text>
+                {baseImageChanged && (
+                  <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginTop: 8 }}
+                    message="Check that the software in this pipeline supports the new base image before you build."
+                  />
+                )}
+              </div>
+            )}
 
             <div>
               <Text strong>Components:</Text>
