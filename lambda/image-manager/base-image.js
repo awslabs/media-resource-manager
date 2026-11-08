@@ -92,6 +92,13 @@ function isAmiId(value) {
   return typeof value === 'string' && /^ami-[0-9a-f]{8,17}$/.test(value);
 }
 
+const INVALID_BASE_IMAGE_MESSAGE = 'Base image must be a built-in base image ID (such as windows-2025) or an AMI ID.';
+
+// A base image an admin chose: a built-in base image ID or an AMI ID.
+function isValidBaseImageSource(value) {
+  return isSymbolicSource(value) || isAmiId(value);
+}
+
 function isImageUsable(image) {
   return Boolean(image) && !UNUSABLE_IMAGE_STATES.has(image.State);
 }
@@ -250,11 +257,7 @@ async function resolveRequestedBase(pipeline, requestedSource, deps) {
     }
     amiId = requestedSource;
   } else {
-    throw new BaseImageError(
-      'Base image must be a built-in base image ID (such as windows-2025) or an AMI ID.',
-      'INVALID_BASE_IMAGE',
-      400
-    );
+    throw new BaseImageError(INVALID_BASE_IMAGE_MESSAGE, 'INVALID_BASE_IMAGE', 400);
   }
 
   const previousAmiId = pipeline.baseImageId;
@@ -270,8 +273,10 @@ async function resolveRequestedBase(pipeline, requestedSource, deps) {
 module.exports = {
   BASE_IMAGE_SOURCES,
   BaseImageError,
+  INVALID_BASE_IMAGE_MESSAGE,
   isSymbolicSource,
   isAmiId,
+  isValidBaseImageSource,
   isImageUsable,
   sourceFromImage,
   detectBaseImageSource,

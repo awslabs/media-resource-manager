@@ -16,8 +16,8 @@ const { ImagebuilderClient, CreateImagePipelineCommand, CreateImageRecipeCommand
         ListImageRecipesCommand, GetDistributionConfigurationCommand } = require('@aws-sdk/client-imagebuilder');
 const { validateDisplayName, toImageBuilderName, toComponentName, toAmiNameBase,
         buildImageMatchPatterns, imageMatchesAnyPattern } = require('./naming');
-const { BASE_IMAGE_SOURCES, BaseImageError, isSymbolicSource, resolvePipelineBase,
-        resolveRequestedBase } = require('./base-image');
+const { BASE_IMAGE_SOURCES, BaseImageError, INVALID_BASE_IMAGE_MESSAGE, isSymbolicSource,
+        isValidBaseImageSource, resolvePipelineBase, resolveRequestedBase } = require('./base-image');
 
 // STS client for getting account ID
 const stsClient = new STSClient({ region: process.env.AWS_REGION });
@@ -1044,6 +1044,15 @@ async function createImagePipeline(pipelineData, event) {
       statusCode: 400,
       headers: { 'Content-Type': 'application/json', ...corsHeaders },
       body: JSON.stringify({ error: inputError })
+    };
+  }
+  // Same rule as Edit pipeline. baseImageId is stored as the pipeline's
+  // baseImageSource, which later builds resolve (#49).
+  if (!isValidBaseImageSource(baseImageId)) {
+    return {
+      statusCode: 400,
+      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+      body: JSON.stringify({ error: INVALID_BASE_IMAGE_MESSAGE, code: 'INVALID_BASE_IMAGE' })
     };
   }
 

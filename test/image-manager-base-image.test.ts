@@ -13,6 +13,7 @@ const {
   sourceFromImage,
   platformOfImage,
   resolveRequestedBase,
+  isValidBaseImageSource,
 } = baseImage;
 
 const ACCOUNT_ID = '123456789012';
@@ -210,6 +211,24 @@ describe('platformOfImage', () => {
     expect(platformOfImage({ Name: 'Rocky-8-EC2-Base-8.10' })).toBe('Linux');
     expect(platformOfImage({ Architecture: 'arm64_mac', Name: 'amzn-ec2-macos-15.5' })).toBe('macOS');
     expect(platformOfImage({ Name: 'golden', Tags: [{ Key: 'Platform', Value: 'macOS' }] })).toBe('macOS');
+  });
+});
+
+describe('isValidBaseImageSource (create pipeline)', () => {
+  it('accepts built-in base image IDs and AMI IDs', () => {
+    for (const value of ['windows-2025', 'ubuntu-22.04', 'rocky-8', 'ami-12345678', CUSTOM_AMI]) {
+      expect(isValidBaseImageSource(value)).toBe(true);
+    }
+  });
+
+  it('rejects anything else', () => {
+    for (const value of [
+      'windows-2016', 'ami-xyz', 'ami-0CCCCCCCCCCCCCCC3', 'snap-0123456789abcdef0',
+      'arn:aws:imagebuilder:us-east-1:aws:image/windows-server-2025-english-full-base-x86/x.x.x',
+      '__proto__', 'toString', '', undefined, null, { id: 'windows-2025' },
+    ]) {
+      expect(isValidBaseImageSource(value)).toBe(false);
+    }
   });
 });
 
