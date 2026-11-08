@@ -3,7 +3,7 @@
 
 const { S3Client, ListBucketsCommand, GetBucketLocationCommand } = require('@aws-sdk/client-s3');
 const { requireAdmin } = require('./authz');
-const { redactForLog } = require('./log-redact');
+const { redactForLog } = require('../shared/log-redact');
 
 const s3Client = new S3Client({ region: process.env.AWS_REGION });
 

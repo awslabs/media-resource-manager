@@ -5,7 +5,7 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, DeleteCommand, QueryCommand } = require('@aws-sdk/lib-dynamodb');
 const { DataSyncClient, DeleteLocationCommand } = require('@aws-sdk/client-datasync');
 const { requireAdmin } = require('./authz');
-const { redactForLog } = require('./log-redact');
+const { redactForLog } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);

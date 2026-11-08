@@ -14,7 +14,7 @@ const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
 const { requireAdmin } = require('./authz');
-const { redactForLog } = require('./log-redact');
+const { redactForLog } = require('../shared/log-redact');
 
 const identitystore = new IdentitystoreClient({});
 const ssoAdmin = new SSOAdminClient({});

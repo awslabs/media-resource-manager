@@ -9,7 +9,7 @@
  */
 
 const { EC2Client, DescribeAvailabilityZonesCommand, DescribeInstanceTypeOfferingsCommand } = require('@aws-sdk/client-ec2');
-const { redactForLog } = require('./log-redact');
+const { redactForLog } = require('../shared/log-redact');
 
 const corsHeaders = {
   'Content-Type': 'application/json',

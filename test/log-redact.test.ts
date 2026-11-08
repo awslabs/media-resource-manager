@@ -1,16 +1,19 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 /**
- * Unit tests for the log redaction helper. Like authz.js, the helper is
- * copied byte-identical into every Lambda that logs its event; one copy is
- * tested here, and the last test checks that the copies match.
+ * Unit tests for the log redaction helper (lambda/shared/log-redact.js) and
+ * for packaging it with the Lambdas that use it.
  */
-import * as crypto from 'crypto';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import * as cdk from 'aws-cdk-lib';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import { Template } from 'aws-cdk-lib/assertions';
+import { lambdaCodeWithShared } from '../lib/lambda-code';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { redactForLog, REDACTED } = require('../lambda/workstation-manager/log-redact.js');
+const { redactForLog, REDACTED } = require('../lambda/shared/log-redact.js');
 
 const JWT = 'eyJraWQiOiJhYmMifQ.eyJzdWIiOiIxMjMifQ.c2lnbmF0dXJlLXZhbHVl';
 const LAMBDA_DIR = path.join(__dirname, '..', 'lambda');
@@ -117,20 +120,61 @@ describe('redactForLog', () => {
   });
 });
 
-describe('log-redact.js copies', () => {
-  const handlers = fs.readdirSync(LAMBDA_DIR)
-    .filter(dir => fs.existsSync(path.join(LAMBDA_DIR, dir, 'index.js')))
-    .filter(dir => fs.readFileSync(path.join(LAMBDA_DIR, dir, 'index.js'), 'utf8').includes("require('./log-redact')"));
+describe('lambdaCodeWithShared', () => {
+  it('packages only the function folder and lambda/shared', () => {
+    const outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'mrm-lambda-code-'));
+    try {
+      const app = new cdk.App({ outdir });
+      const stack = new cdk.Stack(app, 'LambdaCodeTest');
+      new lambda.Function(stack, 'Fn', { runtime: lambda.Runtime.NODEJS_22_X, ...lambdaCodeWithShared('software-library') });
+      Template.fromStack(stack).hasResourceProperties('AWS::Lambda::Function', { Handler: 'software-library/index.handler' });
+      app.synth();
 
-  it('is used by the API handlers', () => {
-    expect(handlers.length).toBeGreaterThanOrEqual(34);
+      const assetDir = fs.readdirSync(outdir).find(name => name.startsWith('asset.'))!;
+      const files: string[] = [];
+      const walk = (dir: string, rel: string) => {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          const relPath = path.join(rel, entry.name);
+          if (entry.isDirectory()) walk(path.join(dir, entry.name), relPath); else files.push(relPath);
+        }
+      };
+      walk(path.join(outdir, assetDir), '');
+      expect(files).toContain(path.join('software-library', 'index.js'));
+      expect(files).toContain(path.join('shared', 'log-redact.js'));
+      expect(files.every(file => file.startsWith(`software-library${path.sep}`) || file.startsWith(`shared${path.sep}`))).toBe(true);
+    } finally {
+      fs.rmSync(outdir, { recursive: true, force: true });
+    }
   });
 
-  it('is present and byte-identical in every Lambda that requires it', () => {
-    const hash = (file: string) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
-    const reference = hash(path.join(LAMBDA_DIR, 'workstation-manager', 'log-redact.js'));
-    for (const dir of handlers) {
-      expect({ dir, hash: hash(path.join(LAMBDA_DIR, dir, 'log-redact.js')) }).toEqual({ dir, hash: reference });
+  it('rejects directory names that would change the package', () => {
+    for (const dir of ['shared', '../lib', 'a/b', '*', '']) {
+      expect(() => lambdaCodeWithShared(dir)).toThrow(/invalid Lambda directory/);
     }
+  });
+});
+
+describe('Lambdas that use lambda/shared', () => {
+  const usesShared = fs.readdirSync(LAMBDA_DIR)
+    .filter(dir => fs.existsSync(path.join(LAMBDA_DIR, dir, 'index.js')))
+    .filter(dir => fs.readFileSync(path.join(LAMBDA_DIR, dir, 'index.js'), 'utf8').includes("require('../shared/"));
+  const cdkSource = ['api-stack.ts', 'datasync-stack.ts', 'storage-stack.ts']
+    .map(file => fs.readFileSync(path.join(__dirname, '..', 'lib', file), 'utf8'))
+    .join('\n');
+
+  it('include the API handlers that log their event', () => {
+    expect(usesShared.length).toBeGreaterThanOrEqual(34);
+  });
+
+  it('are packaged with lambdaCodeWithShared, so shared/ is in their package', () => {
+    for (const dir of usesShared) {
+      expect({ dir, packagedWithShared: cdkSource.includes(`lambdaCodeWithShared('${dir}')`) })
+        .toEqual({ dir, packagedWithShared: true });
+    }
+  });
+
+  it('have no leftover copies of the shared module', () => {
+    const copies = fs.readdirSync(LAMBDA_DIR).filter(dir => dir !== 'shared' && fs.existsSync(path.join(LAMBDA_DIR, dir, 'log-redact.js')));
+    expect(copies).toEqual([]);
   });
 });

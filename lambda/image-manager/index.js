@@ -284,7 +284,7 @@ async function handleICEErrorAndRetry(pipelineId, pipelineArn) {
 
 const crypto = require('crypto');
 const { requireAdmin } = require('./authz');
-const { redactForLog } = require('./log-redact');
+const { redactForLog } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamoDocClient = DynamoDBDocumentClient.from(dynamoClient);

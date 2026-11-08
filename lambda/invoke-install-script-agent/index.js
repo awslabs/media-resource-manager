@@ -14,7 +14,7 @@ const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { SFNClient, StartExecutionCommand } = require('@aws-sdk/client-sfn');
 const { randomUUID } = require('crypto');
 const { requireAdmin } = require('./authz');
-const { redactForLog } = require('./log-redact');
+const { redactForLog } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const docClient = DynamoDBDocumentClient.from(dynamoClient);

@@ -7,7 +7,7 @@ const { DirectoryServiceClient, DescribeDirectoriesCommand } = require('@aws-sdk
 const { DirectoryServiceDataClient, ListGroupMembersCommand, DescribeUserCommand, ListGroupsForMemberCommand } = require('@aws-sdk/client-directory-service-data');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { CognitoIdentityProviderClient, AdminGetUserCommand } = require('@aws-sdk/client-cognito-identity-provider');
-const { redactForLog } = require('./log-redact');
+const { redactForLog } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);

@@ -8,8 +8,9 @@
  * header, and request bodies can carry other secrets. Log
  * redactForLog(event) instead of the event itself.
  *
- * This file is copied byte-identical into every Lambda that uses it, the same
- * way as authz.js. test/log-redact.test.ts checks that the copies match.
+ * Lambdas load it with require('../shared/log-redact'). Their CDK
+ * definitions use lambdaCodeWithShared() (lib/lambda-code.ts), which packages
+ * this folder alongside the function's own folder.
  */
 
 const REDACTED = '[REDACTED]';

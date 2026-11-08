@@ -11,7 +11,7 @@
 
 const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
 const { requireAdmin } = require('./authz');
-const { redactForLog } = require('./log-redact');
+const { redactForLog } = require('../shared/log-redact');
 
 const bedrockClient = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
 
