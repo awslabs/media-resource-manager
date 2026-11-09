@@ -550,6 +550,7 @@ Lambda creates each function's log group on its first run, and by default CloudW
 - Default: `365` days. Allowed values are the ones CloudWatch Logs accepts: 1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653.
 - `0` turns this off: the `MRM-Log-Retention` stack isn't created, and log retention is left as it is.
 - You can also set `LambdaLogRetentionDays` in `parameters.json`. A value in `cdk.json` takes precedence.
+- [CodeBuild deployments](#codebuild-deployment) use the default until the setting is in their saved config. To set it, start a build with the override `{"LambdaLogRetentionDays":"90"}` (Option B), and later builds keep it. Write the value as a string. A numeric `0` is ignored, so retention stays at 365 days.
 - When retention is first applied, CloudWatch deletes events in those log groups that are older than the retention period.
 
 ### 2. Infrastructure Parameters (`parameters.json`)
