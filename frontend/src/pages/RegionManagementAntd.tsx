@@ -21,11 +21,12 @@ import {
   Breadcrumb,
   Spin,
 } from 'antd';
-import { PlusOutlined, DeleteOutlined, ReloadOutlined, HomeOutlined, AppleOutlined } from '@ant-design/icons';
+import { PlusOutlined, DeleteOutlined, ReloadOutlined, HomeOutlined, AppleOutlined, SyncOutlined } from '@ant-design/icons';
 import type { ColumnsType } from 'antd/es/table';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken } from '../utils/auth';
 import { apiCall } from '../utils/api';
+import { forgetRegionalHubUpdates, rememberRegionalHubs } from '../utils/regionalHubUpdates';
 
 const { Title, Text, Link } = Typography;
 
@@ -58,7 +59,14 @@ interface RegionalHub {
   updatedAt?: string;
   errorMessage?: string;
   isPrimary?: boolean;
+  // Set by the API when the hub runs older regional code than this deployment.
+  updateAvailable?: boolean;
+  lastError?: string;
 }
+
+// Statuses that change on their own, so the page refreshes while any hub has one.
+const TRANSIENT_STATUSES = ['pending', 'validating', 'creating', 'initializing', 'updating', 'deleting'];
+const UPDATABLE_STATUSES = ['available', 'update_failed'];
 
 interface RegionManagementAntdProps {
   user: any;
@@ -255,6 +263,8 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
   const [deleting, setDeleting] = useState(false);
   const [creating, setCreating] = useState(false);
   const [alert, setAlert] = useState<{ type: 'success' | 'error' | 'info'; message: string } | null>(null);
+  const [hubToUpdate, setHubToUpdate] = useState<RegionalHub | null>(null);
+  const [startingUpdate, setStartingUpdate] = useState(false);
 
   // Availability zones state
   const [availabilityZones, setAvailabilityZones] = useState<AvailabilityZone[]>([]);
@@ -306,9 +316,17 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
     fetchRegions();
   }, []);
 
-  const fetchRegions = async () => {
+  // Refresh while a hub is being created, updated, or deleted.
+  const hasTransientHub = regions.some(r => TRANSIENT_STATUSES.includes(r.status));
+  useEffect(() => {
+    if (!hasTransientHub) return undefined;
+    const timer = setInterval(() => fetchRegions(true), 30000);
+    return () => clearInterval(timer);
+  }, [hasTransientHub]);
+
+  const fetchRegions = async (background = false) => {
     try {
-      setLoading(true);
+      if (!background) setLoading(true);
       const token = getAuthToken();
       if (!token) throw new Error('No current user');
 
@@ -323,6 +341,8 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
       const data = await response.json();
       const regionsData = data.success ? data.data : (Array.isArray(data) ? data : []);
       setRegions(regionsData);
+      // Keep the update banner and sidebar badge in step with this page.
+      rememberRegionalHubs(regionsData);
     } catch (error) {
       console.error('Error fetching regions:', error);
       setAlert({ type: 'error', message: `Failed to fetch regions: ${(error as Error).message}` });
@@ -464,6 +484,43 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
     }
   };
 
+  const handleUpdateRegion = async () => {
+    if (!hubToUpdate) return;
+    setStartingUpdate(true);
+    try {
+      const token = getAuthToken();
+      if (!token) throw new Error('No current user');
+
+      const response = await apiCall(`regions/${hubToUpdate.region}`, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ region: hubToUpdate.region })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(result.error || `HTTP ${response.status}`);
+      }
+
+      setAlert({
+        type: 'info',
+        message: response.status === 200
+          ? `${hubToUpdate.displayName} is already up to date.`
+          : `Update started for ${hubToUpdate.displayName}. It can take several minutes, and this page refreshes until it finishes.`
+      });
+      setHubToUpdate(null);
+      forgetRegionalHubUpdates();
+      fetchRegions();
+    } catch (error) {
+      console.error('Error updating regional hub:', error);
+      setAlert({ type: 'error', message: `Failed to update ${hubToUpdate.displayName}: ${(error as Error).message}` });
+    } finally {
+      setStartingUpdate(false);
+    }
+  };
+
   const getStatusTag = (status: string, isPrimary?: boolean) => {
     if (isPrimary) return <Tag color="blue">Primary</Tag>;
     switch (status) {
@@ -474,6 +531,8 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
       case 'failed':
       case 'delete-failed': return <Tag color="red">Failed</Tag>;
       case 'initializing': return <Tag color="processing">Initializing</Tag>;
+      case 'updating': return <Tag color="processing">Updating</Tag>;
+      case 'update_failed': return <Tag color="red">Update failed</Tag>;
       default: return <Tag>{status}</Tag>;
     }
   };
@@ -536,7 +595,18 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
       key: 'status',
       sorter: (a, b) => a.status.localeCompare(b.status),
       sortOrder: sortedInfo?.columnKey === 'status' ? sortedInfo.order : null,
-      render: (status, record) => getStatusTag(status, record.isPrimary),
+      render: (status, record) => (
+        <Space size={4}>
+          {status === 'update_failed' && record.lastError
+            ? <Tooltip title={record.lastError}>{getStatusTag(status, record.isPrimary)}</Tooltip>
+            : getStatusTag(status, record.isPrimary)}
+          {record.updateAvailable && (
+            <Tooltip title="This hub runs older regional code than this deployment. Update it to install the current code.">
+              <Tag color="orange">Update available</Tag>
+            </Tooltip>
+          )}
+        </Space>
+      ),
     },
     {
       title: 'Workstations',
@@ -577,6 +647,22 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
         return parsed.toLocaleDateString();
       },
     },
+    {
+      title: '',
+      key: 'actions',
+      align: 'right',
+      render: (_, record) => record.isPrimary ? null : (
+        <Button
+          size="small"
+          icon={<SyncOutlined />}
+          type={record.updateAvailable ? 'primary' : 'default'}
+          disabled={!UPDATABLE_STATUSES.includes(record.status)}
+          onClick={() => setHubToUpdate(record)}
+        >
+          Update
+        </Button>
+      ),
+    },
   ];
 
   const detailsTabItems = selectedRegion ? [
@@ -593,6 +679,9 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
           <Descriptions.Item label="VPC ID">{selectedRegion.vpcId || '-'}</Descriptions.Item>
           <Descriptions.Item label="Created">{selectedRegion.createdAt ? new Date(selectedRegion.createdAt).toLocaleString() : '-'}</Descriptions.Item>
           <Descriptions.Item label="Last Updated">{selectedRegion.updatedAt ? new Date(selectedRegion.updatedAt).toLocaleString() : '-'}</Descriptions.Item>
+          {selectedRegion.lastError && (
+            <Descriptions.Item label="Last error" span={2}>{selectedRegion.lastError}</Descriptions.Item>
+          )}
         </Descriptions>
       ),
     },
@@ -667,7 +756,7 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
           <Title level={3} style={{ margin: 0 }}>Regional Hubs</Title>
           <Space>
             <Tooltip title="Refresh">
-              <Button icon={<ReloadOutlined />} onClick={fetchRegions} loading={loading} />
+              <Button icon={<ReloadOutlined />} onClick={() => fetchRegions()} loading={loading} />
             </Tooltip>
             <Button
               icon={<DeleteOutlined />}
@@ -994,6 +1083,32 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
             <Alert type="info" message="The primary region cannot be deleted and will be skipped." />
           )}
         </div>
+      </Modal>
+
+      {/* Update Confirmation Modal */}
+      <Modal
+        title={hubToUpdate ? `Update ${hubToUpdate.displayName}` : 'Update Regional Hub'}
+        open={hubToUpdate !== null}
+        onCancel={() => setHubToUpdate(null)}
+        onOk={handleUpdateRegion}
+        confirmLoading={startingUpdate}
+        okText="Update"
+      >
+        {hubToUpdate && (
+          <Space direction="vertical" size="small">
+            <Text>
+              MRM rebuilds this hub's CloudFormation template from the current code and updates its stack in {hubToUpdate.region}.
+              This installs the current regional Lambda code, including security fixes.
+            </Text>
+            <Text>
+              Workstations in the region keep running, and the existing DCV Session Manager and Connection Gateway instances aren't replaced.
+              The update can take several minutes.
+            </Text>
+            {hubToUpdate.status === 'update_failed' && hubToUpdate.lastError && (
+              <Alert type="warning" showIcon message="The last update failed" description={hubToUpdate.lastError} />
+            )}
+          </Space>
+        )}
       </Modal>
 
       {/* Region Details Modal */}

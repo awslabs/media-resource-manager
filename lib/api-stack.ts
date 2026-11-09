@@ -25,6 +25,8 @@ import * as targets from 'aws-cdk-lib/aws-events-targets';
 import { Construct } from 'constructs';
 import { StorageStack } from './storage-stack';
 import { DataSyncStack } from './datasync-stack';
+import { lambdaCodeWithShared } from './lambda-code';
+import { regionalHubTemplateVersion } from './regional-hub-version';
 
 export interface ApiStackProps extends cdk.StackProps {
   productName: string;
@@ -409,8 +411,7 @@ export class ApiStack extends cdk.Stack {
     const identityCenterSyncFunction = new lambda.Function(this, 'IdentityCenterSyncFunction', {
       functionName: `${props.acronym.toLowerCase()}-identity-center-sync`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/identity-center-sync'),
+      ...lambdaCodeWithShared('identity-center-sync'),
       timeout: cdk.Duration.minutes(5),
       reservedConcurrentExecutions: 5,
       environmentEncryption: props.dataEncryptionKey,
@@ -451,8 +452,7 @@ export class ApiStack extends cdk.Stack {
     const userDetailsManagerFunction = new lambda.Function(this, 'UserDetailsManagerFunction', {
       functionName: `${props.acronym.toLowerCase()}-user-details-manager`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/user-details-manager'),
+      ...lambdaCodeWithShared('user-details-manager'),
       timeout: cdk.Duration.minutes(5),
       reservedConcurrentExecutions: 20,
       environmentEncryption: props.dataEncryptionKey,
@@ -502,9 +502,8 @@ export class ApiStack extends cdk.Stack {
     const imageManagerFunction = new lambda.Function(this, 'ImageManagerFunction', {
       functionName: `${props.acronym.toLowerCase()}-image-manager`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
       description: 'Image management function',
-      code: lambda.Code.fromAsset('lambda/image-manager'),
+      ...lambdaCodeWithShared('image-manager'),
       environmentEncryption: props.dataEncryptionKey,
       environment: {
         ...lambdaEnvironment,
@@ -540,9 +539,8 @@ export class ApiStack extends cdk.Stack {
     const softwareLibraryFunction = new lambda.Function(this, 'SoftwareLibraryFunction', {
       functionName: `${props.acronym.toLowerCase()}-software-library`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
       description: 'Software library management function',
-      code: lambda.Code.fromAsset('lambda/software-library'),
+      ...lambdaCodeWithShared('software-library'),
       environmentEncryption: props.dataEncryptionKey,
       environment: {
         ...lambdaEnvironment,
@@ -588,9 +586,8 @@ export class ApiStack extends cdk.Stack {
       invokeInstallScriptAgentFunction = new lambda.Function(this, 'InvokeInstallScriptAgentFunction', {
         functionName: `${props.acronym.toLowerCase()}-invoke-install-script-agent`,
         runtime: lambda.Runtime.NODEJS_22_X,
-        handler: 'index.handler',
         description: 'Invokes the Install Script Agent to generate installation scripts',
-        code: lambda.Code.fromAsset('lambda/invoke-install-script-agent'),
+        ...lambdaCodeWithShared('invoke-install-script-agent'),
         environmentEncryption: props.dataEncryptionKey,
         environment: {
           ...lambdaEnvironment,
@@ -635,9 +632,8 @@ export class ApiStack extends cdk.Stack {
       installScriptProgressFunction = new lambda.Function(this, 'InstallScriptProgressFunction', {
         functionName: `${props.acronym.toLowerCase()}-install-script-progress`,
         runtime: lambda.Runtime.NODEJS_22_X,
-        handler: 'index.handler',
         description: 'Streams progress updates for script generation via SSE',
-        code: lambda.Code.fromAsset('lambda/install-script-progress'),
+        ...lambdaCodeWithShared('install-script-progress'),
         environmentEncryption: props.dataEncryptionKey,
         environment: {
           ...lambdaEnvironment,
@@ -659,9 +655,8 @@ export class ApiStack extends cdk.Stack {
       cancelInstallScriptFunction = new lambda.Function(this, 'CancelInstallScriptFunction', {
         functionName: `${props.acronym.toLowerCase()}-cancel-install-script`,
         runtime: lambda.Runtime.NODEJS_22_X,
-        handler: 'index.handler',
         description: 'Cancels ongoing script generation and cleans up resources',
-        code: lambda.Code.fromAsset('lambda/cancel-install-script'),
+        ...lambdaCodeWithShared('cancel-install-script'),
         environmentEncryption: props.dataEncryptionKey,
         environment: {
           ...lambdaEnvironment,
@@ -690,9 +685,8 @@ export class ApiStack extends cdk.Stack {
       chatRequirementsFunction = new lambda.Function(this, 'ChatRequirementsFunction', {
         functionName: `${props.acronym.toLowerCase()}-chat-requirements`,
         runtime: lambda.Runtime.NODEJS_22_X,
-        handler: 'index.handler',
         description: 'Conversational chatbot for gathering installation script requirements',
-        code: lambda.Code.fromAsset('lambda/chat-requirements'),
+        ...lambdaCodeWithShared('chat-requirements'),
         environmentEncryption: props.dataEncryptionKey,
         environment: {
           ...lambdaEnvironment,
@@ -720,8 +714,7 @@ export class ApiStack extends cdk.Stack {
     const fsxSmbMountManagerFunction = new lambda.Function(this, 'FsxMountManagerFunction', {
       functionName: `${props.acronym.toLowerCase()}-fsx-mount-manager`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/fsx-smb-mount-manager'),
+      ...lambdaCodeWithShared('fsx-smb-mount-manager'),
       timeout: cdk.Duration.minutes(10),
       reservedConcurrentExecutions: 5,
       description: 'Manage FSx SMB volume mounting via Windows login scripts',
@@ -800,9 +793,8 @@ export class ApiStack extends cdk.Stack {
     const workstationManagerFunction = new lambda.Function(this, 'WorkstationManagerFunction', {
       functionName: `${props.acronym.toLowerCase()}-workstation-manager`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
       description: 'Workstation management function',
-      code: lambda.Code.fromAsset('lambda/workstation-manager'),
+      ...lambdaCodeWithShared('workstation-manager'),
       environmentEncryption: props.dataEncryptionKey,
       environment: {
         ...lambdaEnvironment,
@@ -1571,8 +1563,7 @@ export class ApiStack extends cdk.Stack {
     const listRegionalHubsFunction = new lambda.Function(this, 'ListRegionalHubsFunction', {
       functionName: `${props.acronym.toLowerCase()}-list-regional-hubs`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/list-regional-hubs'),
+      ...lambdaCodeWithShared('list-regional-hubs'),
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
       environmentEncryption: props.dataEncryptionKey,
@@ -1581,6 +1572,7 @@ export class ApiStack extends cdk.Stack {
         WORKSTATION_TABLE_NAME: props.workstationTable.tableName,
         VPC_ID: props.vpc.vpcId,
         DCV_ENDPOINT: sessionManagerNlbDns,
+        REGIONAL_HUB_TEMPLATE_VERSION: regionalHubTemplateVersion(),
       },
     });
 
@@ -1594,8 +1586,7 @@ export class ApiStack extends cdk.Stack {
     const getRegionalHubFunction = new lambda.Function(this, 'GetRegionalHubFunction', {
       functionName: `${props.acronym.toLowerCase()}-get-regional-hub`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/get-regional-hub'),
+      ...lambdaCodeWithShared('get-regional-hub'),
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
       environmentEncryption: props.dataEncryptionKey,
@@ -1605,6 +1596,7 @@ export class ApiStack extends cdk.Stack {
         VPC_ID: props.vpc.vpcId,
         DCV_ENDPOINT: sessionManagerNlbDns,
         PASCAL_CASE_NAME: props.pascalCaseName,
+        REGIONAL_HUB_TEMPLATE_VERSION: regionalHubTemplateVersion(),
       },
     });
 
@@ -1628,8 +1620,7 @@ export class ApiStack extends cdk.Stack {
     const createRegionalHubFunction = new lambda.Function(this, 'CreateRegionalHubFunction', {
       functionName: `${props.acronym.toLowerCase()}-create-regional-hub`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/create-regional-hub'),
+      ...lambdaCodeWithShared('create-regional-hub'),
       timeout: cdk.Duration.minutes(1),
       reservedConcurrentExecutions: 5,
       environmentEncryption: props.dataEncryptionKey,
@@ -1642,8 +1633,7 @@ export class ApiStack extends cdk.Stack {
     const deleteRegionalHubFunction = new lambda.Function(this, 'DeleteRegionalHubFunction', {
       functionName: `${props.acronym.toLowerCase()}-delete-regional-hub`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/delete-regional-hub'),
+      ...lambdaCodeWithShared('delete-regional-hub'),
       timeout: cdk.Duration.minutes(1),
       reservedConcurrentExecutions: 5,
       environmentEncryption: props.dataEncryptionKey,
@@ -1657,8 +1647,7 @@ export class ApiStack extends cdk.Stack {
     const updateRegionalHubFunction = new lambda.Function(this, 'UpdateRegionalHubFunction', {
       functionName: `${props.acronym.toLowerCase()}-update-regional-hub`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/update-regional-hub'),
+      ...lambdaCodeWithShared('update-regional-hub'),
       timeout: cdk.Duration.minutes(2),
       reservedConcurrentExecutions: 5,
       environmentEncryption: props.dataEncryptionKey,
@@ -1669,9 +1658,10 @@ export class ApiStack extends cdk.Stack {
       },
     });
 
-    // Grant DynamoDB permissions to regional hub functions
-    props.regionalHubsTable.grantReadData(listRegionalHubsFunction);
-    props.regionalHubsTable.grantReadData(getRegionalHubFunction);
+    // Grant DynamoDB permissions to regional hub functions. List and get
+    // also write: they record the result of a finished hub update.
+    props.regionalHubsTable.grantReadWriteData(listRegionalHubsFunction);
+    props.regionalHubsTable.grantReadWriteData(getRegionalHubFunction);
     props.regionalHubsTable.grantReadWriteData(createRegionalHubFunction);
     props.regionalHubsTable.grantReadWriteData(deleteRegionalHubFunction);
     props.regionalHubsTable.grantReadWriteData(updateRegionalHubFunction);
@@ -1688,6 +1678,15 @@ export class ApiStack extends cdk.Stack {
       props.dataEncryptionKey.grantEncryptDecrypt(deleteRegionalHubFunction);
       props.dataEncryptionKey.grantEncryptDecrypt(updateRegionalHubFunction);
     }
+
+    // List and get check the stack of a hub that is updating, in the hub's region.
+    const regionalHubStackStatusPolicy = new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['cloudformation:DescribeStacks'],
+      resources: [`arn:aws:cloudformation:*:${this.account}:stack/${props.acronym}-Regional-Hub-*/*`],
+    });
+    listRegionalHubsFunction.addToRolePolicy(regionalHubStackStatusPolicy);
+    getRegionalHubFunction.addToRolePolicy(regionalHubStackStatusPolicy);
 
     // Grant EC2 permissions for region/AZ validation
     createRegionalHubFunction.addToRolePolicy(new iam.PolicyStatement({
@@ -1757,8 +1756,7 @@ export class ApiStack extends cdk.Stack {
     const getAvailabilityZonesFunction = new lambda.Function(this, 'GetAvailabilityZonesFunction', {
       functionName: `${props.acronym.toLowerCase()}-get-availability-zones`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/get-availability-zones'),
+      ...lambdaCodeWithShared('get-availability-zones'),
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
       environmentEncryption: props.dataEncryptionKey,

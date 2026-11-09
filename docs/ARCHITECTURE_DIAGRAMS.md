@@ -343,6 +343,9 @@ graph TD
         S12[MRM-Frontend<br/>S3, CloudFront]
         S13[MRM-Events<br/>EventBridge Rules]
     end
+    subgraph "Operations"
+        S14[MRM-Log-Retention<br/>Lambda Log Retention]
+    end
 
     S1 --> S2
     S1 --> S3
@@ -361,6 +364,7 @@ graph TD
     S10 --> S11
     S11 --> S12
     S11 --> S13
+    S13 --> S14
 
     style S1 fill:#3B48CC,color:white
     style S2 fill:#8B5CF6,color:white
@@ -370,9 +374,10 @@ graph TD
 
 ### Deployment Notes
 
-- **13 specialized stacks** deployed in dependency order for modularity and independent updates.
+- **14 specialized stacks** deployed in dependency order for modularity and independent updates.
 - **MRM-Infrastructure** is the foundation — all other stacks depend on it for VPC, database, identity, and encryption resources.
 - **MRM-Api** is the central hub — it depends on the DCV and workstation stacks for their Step Functions ARNs.
+- **MRM-Log-Retention** depends on every other stack, so it deploys last. It sets a retention period on the Lambda log groups of all stacks and regional hubs (`lambdaLogRetentionDays`, 365 days by default).
 - Stacks can be updated independently. For example, updating the frontend doesn't require redeploying the infrastructure.
 
 ---

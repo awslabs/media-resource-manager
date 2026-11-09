@@ -3,6 +3,7 @@
 
 const { S3Client, ListBucketsCommand, GetBucketLocationCommand } = require('@aws-sdk/client-s3');
 const { requireAdmin } = require('./authz');
+const { redactForLog } = require('../shared/log-redact');
 
 const s3Client = new S3Client({ region: process.env.AWS_REGION });
 
@@ -13,7 +14,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-  console.log('ListS3Buckets event:', JSON.stringify(event, null, 2));
+  console.log('ListS3Buckets event:', JSON.stringify(redactForLog(event), null, 2));
 
   // Handle /datasync/config endpoint - returns DataSync role ARN for cross-account bucket policy.
   // Same rationale as /storage/config: exposing an owned role ARN + account

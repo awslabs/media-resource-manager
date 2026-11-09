@@ -21,7 +21,7 @@ const licenseManager = new LicenseManagerClient();
 const ssm = new SSMClient();
 
 exports.handler = async (event, context) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  console.log('Event:', JSON.stringify({ ...event, ResponseURL: event.ResponseURL && '[REDACTED]' }, null, 2));
   
   const requestType = event.RequestType;
   const props = event.ResourceProperties;

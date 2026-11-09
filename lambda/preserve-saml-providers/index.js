@@ -58,7 +58,7 @@ async function sendResponse(event, status, data = {}) {
 }
 
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  console.log('Event:', JSON.stringify({ ...event, ResponseURL: event.ResponseURL && '[REDACTED]' }, null, 2));
   
   const userPoolId = process.env.USER_POOL_ID;
   const clientId = process.env.CLIENT_ID;

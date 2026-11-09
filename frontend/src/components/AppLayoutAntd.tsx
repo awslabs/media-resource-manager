@@ -2,11 +2,17 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import React, { useState } from 'react';
-import { Layout, Switch, Dropdown, Avatar, Space, Typography, ConfigProvider } from 'antd';
+import { Layout, Switch, Dropdown, Avatar, Space, Typography, ConfigProvider, Alert, Button } from 'antd';
 import { UserOutlined, LogoutOutlined, KeyOutlined, MoonOutlined, SunOutlined } from '@ant-design/icons';
 import type { MenuProps } from 'antd';
+import { useLocation, useNavigate } from 'react-router-dom';
 import NavigationAntd from './NavigationAntd';
 import { getTheme } from '../theme/antdTheme';
+import { useHubsNeedingUpdate } from '../utils/regionalHubUpdates';
+
+// The hubs listed when the admin dismissed the banner. It shows again in a
+// new session, or when another hub needs an update.
+const HUB_UPDATE_BANNER_DISMISSED_KEY = 'mrm-hub-update-banner-dismissed';
 
 const { Header, Content, Sider } = Layout;
 const { Text } = Typography;
@@ -45,6 +51,30 @@ const AppLayoutAntd: React.FC<AppLayoutAntdProps> = ({
   };
 
   const userEmail = user?.email || user?.attributes?.email || 'User';
+
+  const navigate = useNavigate();
+  const location = useLocation();
+  const hubsNeedingUpdate = useHubsNeedingUpdate(isAdmin);
+  const hubUpdateSignature = hubsNeedingUpdate.map((hub) => hub.region).sort().join(',');
+  const [dismissedHubUpdates, setDismissedHubUpdates] = useState<string | null>(() => {
+    try {
+      return sessionStorage.getItem(HUB_UPDATE_BANNER_DISMISSED_KEY);
+    } catch {
+      return null;
+    }
+  });
+  const showHubUpdateBanner = isAdmin && hubsNeedingUpdate.length > 0 && dismissedHubUpdates !== hubUpdateSignature;
+  const dismissHubUpdateBanner = () => {
+    try {
+      sessionStorage.setItem(HUB_UPDATE_BANNER_DISMISSED_KEY, hubUpdateSignature);
+    } catch {
+      // Dismissed for this page only.
+    }
+    setDismissedHubUpdates(hubUpdateSignature);
+  };
+  const hubUpdateMessage = hubsNeedingUpdate.length === 1
+    ? `Regional hub ${hubsNeedingUpdate[0].displayName} (${hubsNeedingUpdate[0].region}) needs an update`
+    : `${hubsNeedingUpdate.length} regional hubs need an update: ${hubsNeedingUpdate.map((hub) => hub.region).join(', ')}`;
 
   // Change Password is only meaningful when MRM owns the directory. In
   // Cognito mode the IdP owns the password; in BYO-AD (AD Connector) mode
@@ -143,6 +173,7 @@ const AppLayoutAntd: React.FC<AppLayoutAntdProps> = ({
             acronym={config?.acronym}
             collapsed={collapsed}
             onCollapse={setCollapsed}
+            regionUpdateCount={isAdmin ? hubsNeedingUpdate.length : 0}
           />
         </Sider>
 
@@ -154,6 +185,22 @@ const AppLayoutAntd: React.FC<AppLayoutAntdProps> = ({
             minHeight: 'calc(100vh - 64px)',
           }}
         >
+          {showHubUpdateBanner && (
+            <Alert
+              type="warning"
+              showIcon
+              closable
+              onClose={dismissHubUpdateBanner}
+              style={{ marginBottom: 16 }}
+              message={hubUpdateMessage}
+              description="Regional hubs run their own copy of MRM's regional code, which doesn't change when MRM is upgraded. Update each hub to install the current code, including security fixes. Workstations keep running during the update."
+              action={location.pathname !== '/regions' ? (
+                <Button size="small" type="primary" onClick={() => navigate('/regions')}>
+                  Go to Regions
+                </Button>
+              ) : undefined}
+            />
+          )}
           {children}
         </Content>
       </Layout>

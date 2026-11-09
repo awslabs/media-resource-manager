@@ -11,6 +11,7 @@ import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as path from 'path';
 import { Construct } from 'constructs';
+import { REGIONAL_HUB_LAMBDAS, regionalHubTemplateVersion } from './regional-hub-version';
 
 interface RegionalHubStackProps extends cdk.StackProps {
   regionalHubsTable: dynamodb.Table;
@@ -57,14 +58,7 @@ export class RegionalHubStack extends cdk.Stack {
     // These Lambdas need to run in the regional hub VPC to access the DCV Session Manager API
     // or FSx ONTAP management endpoints
     const regionalLambdaAssets: { [key: string]: s3assets.Asset } = {};
-    const regionalLambdaNames = [
-      'dcv-session-manager',
-      'dcv-readiness-check-windows',
-      'dcv-readiness-check-linux',
-      'dcv-readiness-check-macos',
-      'dcv-session-cleanup',
-      'configure-ontap-cifs',
-    ];
+    const regionalLambdaNames = REGIONAL_HUB_LAMBDAS;
 
     for (const lambdaName of regionalLambdaNames) {
       regionalLambdaAssets[lambdaName] = new s3assets.Asset(this, `RegionalLambdaAsset-${lambdaName}`, {
@@ -99,6 +93,8 @@ export class RegionalHubStack extends cdk.Stack {
         PRIMARY_REGION: this.region,
         WORKSTATION_TABLE_NAME: props.workstationTable.tableName,
         ...(props.dataEncryptionKey && { DYNAMODB_KMS_KEY_ARN: props.dataEncryptionKey.keyArn }),
+        // Saved on the hub, so the console can tell when a hub runs older code.
+        TEMPLATE_VERSION: regionalHubTemplateVersion(),
         ...lambdaAssetEnvVars,
       },
     });
@@ -138,6 +134,14 @@ export class RegionalHubStack extends cdk.Stack {
         'ssm:GetParameters'
       ],
       resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/*`]
+    }));
+
+    // On update, read the hub's current template to keep its IAM names.
+    // Hubs can be in any region.
+    this.generateTemplateFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['cloudformation:GetTemplate'],
+      resources: [`arn:aws:cloudformation:*:${this.account}:stack/${props.acronym}-Regional-Hub-*/*`]
     }));
 
     // ===========================================
@@ -448,7 +452,7 @@ export class RegionalHubStack extends cdk.Stack {
             Key: {
               region: { "S.$": "$.region" }
             },
-            UpdateExpression: "SET #status = :status, #updatedAt = :updatedAt, vpcId = :vpcId, connectionGatewayEndpoint = :cgEndpoint, workstationSecurityGroupId = :sgId, sessionManagerEndpoint = :smEndpoint, privateSubnet1Id = :ps1Id, privateSubnet2Id = :ps2Id, subnetIds = :subnetIds, launchTemplateId = :ltId, hostResourceGroupArn = :hrgArn, licenseConfigurationArn = :licArn, instanceProfileName = :ipName",
+            UpdateExpression: "SET #status = :status, #updatedAt = :updatedAt, vpcId = :vpcId, connectionGatewayEndpoint = :cgEndpoint, workstationSecurityGroupId = :sgId, sessionManagerEndpoint = :smEndpoint, privateSubnet1Id = :ps1Id, privateSubnet2Id = :ps2Id, subnetIds = :subnetIds, launchTemplateId = :ltId, hostResourceGroupArn = :hrgArn, licenseConfigurationArn = :licArn, instanceProfileName = :ipName, templateVersion = :templateVersion",
             ExpressionAttributeNames: {
               "#status": "status",
               "#updatedAt": "updatedAt"
@@ -466,7 +470,8 @@ export class RegionalHubStack extends cdk.Stack {
               ":ltId": { "S.$": "$.outputs.LaunchTemplateId" },
               ":hrgArn": { "S.$": "$.outputs.HostResourceGroupArn" },
               ":licArn": { "S.$": "$.outputs.LicenseConfigurationArn" },
-              ":ipName": { "S.$": "$.outputs.WorkstationInstanceProfileName" }
+              ":ipName": { "S.$": "$.outputs.WorkstationInstanceProfileName" },
+              ":templateVersion": { "S.$": "$.templateData.templateVersion" }
             }
           },
           End: true,
@@ -487,7 +492,7 @@ export class RegionalHubStack extends cdk.Stack {
             Key: {
               region: { "S.$": "$.region" }
             },
-            UpdateExpression: "SET #status = :status, #updatedAt = :updatedAt, vpcId = :vpcId, connectionGatewayEndpoint = :cgEndpoint, workstationSecurityGroupId = :sgId, sessionManagerEndpoint = :smEndpoint, privateSubnet1Id = :ps1Id, privateSubnet2Id = :ps2Id, subnetIds = :subnetIds, launchTemplateId = :ltId, instanceProfileName = :ipName",
+            UpdateExpression: "SET #status = :status, #updatedAt = :updatedAt, vpcId = :vpcId, connectionGatewayEndpoint = :cgEndpoint, workstationSecurityGroupId = :sgId, sessionManagerEndpoint = :smEndpoint, privateSubnet1Id = :ps1Id, privateSubnet2Id = :ps2Id, subnetIds = :subnetIds, launchTemplateId = :ltId, instanceProfileName = :ipName, templateVersion = :templateVersion",
             ExpressionAttributeNames: {
               "#status": "status",
               "#updatedAt": "updatedAt"
@@ -503,7 +508,8 @@ export class RegionalHubStack extends cdk.Stack {
               ":ps2Id": { "S.$": "$.outputs.PrivateSubnet2Id" },
               ":subnetIds": { "S.$": "$.outputs.PrivateSubnetIds" },
               ":ltId": { "S.$": "$.outputs.LaunchTemplateId" },
-              ":ipName": { "S.$": "$.outputs.WorkstationInstanceProfileName" }
+              ":ipName": { "S.$": "$.outputs.WorkstationInstanceProfileName" },
+              ":templateVersion": { "S.$": "$.templateData.templateVersion" }
             }
           },
           End: true,

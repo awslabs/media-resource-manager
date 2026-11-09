@@ -24,7 +24,7 @@ async function findRole(roleName) {
 }
 
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify(event));
+  console.log('Event:', JSON.stringify({ ...event, ResponseURL: event.ResponseURL && '[REDACTED]' }));
   
   const { RoleName, RoleNames, PolicyName, PolicyDocument } = event.ResourceProperties;
   

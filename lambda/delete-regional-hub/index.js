@@ -6,6 +6,7 @@ const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/
 const { SFNClient, StartExecutionCommand } = require('@aws-sdk/client-sfn');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { requireAdmin } = require('./authz');
+const { redactForLog } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -21,7 +22,7 @@ const PASCAL_CASE_NAME = process.env.PASCAL_CASE_NAME;
  * Validates no workstations exist, updates status, and starts the deletion state machine
  */
 exports.handler = async (event) => {
-  console.log('DeleteRegionalHub API event:', JSON.stringify(event, null, 2));
+  console.log('DeleteRegionalHub API event:', JSON.stringify(redactForLog(event), null, 2));
 
   // SECURITY: deleting a regional hub tears down the region's stack and
   // orphans any workstations still running there.

@@ -2,9 +2,11 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, GetCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, GetCommand, ScanCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { EC2Client, DescribeVpcsCommand, DescribeSubnetsCommand, DescribeSecurityGroupsCommand } = require('@aws-sdk/client-ec2');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
+const { redactForLog } = require('../shared/log-redact');
+const { isUpdateAvailable, reconcileUpdatingHubs } = require('../shared/regional-hub-updates');
 
 const dynamoClient = new DynamoDBClient({});
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -18,7 +20,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-  console.log('GetRegionalHub event:', JSON.stringify(event, null, 2));
+  console.log('GetRegionalHub event:', JSON.stringify(redactForLog(event), null, 2));
   
   try {
     const region = event.pathParameters?.region;
@@ -80,6 +82,13 @@ exports.handler = async (event) => {
       };
     }
     
+    // If its stack update has finished, record the result.
+    const [hub] = await reconcileUpdatingHubs([result.Item], {
+      docClient: dynamodb,
+      tableName: process.env.REGIONAL_HUBS_TABLE_NAME,
+      UpdateCommand,
+    });
+
     // Get workstation count for this region
     const workstationCount = await getWorkstationCountForRegion(region);
     
@@ -89,9 +98,10 @@ exports.handler = async (event) => {
       body: JSON.stringify({
         success: true,
         data: {
-          ...result.Item,
+          ...hub,
           workstationCount,
-          isPrimary: false
+          isPrimary: false,
+          updateAvailable: isUpdateAvailable({ ...hub, isPrimary: false }, process.env.REGIONAL_HUB_TEMPLATE_VERSION)
         }
       })
     };

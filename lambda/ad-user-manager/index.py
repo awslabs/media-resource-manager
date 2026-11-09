@@ -15,7 +15,7 @@ logger.setLevel(logging.INFO)
 
 def lambda_handler(event, context):
     try:
-        logger.info(f"Event: {json.dumps(event)}")
+        logger.info(f"Event: {json.dumps({**event, 'ResponseURL': '[REDACTED]'} if 'ResponseURL' in event else event)}")
         
         request_type = event['RequestType']
         resource_properties = event['ResourceProperties']

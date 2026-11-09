@@ -18,6 +18,7 @@
   },
   "context": {
     "productName": "Media Resource Manager",
+    "lambdaLogRetentionDays": 365,
     "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
     "@aws-cdk/core:checkSecretUsage": true,
     "@aws-cdk/core:target-partitions": [
