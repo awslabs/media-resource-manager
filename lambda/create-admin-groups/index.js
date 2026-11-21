@@ -90,7 +90,11 @@ exports.handler = async (event) => {
     // Create admin users (idempotent — skips if user already exists)
     const firstGroup = groups.length > 0 ? groups[0] : null;
 
-    // Users are logged by their position in AdminEmails, not their address.
+    // An existing user is never created again, so a redeploy or upgrade
+    // re-sends no invite and resets no password. Users are logged by their
+    // position in AdminEmails, not their address.
+    let created = 0;
+    let existing = 0;
     for (const [index, email] of emails.entries()) {
       const user = `AdminEmails[${index}]`;
       try {
@@ -98,9 +102,11 @@ exports.handler = async (event) => {
           UserPoolId: userPoolId,
           Username: email,
         }));
+        existing++;
         console.log('User already exists:', user);
       } catch (err) {
-        if (err.name === 'UserNotFoundException') {
+        if (err.name !== 'UserNotFoundException') throw err;
+        try {
           await cognito.send(new AdminCreateUserCommand({
             UserPoolId: userPoolId,
             Username: email,
@@ -112,9 +118,14 @@ exports.handler = async (event) => {
             ],
             DesiredDeliveryMediums: ['EMAIL'],
           }));
+          created++;
           console.log('Created user:', user);
-        } else {
-          throw err;
+        } catch (createErr) {
+          // Created since the lookup, or the address is another user's email
+          // alias. Either way the user exists: skip rather than fail the deploy.
+          if (createErr.name !== 'UsernameExistsException' && createErr.name !== 'AliasExistsException') throw createErr;
+          existing++;
+          console.log('User already exists:', user, `(${createErr.name})`);
         }
       }
 
@@ -132,6 +143,8 @@ exports.handler = async (event) => {
         }
       }
     }
+
+    console.log(`Admin users: ${created} created, ${existing} already existed`);
 
     await sendResponse(event, 'SUCCESS', {
       GroupsCreated: groups.join(','),

@@ -62,8 +62,14 @@ describe('AuthConstruct invite and admin seeding', () => {
   it('adds a CustomMessage trigger and keeps the pre-token-generation trigger', () => {
     const { template } = synthAuth();
     const [pool] = Object.values(template.findResources('AWS::Cognito::UserPool'));
-    expect(pool.Properties.LambdaConfig.CustomMessage).toBeDefined();
-    expect(pool.Properties.LambdaConfig.PreTokenGeneration).toBeDefined();
+    const functionId = (name: string) => Object.keys(template.findResources('AWS::Lambda::Function', {
+      Properties: { FunctionName: name },
+    }))[0];
+    // Losing PreTokenGeneration would break admin sign-in (it maps admin groups).
+    expect(pool.Properties.LambdaConfig).toEqual({
+      PreTokenGeneration: { 'Fn::GetAtt': [functionId('mrm-pre-token-generation'), 'Arn'] },
+      CustomMessage: { 'Fn::GetAtt': [functionId('mrm-cognito-custom-message'), 'Arn'] },
+    });
   });
 
   it('lets the CustomMessage function read only the Frontend/Url parameter', () => {
