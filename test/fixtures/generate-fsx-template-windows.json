@@ -1,0 +1,748 @@
+{
+  "multiAzSsd": {
+    "template": {
+      "AWSTemplateFormatVersion": "2010-09-09",
+      "Description": "FSx for Windows File Server (MULTI_AZ_1 SSD) - Storage ID: stor-win-0001",
+      "Parameters": {
+        "SSDStorageCapacity": {
+          "Type": "Number",
+          "Default": 32,
+          "MinValue": 32,
+          "MaxValue": 65536
+        },
+        "ThroughputCapacity": {
+          "Type": "Number",
+          "Default": 32,
+          "AllowedValues": [
+            32,
+            64,
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4608,
+            6144,
+            9216,
+            12288
+          ]
+        },
+        "AutomaticBackupRetentionPeriod": {
+          "Type": "Number",
+          "Default": 7,
+          "MinValue": 0,
+          "MaxValue": 90
+        },
+        "ProductName": {
+          "Type": "String",
+          "Default": "MediaResourceManager"
+        },
+        "StorageName": {
+          "Type": "String",
+          "Default": "Win Share",
+          "Description": "Name of the storage resource"
+        },
+        "ADUsername": {
+          "Type": "String",
+          "Default": "svc-fsx-unit-test",
+          "NoEcho": true,
+          "Description": "Active Directory service account username"
+        },
+        "ADPassword": {
+          "Type": "String",
+          "Default": "not-a-real-ad-value-0000",
+          "NoEcho": true,
+          "Description": "Active Directory service account password"
+        }
+      },
+      "Resources": {
+        "FsxSecurityGroup": {
+          "Type": "AWS::EC2::SecurityGroup",
+          "Properties": {
+            "GroupDescription": "Controls access to the Amazon FSx for Windows File Server",
+            "VpcId": {
+              "Fn::Join": [
+                "",
+                [
+                  "{{resolve:ssm:/",
+                  {
+                    "Ref": "ProductName"
+                  },
+                  "/Network/VpcId}}"
+                ]
+              ]
+            },
+            "SecurityGroupIngress": [
+              {
+                "CidrIp": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "{{resolve:ssm:/",
+                      {
+                        "Ref": "ProductName"
+                      },
+                      "/Network/VpcCidr}}"
+                    ]
+                  ]
+                },
+                "FromPort": 445,
+                "IpProtocol": "tcp",
+                "ToPort": 445
+              },
+              {
+                "CidrIp": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "{{resolve:ssm:/",
+                      {
+                        "Ref": "ProductName"
+                      },
+                      "/Network/VpcCidr}}"
+                    ]
+                  ]
+                },
+                "FromPort": 5985,
+                "IpProtocol": "tcp",
+                "ToPort": 5985
+              }
+            ],
+            "SecurityGroupEgress": [
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 53,
+                "IpProtocol": "udp",
+                "ToPort": 53
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 88,
+                "IpProtocol": "udp",
+                "ToPort": 88
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 123,
+                "IpProtocol": "udp",
+                "ToPort": 123
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 389,
+                "IpProtocol": "udp",
+                "ToPort": 389
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 464,
+                "IpProtocol": "udp",
+                "ToPort": 464
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 53,
+                "IpProtocol": "tcp",
+                "ToPort": 53
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 88,
+                "IpProtocol": "tcp",
+                "ToPort": 88
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 135,
+                "IpProtocol": "tcp",
+                "ToPort": 135
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 389,
+                "IpProtocol": "tcp",
+                "ToPort": 389
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 445,
+                "IpProtocol": "tcp",
+                "ToPort": 445
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 464,
+                "IpProtocol": "tcp",
+                "ToPort": 464
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 636,
+                "IpProtocol": "tcp",
+                "ToPort": 636
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 3268,
+                "IpProtocol": "tcp",
+                "ToPort": 3268
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 3269,
+                "IpProtocol": "tcp",
+                "ToPort": 3269
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 9389,
+                "IpProtocol": "tcp",
+                "ToPort": 9389
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 49152,
+                "IpProtocol": "tcp",
+                "ToPort": 65535
+              }
+            ]
+          }
+        },
+        "FsxFileSystem": {
+          "Type": "AWS::FSx::FileSystem",
+          "Properties": {
+            "FileSystemType": "WINDOWS",
+            "StorageType": "SSD",
+            "StorageCapacity": {
+              "Ref": "SSDStorageCapacity"
+            },
+            "SubnetIds": [
+              {
+                "Fn::Join": [
+                  "",
+                  [
+                    "{{resolve:ssm:/",
+                    {
+                      "Ref": "ProductName"
+                    },
+                    "/Network/PrivateSubnet1/SubnetID}}"
+                  ]
+                ]
+              },
+              {
+                "Fn::Join": [
+                  "",
+                  [
+                    "{{resolve:ssm:/",
+                    {
+                      "Ref": "ProductName"
+                    },
+                    "/Network/PrivateSubnet2/SubnetID}}"
+                  ]
+                ]
+              }
+            ],
+            "SecurityGroupIds": [
+              {
+                "Ref": "FsxSecurityGroup"
+              }
+            ],
+            "Tags": [
+              {
+                "Key": "Name",
+                "Value": {
+                  "Ref": "StorageName"
+                }
+              }
+            ],
+            "WindowsConfiguration": {
+              "ThroughputCapacity": {
+                "Ref": "ThroughputCapacity"
+              },
+              "AutomaticBackupRetentionDays": {
+                "Ref": "AutomaticBackupRetentionPeriod"
+              },
+              "DeploymentType": "MULTI_AZ_1",
+              "WeeklyMaintenanceStartTime": "1:05:00",
+              "SelfManagedActiveDirectoryConfiguration": {
+                "DnsIps": [
+                  {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "{{resolve:ssm:/",
+                        {
+                          "Ref": "ProductName"
+                        },
+                        "/Identity/ActiveDirectoryServerIP1}}"
+                      ]
+                    ]
+                  },
+                  {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "{{resolve:ssm:/",
+                        {
+                          "Ref": "ProductName"
+                        },
+                        "/Identity/ActiveDirectoryServerIP2}}"
+                      ]
+                    ]
+                  }
+                ],
+                "DomainName": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "{{resolve:ssm:/",
+                      {
+                        "Ref": "ProductName"
+                      },
+                      "/Identity/ActiveDirectoryDomainName}}"
+                    ]
+                  ]
+                },
+                "UserName": {
+                  "Ref": "ADUsername"
+                },
+                "Password": {
+                  "Ref": "ADPassword"
+                }
+              },
+              "PreferredSubnetId": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "{{resolve:ssm:/",
+                    {
+                      "Ref": "ProductName"
+                    },
+                    "/Network/PrivateSubnet1/SubnetID}}"
+                  ]
+                ]
+              }
+            }
+          }
+        }
+      },
+      "Outputs": {
+        "FsxFileSystemId": {
+          "Value": {
+            "Ref": "FsxFileSystem"
+          },
+          "Description": "FSx File System ID"
+        },
+        "FsxDnsName": {
+          "Value": {
+            "Fn::GetAtt": [
+              "FsxFileSystem",
+              "DNSName"
+            ]
+          },
+          "Description": "FSx DNS Name"
+        },
+        "FsxResourceArn": {
+          "Value": {
+            "Fn::GetAtt": [
+              "FsxFileSystem",
+              "ResourceARN"
+            ]
+          },
+          "Description": "FSx Resource ARN"
+        }
+      }
+    },
+    "parameters": [
+      {
+        "ParameterKey": "SSDStorageCapacity",
+        "ParameterValue": "32"
+      },
+      {
+        "ParameterKey": "ThroughputCapacity",
+        "ParameterValue": "32"
+      },
+      {
+        "ParameterKey": "AutomaticBackupRetentionPeriod",
+        "ParameterValue": "7"
+      },
+      {
+        "ParameterKey": "ProductName",
+        "ParameterValue": "MediaResourceManager"
+      },
+      {
+        "ParameterKey": "StorageName",
+        "ParameterValue": "Win Share"
+      },
+      {
+        "ParameterKey": "ADUsername",
+        "ParameterValue": "svc-fsx-unit-test"
+      },
+      {
+        "ParameterKey": "ADPassword",
+        "ParameterValue": "not-a-real-ad-value-0000"
+      }
+    ]
+  },
+  "singleAzHdd": {
+    "template": {
+      "AWSTemplateFormatVersion": "2010-09-09",
+      "Description": "FSx for Windows File Server (SINGLE_AZ_2 HDD) - Storage ID: stor-win-0002",
+      "Parameters": {
+        "SSDStorageCapacity": {
+          "Type": "Number",
+          "Default": 2000,
+          "MinValue": 2000,
+          "MaxValue": 65536
+        },
+        "ThroughputCapacity": {
+          "Type": "Number",
+          "Default": 64,
+          "AllowedValues": [
+            32,
+            64,
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4608,
+            6144,
+            9216,
+            12288
+          ]
+        },
+        "AutomaticBackupRetentionPeriod": {
+          "Type": "Number",
+          "Default": 0,
+          "MinValue": 0,
+          "MaxValue": 90
+        },
+        "ProductName": {
+          "Type": "String",
+          "Default": "MediaResourceManager"
+        },
+        "StorageName": {
+          "Type": "String",
+          "Default": "Win Archive",
+          "Description": "Name of the storage resource"
+        },
+        "ADUsername": {
+          "Type": "String",
+          "Default": "svc-fsx-unit-test",
+          "NoEcho": true,
+          "Description": "Active Directory service account username"
+        },
+        "ADPassword": {
+          "Type": "String",
+          "Default": "not-a-real-ad-value-0000",
+          "NoEcho": true,
+          "Description": "Active Directory service account password"
+        }
+      },
+      "Resources": {
+        "FsxSecurityGroup": {
+          "Type": "AWS::EC2::SecurityGroup",
+          "Properties": {
+            "GroupDescription": "Controls access to the Amazon FSx for Windows File Server",
+            "VpcId": {
+              "Fn::Join": [
+                "",
+                [
+                  "{{resolve:ssm:/",
+                  {
+                    "Ref": "ProductName"
+                  },
+                  "/Network/VpcId}}"
+                ]
+              ]
+            },
+            "SecurityGroupIngress": [
+              {
+                "CidrIp": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "{{resolve:ssm:/",
+                      {
+                        "Ref": "ProductName"
+                      },
+                      "/Network/VpcCidr}}"
+                    ]
+                  ]
+                },
+                "FromPort": 445,
+                "IpProtocol": "tcp",
+                "ToPort": 445
+              },
+              {
+                "CidrIp": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "{{resolve:ssm:/",
+                      {
+                        "Ref": "ProductName"
+                      },
+                      "/Network/VpcCidr}}"
+                    ]
+                  ]
+                },
+                "FromPort": 5985,
+                "IpProtocol": "tcp",
+                "ToPort": 5985
+              }
+            ],
+            "SecurityGroupEgress": [
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 53,
+                "IpProtocol": "udp",
+                "ToPort": 53
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 88,
+                "IpProtocol": "udp",
+                "ToPort": 88
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 123,
+                "IpProtocol": "udp",
+                "ToPort": 123
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 389,
+                "IpProtocol": "udp",
+                "ToPort": 389
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 464,
+                "IpProtocol": "udp",
+                "ToPort": 464
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 53,
+                "IpProtocol": "tcp",
+                "ToPort": 53
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 88,
+                "IpProtocol": "tcp",
+                "ToPort": 88
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 135,
+                "IpProtocol": "tcp",
+                "ToPort": 135
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 389,
+                "IpProtocol": "tcp",
+                "ToPort": 389
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 445,
+                "IpProtocol": "tcp",
+                "ToPort": 445
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 464,
+                "IpProtocol": "tcp",
+                "ToPort": 464
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 636,
+                "IpProtocol": "tcp",
+                "ToPort": 636
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 3268,
+                "IpProtocol": "tcp",
+                "ToPort": 3268
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 3269,
+                "IpProtocol": "tcp",
+                "ToPort": 3269
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 9389,
+                "IpProtocol": "tcp",
+                "ToPort": 9389
+              },
+              {
+                "CidrIp": "0.0.0.0/0",
+                "FromPort": 49152,
+                "IpProtocol": "tcp",
+                "ToPort": 65535
+              }
+            ]
+          }
+        },
+        "FsxFileSystem": {
+          "Type": "AWS::FSx::FileSystem",
+          "Properties": {
+            "FileSystemType": "WINDOWS",
+            "StorageType": "HDD",
+            "StorageCapacity": {
+              "Ref": "SSDStorageCapacity"
+            },
+            "SubnetIds": [
+              {
+                "Fn::Join": [
+                  "",
+                  [
+                    "{{resolve:ssm:/",
+                    {
+                      "Ref": "ProductName"
+                    },
+                    "/Network/PrivateSubnet1/SubnetID}}"
+                  ]
+                ]
+              }
+            ],
+            "SecurityGroupIds": [
+              {
+                "Ref": "FsxSecurityGroup"
+              }
+            ],
+            "Tags": [
+              {
+                "Key": "Name",
+                "Value": {
+                  "Ref": "StorageName"
+                }
+              }
+            ],
+            "WindowsConfiguration": {
+              "ThroughputCapacity": {
+                "Ref": "ThroughputCapacity"
+              },
+              "AutomaticBackupRetentionDays": {
+                "Ref": "AutomaticBackupRetentionPeriod"
+              },
+              "DeploymentType": "SINGLE_AZ_2",
+              "WeeklyMaintenanceStartTime": "1:05:00",
+              "SelfManagedActiveDirectoryConfiguration": {
+                "DnsIps": [
+                  {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "{{resolve:ssm:/",
+                        {
+                          "Ref": "ProductName"
+                        },
+                        "/Identity/ActiveDirectoryServerIP1}}"
+                      ]
+                    ]
+                  },
+                  {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "{{resolve:ssm:/",
+                        {
+                          "Ref": "ProductName"
+                        },
+                        "/Identity/ActiveDirectoryServerIP2}}"
+                      ]
+                    ]
+                  }
+                ],
+                "DomainName": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "{{resolve:ssm:/",
+                      {
+                        "Ref": "ProductName"
+                      },
+                      "/Identity/ActiveDirectoryDomainName}}"
+                    ]
+                  ]
+                },
+                "UserName": {
+                  "Ref": "ADUsername"
+                },
+                "Password": {
+                  "Ref": "ADPassword"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Outputs": {
+        "FsxFileSystemId": {
+          "Value": {
+            "Ref": "FsxFileSystem"
+          },
+          "Description": "FSx File System ID"
+        },
+        "FsxDnsName": {
+          "Value": {
+            "Fn::GetAtt": [
+              "FsxFileSystem",
+              "DNSName"
+            ]
+          },
+          "Description": "FSx DNS Name"
+        },
+        "FsxResourceArn": {
+          "Value": {
+            "Fn::GetAtt": [
+              "FsxFileSystem",
+              "ResourceARN"
+            ]
+          },
+          "Description": "FSx Resource ARN"
+        }
+      }
+    },
+    "parameters": [
+      {
+        "ParameterKey": "SSDStorageCapacity",
+        "ParameterValue": "2000"
+      },
+      {
+        "ParameterKey": "ThroughputCapacity",
+        "ParameterValue": "64"
+      },
+      {
+        "ParameterKey": "AutomaticBackupRetentionPeriod",
+        "ParameterValue": "0"
+      },
+      {
+        "ParameterKey": "ProductName",
+        "ParameterValue": "MediaResourceManager"
+      },
+      {
+        "ParameterKey": "StorageName",
+        "ParameterValue": "Win Archive"
+      },
+      {
+        "ParameterKey": "ADUsername",
+        "ParameterValue": "svc-fsx-unit-test"
+      },
+      {
+        "ParameterKey": "ADPassword",
+        "ParameterValue": "not-a-real-ad-value-0000"
+      }
+    ]
+  }
+}

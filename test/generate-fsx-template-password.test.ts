@@ -6,14 +6,46 @@
  * Manager, and neither the template nor the Lambda's return value (which
  * Step Functions records) carries a password.
  */
+// Fixed fake AD service-account credentials for the FSx for Windows path
+// (getAdCredentials reads them from SSM + Secrets Manager).
+const FAKE_AD_PASSWORD = 'not-a-real-ad-value-0000';
+
 // The Lambda runtime provides this client. The repo doesn't install it.
 jest.mock('@aws-sdk/client-secrets-manager', () => ({
-  SecretsManagerClient: jest.fn(),
-  GetSecretValueCommand: jest.fn(),
+  SecretsManagerClient: jest.fn(() => ({
+    send: jest.fn(async () => ({ SecretString: JSON.stringify({ username: 'svc-fsx-unit-test', password: 'not-a-real-ad-value-0000' }) })),
+  })),
+  GetSecretValueCommand: jest.fn((input: unknown) => ({ input })),
+}), { virtual: true });
+jest.mock('@aws-sdk/client-ssm', () => ({
+  SSMClient: jest.fn(() => ({
+    send: jest.fn(async (command: { input: { Name: string } }) => {
+      if (command.input.Name.endsWith('/Identity/AdServiceAccountSecretArn')) {
+        return { Parameter: { Value: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:unit-test-ad' } };
+      }
+      throw Object.assign(new Error(`unexpected parameter ${command.input.Name}`), { name: 'ParameterNotFound' });
+    }),
+  })),
+  GetParameterCommand: jest.fn((input: unknown) => ({ input })),
 }), { virtual: true });
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/generate-fsx-template/index.js');
+// Output of origin/main's handler (before this change) for WINDOWS_EVENTS,
+// captured with the same mocks. The Windows path must not change.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const WINDOWS_FIXTURE = require('./fixtures/generate-fsx-template-windows.json');
+
+const WINDOWS_EVENTS = {
+  multiAzSsd: {
+    storageId: 'stor-win-0001', name: 'Win Share', type: 'fsx-windows',
+    configuration: { ssdStorageCapacity: 32, throughputCapacity: 32, automaticBackupRetentionPeriod: 7, resilience: 'multi-az', storageType: 'SSD' },
+  },
+  singleAzHdd: {
+    storageId: 'stor-win-0002', name: 'Win Archive', type: 'fsx-windows',
+    configuration: { ssdStorageCapacity: 2000, throughputCapacity: 64, automaticBackupRetentionPeriod: 0, resilience: 'single-az', storageType: 'HDD' },
+  },
+};
 
 const SOURCE_REF = '{{resolve:secretsmanager:${OntapAdminPasswordSource}:SecretString:password}}';
 const ONTAP_EVENT = {
@@ -100,6 +132,21 @@ describe('generate-fsx-template ONTAP credentials', () => {
     expect(template.Resources.FsxOntapSvm.Properties.SvmAdminPassword).toEqual({
       'Fn::Sub': '{{resolve:secretsmanager:${OntapAdminSecret}:SecretString:vsadminPassword}}',
     });
+  });
+
+  it('leaves the FSx for Windows output unchanged', async () => {
+    for (const [key, event] of Object.entries(WINDOWS_EVENTS)) {
+      const result = await handler(event);
+      expect({ key, template: JSON.parse(result.template), parameters: result.parameters })
+        .toEqual({ key, ...WINDOWS_FIXTURE[key] });
+    }
+  });
+
+  it('never logs the AD password on the FSx for Windows path', async () => {
+    for (const event of Object.values(WINDOWS_EVENTS)) await handler(event);
+    const logged = (console.log as jest.Mock).mock.calls.map(args => args.map((a: unknown) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
+    expect(logged.length).toBeGreaterThan(0);
+    expect(logged.filter(line => line.includes(FAKE_AD_PASSWORD))).toEqual([]);
   });
 
   it('redacts credentials in the event before logging it', async () => {
