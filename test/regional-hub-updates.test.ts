@@ -144,7 +144,13 @@ describe('fingerprintRegionalHubCode', () => {
     write('../ssm-documents/doc.js', 'v1');
     fs.symlinkSync('../../ssm-documents', path.join(root, 'generate-regional-hub-template', 'ssm-documents'));
     const before = fingerprintRegionalHubCode(root);
-    write('../ssm-documents/doc.js', 'v2');
+    // CDK caches file hashes on disk by inode, mtime (whole ms) and size. A rewrite
+    // in the same millisecond keeps the inode and mtime, so same-size content would
+    // get the cached 'v1' hash. Change the size and move the mtime forward. Real
+    // edits change the mtime, so builds are not affected.
+    write('../ssm-documents/doc.js', 'v2-changed');
+    const later = new Date(Date.now() + 60_000);
+    fs.utimesSync(path.join(tmp, 'ssm-documents', 'doc.js'), later, later);
     expect(fingerprintRegionalHubCode(root)).not.toBe(before);
   });
 });
