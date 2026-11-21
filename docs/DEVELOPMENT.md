@@ -17,6 +17,8 @@ a test account, see the [Test-Deploy Runbook](TEST_DEPLOY.md).
 ## Prerequisites
 
 - Node.js 20 or later and npm
+- Python 3.9 or later as `python3` on the `PATH` (Jest runs the Python unit
+  tests in `test/python/`; they need no extra packages)
 - The AWS CDK CLI comes from the root `devDependencies`; run it with `npx cdk`
 - For synth or deploy: `cdk.json` and `parameters.json` in the repo root. Both
   are gitignored. Start from `cdk.example.json` and `parameters.example.json`.
