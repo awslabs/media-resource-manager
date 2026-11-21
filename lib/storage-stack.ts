@@ -12,6 +12,7 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
+import { lambdaCodeWithShared } from './lambda-code';
 
 interface StorageStackProps extends cdk.StackProps {
   storageTable: dynamodb.Table;
@@ -397,8 +398,7 @@ export class StorageStack extends cdk.Stack {
     this.functions.listStorage = new lambda.Function(this, 'ListStorageFunction', {
       functionName: `${props.acronym.toLowerCase()}-list-storage`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/list-storage'),
+      ...lambdaCodeWithShared('list-storage'),
       description: 'List storage resources',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
@@ -412,8 +412,7 @@ export class StorageStack extends cdk.Stack {
     this.functions.getStorage = new lambda.Function(this, 'GetStorageFunction', {
       functionName: `${props.acronym.toLowerCase()}-get-storage`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/get-storage'),
+      ...lambdaCodeWithShared('get-storage'),
       description: 'Get storage resource details',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
@@ -427,8 +426,7 @@ export class StorageStack extends cdk.Stack {
     this.functions.createStorage = new lambda.Function(this, 'CreateStorageFunction', {
       functionName: `${props.acronym.toLowerCase()}-create-storage`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/create-storage'),
+      ...lambdaCodeWithShared('create-storage'),
       description: 'Create storage resources',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
@@ -456,8 +454,7 @@ export class StorageStack extends cdk.Stack {
     this.functions.updateStorage = new lambda.Function(this, 'UpdateStorageFunction', {
       functionName: `${props.acronym.toLowerCase()}-update-storage`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/update-storage'),
+      ...lambdaCodeWithShared('update-storage'),
       description: 'Update storage resources',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
@@ -471,8 +468,7 @@ export class StorageStack extends cdk.Stack {
     this.functions.deleteStorage = new lambda.Function(this, 'DeleteStorageFunction', {
       functionName: `${props.acronym.toLowerCase()}-delete-storage`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/delete-storage'),
+      ...lambdaCodeWithShared('delete-storage'),
       description: 'Delete storage resources',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
@@ -489,8 +485,7 @@ export class StorageStack extends cdk.Stack {
     this.functions.s3MountManager = new lambda.Function(this, 'S3MountManagerFunction', {
       functionName: `${props.acronym.toLowerCase()}-s3-mount-manager`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/s3-mount-manager'),
+      ...lambdaCodeWithShared('s3-mount-manager'),
       description: 'Manage Mountpoint for S3 on Linux workstations',
       timeout: cdk.Duration.minutes(5),
       reservedConcurrentExecutions: 15,
@@ -529,8 +524,7 @@ export class StorageStack extends cdk.Stack {
     this.functions.nfsMountManager = new lambda.Function(this, 'NfsMountManagerFunction', {
       functionName: `${props.acronym.toLowerCase()}-nfs-mount-manager`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/fsx-nfs-mount-manager'),
+      ...lambdaCodeWithShared('fsx-nfs-mount-manager'),
       description: 'Manage NFS mounts for FSx for NetApp ONTAP on Linux and macOS workstations',
       timeout: cdk.Duration.minutes(5),
       reservedConcurrentExecutions: 15,
@@ -578,8 +572,7 @@ export class StorageStack extends cdk.Stack {
     this.functions.listS3Buckets = new lambda.Function(this, 'ListS3BucketsFunction', {
       functionName: `${props.acronym.toLowerCase()}-storage-list-s3-buckets`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/storage-list-s3-buckets'),
+      ...lambdaCodeWithShared('storage-list-s3-buckets'),
       description: 'List S3 buckets and provide config for Mountpoint S3 storage creation',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,

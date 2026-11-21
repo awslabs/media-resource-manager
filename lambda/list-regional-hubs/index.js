@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, ScanCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, ScanCommand, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { EC2Client, DescribeVpcsCommand } = require('@aws-sdk/client-ec2');
+const { redactForLog } = require('../shared/log-redact');
+const { isUpdateAvailable, reconcileUpdatingHubs } = require('../shared/regional-hub-updates');
 
 const dynamoClient = new DynamoDBClient({});
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -16,7 +18,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-  console.log('ListRegionalHubs event:', JSON.stringify(event, null, 2));
+  console.log('ListRegionalHubs event:', JSON.stringify(redactForLog(event), null, 2));
   
   try {
     // Get all regional hubs from DynamoDB
@@ -24,7 +26,12 @@ exports.handler = async (event) => {
       TableName: process.env.REGIONAL_HUBS_TABLE_NAME
     }));
     
-    const hubs = result.Items || [];
+    // Hubs whose stack update has finished get their result recorded here.
+    const hubs = await reconcileUpdatingHubs(result.Items || [], {
+      docClient: dynamodb,
+      tableName: process.env.REGIONAL_HUBS_TABLE_NAME,
+      UpdateCommand,
+    });
     
     // Add the primary region as a "hub" if not already in the list
     const primaryRegion = process.env.AWS_REGION;
@@ -66,11 +73,11 @@ exports.handler = async (event) => {
     const workstationCounts = await getWorkstationCountsByRegion();
     
     // Enrich hubs with workstation counts
-    const enrichedHubs = hubs.map(hub => ({
-      ...hub,
-      workstationCount: workstationCounts[hub.region] || 0,
-      isPrimary: hub.region === primaryRegion
-    }));
+    const currentVersion = process.env.REGIONAL_HUB_TEMPLATE_VERSION;
+    const enrichedHubs = hubs.map(hub => {
+      const enriched = { ...hub, workstationCount: workstationCounts[hub.region] || 0, isPrimary: hub.region === primaryRegion };
+      return { ...enriched, updateAvailable: isUpdateAvailable(enriched, currentVersion) };
+    });
     
     // Sort: primary first, then by displayName
     enrichedHubs.sort((a, b) => {

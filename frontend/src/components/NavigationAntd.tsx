@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import React from 'react';
-import { Menu, Typography, Button } from 'antd';
+import { Menu, Typography, Button, Badge } from 'antd';
 import {
   DashboardOutlined,
   DesktopOutlined,
@@ -33,11 +33,13 @@ interface NavigationProps {
   acronym?: string;
   collapsed?: boolean;
   onCollapse?: (collapsed: boolean) => void;
+  /** Regional hubs that need an update, shown as a badge on Regions. */
+  regionUpdateCount?: number;
 }
 
 type MenuItem = Required<MenuProps>['items'][number];
 
-const NavigationAntd: React.FC<NavigationProps> = ({ isAdmin, productName, acronym, collapsed, onCollapse }) => {
+const NavigationAntd: React.FC<NavigationProps> = ({ isAdmin, productName, acronym, collapsed, onCollapse, regionUpdateCount = 0 }) => {
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -108,8 +110,13 @@ const NavigationAntd: React.FC<NavigationProps> = ({ isAdmin, productName, acron
       { type: 'divider' },
       {
         key: '/regions',
-        icon: <GlobalOutlined />,
-        label: 'Regions',
+        // A dot on the icon still shows when the sidebar is collapsed.
+        icon: regionUpdateCount > 0 ? <Badge dot offset={[-2, 2]}><GlobalOutlined /></Badge> : <GlobalOutlined />,
+        label: regionUpdateCount > 0 ? (
+          <span title={`${regionUpdateCount} regional hub${regionUpdateCount === 1 ? '' : 's'} need${regionUpdateCount === 1 ? 's' : ''} an update`}>
+            Regions <Badge count={regionUpdateCount} size="small" style={{ marginLeft: 6 }} />
+          </span>
+        ) : 'Regions',
       },
       {
         key: '/dcv',

@@ -12,7 +12,7 @@ const imageBuilderClient = new ImagebuilderClient({ region: process.env.AWS_REGI
  * with dynamic satellite regions from the regional hubs table.
  */
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  console.log('Event:', JSON.stringify({ ...event, ResponseURL: event.ResponseURL && '[REDACTED]' }, null, 2));
   
   const requestType = event.RequestType;
   const props = event.ResourceProperties;

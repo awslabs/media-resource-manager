@@ -95,7 +95,7 @@ def update_cognito_callback_urls(frontend_url, pascal_case_name):
 
 
 def handler(event, context):
-    print(f"Event: {json.dumps(event)}")
+    print(f"Event: {json.dumps({**event, 'ResponseURL': '[REDACTED]'} if 'ResponseURL' in event else event)}")
     
     # Always send response for CloudFormation custom resources
     is_custom_resource = 'RequestType' in event

@@ -10,6 +10,7 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import { Construct } from 'constructs';
+import { lambdaCodeWithShared } from './lambda-code';
 
 interface DataSyncStackProps extends cdk.StackProps {
   storageTable: dynamodb.Table;
@@ -245,8 +246,7 @@ export class DataSyncStack extends cdk.Stack {
     this.functions.listLocations = new lambda.Function(this, 'ListLocationsFunction', {
       functionName: `${props.acronym.toLowerCase()}-datasync-list-locations`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/datasync-list-locations'),
+      ...lambdaCodeWithShared('datasync-list-locations'),
       description: 'List DataSync locations',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
@@ -258,8 +258,7 @@ export class DataSyncStack extends cdk.Stack {
     this.functions.createLocation = new lambda.Function(this, 'CreateLocationFunction', {
       functionName: `${props.acronym.toLowerCase()}-datasync-create-location`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/datasync-create-location'),
+      ...lambdaCodeWithShared('datasync-create-location'),
       description: 'Create DataSync location (S3 or FSx)',
       timeout: cdk.Duration.seconds(60),
       reservedConcurrentExecutions: 5,
@@ -292,8 +291,7 @@ export class DataSyncStack extends cdk.Stack {
     this.functions.deleteLocation = new lambda.Function(this, 'DeleteLocationFunction', {
       functionName: `${props.acronym.toLowerCase()}-datasync-delete-location`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/datasync-delete-location'),
+      ...lambdaCodeWithShared('datasync-delete-location'),
       description: 'Delete DataSync location',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
@@ -305,8 +303,7 @@ export class DataSyncStack extends cdk.Stack {
     this.functions.listTasks = new lambda.Function(this, 'ListTasksFunction', {
       functionName: `${props.acronym.toLowerCase()}-datasync-list-tasks`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/datasync-list-tasks'),
+      ...lambdaCodeWithShared('datasync-list-tasks'),
       description: 'List DataSync tasks',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
@@ -318,8 +315,7 @@ export class DataSyncStack extends cdk.Stack {
     this.functions.createTask = new lambda.Function(this, 'CreateTaskFunction', {
       functionName: `${props.acronym.toLowerCase()}-datasync-create-task`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/datasync-create-task'),
+      ...lambdaCodeWithShared('datasync-create-task'),
       description: 'Create DataSync task',
       timeout: cdk.Duration.seconds(60),
       reservedConcurrentExecutions: 5,
@@ -331,8 +327,7 @@ export class DataSyncStack extends cdk.Stack {
     this.functions.updateTask = new lambda.Function(this, 'UpdateTaskFunction', {
       functionName: `${props.acronym.toLowerCase()}-datasync-update-task`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/datasync-update-task'),
+      ...lambdaCodeWithShared('datasync-update-task'),
       description: 'Update DataSync task',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
@@ -344,8 +339,7 @@ export class DataSyncStack extends cdk.Stack {
     this.functions.deleteTask = new lambda.Function(this, 'DeleteTaskFunction', {
       functionName: `${props.acronym.toLowerCase()}-datasync-delete-task`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/datasync-delete-task'),
+      ...lambdaCodeWithShared('datasync-delete-task'),
       description: 'Delete DataSync task',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
@@ -357,8 +351,7 @@ export class DataSyncStack extends cdk.Stack {
     this.functions.startExecution = new lambda.Function(this, 'StartExecutionFunction', {
       functionName: `${props.acronym.toLowerCase()}-datasync-start-execution`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/datasync-start-execution'),
+      ...lambdaCodeWithShared('datasync-start-execution'),
       description: 'Start DataSync task execution',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
@@ -370,8 +363,7 @@ export class DataSyncStack extends cdk.Stack {
     this.functions.getExecutions = new lambda.Function(this, 'GetExecutionsFunction', {
       functionName: `${props.acronym.toLowerCase()}-datasync-get-executions`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/datasync-get-executions'),
+      ...lambdaCodeWithShared('datasync-get-executions'),
       description: 'Get DataSync task execution history',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
@@ -384,8 +376,7 @@ export class DataSyncStack extends cdk.Stack {
     this.functions.listS3Buckets = new lambda.Function(this, 'ListS3BucketsFunction', {
       functionName: `${props.acronym.toLowerCase()}-datasync-list-s3-buckets`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/datasync-list-s3-buckets'),
+      ...lambdaCodeWithShared('datasync-list-s3-buckets'),
       description: 'List S3 buckets in the account for DataSync location creation',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,

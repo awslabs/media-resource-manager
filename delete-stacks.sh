@@ -28,6 +28,7 @@ fi
 # Stacks are deleted in this order to respect dependencies
 # Any stacks not in this list will be deleted after these (catches dynamic stacks like Storage-*)
 DELETION_ORDER=(
+    "Log-Retention"
     "Events"
     "EventBridge"
     "Frontend"

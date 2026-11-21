@@ -4,7 +4,7 @@
 const { SSMClient, PutParameterCommand } = require('@aws-sdk/client-ssm');
 
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  console.log('Event:', JSON.stringify({ ...event, ResponseURL: event.ResponseURL && '[REDACTED]' }, null, 2));
   
   if (event.RequestType === 'Delete') {
     return { PhysicalResourceId: 'frontend-url-updater' };

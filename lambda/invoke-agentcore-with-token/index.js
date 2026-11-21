@@ -19,7 +19,7 @@ const sfnClient = new SFNClient({ region: process.env.AWS_REGION });
 const ssmClient = new SSMClient({ region: process.env.AWS_REGION });
 
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify(event, null, 2));
+  console.log('Event:', JSON.stringify({ ...event, TaskToken: event.TaskToken && '[REDACTED]' }, null, 2));
 
   const taskToken = event.TaskToken;
   const requestData = event.requestData || {};

@@ -14,6 +14,7 @@ const { SSMClient, SendCommandCommand, GetCommandInvocationCommand } = require('
 const { EC2Client, DescribeInstancesCommand } = require('@aws-sdk/client-ec2');
 const { FSxClient, DescribeStorageVirtualMachinesCommand } = require('@aws-sdk/client-fsx');
 const { requireAdmin } = require('./authz');
+const { redactForLog } = require('../shared/log-redact');
 
 // DynamoDB client for primary region (workstation table is in primary region)
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
@@ -61,7 +62,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-    console.log('NFS Mount Manager Event:', JSON.stringify(event, null, 2));
+    console.log('NFS Mount Manager Event:', JSON.stringify(redactForLog(event), null, 2));
 
     // SECURITY: mount/unmount operations attach or detach an NFS export
     // from another user's workstation. Gate API Gateway invocations on

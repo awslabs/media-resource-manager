@@ -9,6 +9,7 @@
  */
 
 const { EC2Client, DescribeAvailabilityZonesCommand, DescribeInstanceTypeOfferingsCommand } = require('@aws-sdk/client-ec2');
+const { redactForLog } = require('../shared/log-redact');
 
 const corsHeaders = {
   'Content-Type': 'application/json',
@@ -18,7 +19,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-  console.log('GetAvailabilityZones event:', JSON.stringify(event, null, 2));
+  console.log('GetAvailabilityZones event:', JSON.stringify(redactForLog(event), null, 2));
   
   try {
     // Get region from path parameters
