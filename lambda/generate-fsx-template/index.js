@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+const crypto = require('crypto');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand } = require('@aws-sdk/lib-dynamodb');
 const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
@@ -17,6 +18,10 @@ const REGIONAL_HUBS_TABLE = process.env.REGIONAL_HUBS_TABLE_NAME;
 /**
  * Generate a secure random password for ONTAP admin
  * Must meet ONTAP password requirements: 8-50 chars, at least one letter and one digit
+ * (FSx accepts any characters except NUL, NEL, LS, PS, CR and LF).
+ * The special characters exclude `"` and `\` because the password is
+ * substituted into a JSON secret string.
+ * Uses crypto.randomInt, which is cryptographically secure and unbiased.
  */
 function generateOntapPassword() {
   const length = 24;
@@ -25,21 +30,22 @@ function generateOntapPassword() {
   const digits = '0123456789';
   const special = '!@#$%^&*';
   const allChars = lowercase + uppercase + digits + special;
-  
+  const pick = (chars) => chars[crypto.randomInt(chars.length)];
+
   // Ensure at least one of each required type
-  let password = '';
-  password += lowercase[Math.floor(Math.random() * lowercase.length)];
-  password += uppercase[Math.floor(Math.random() * uppercase.length)];
-  password += digits[Math.floor(Math.random() * digits.length)];
-  password += special[Math.floor(Math.random() * special.length)];
-  
+  const password = [pick(lowercase), pick(uppercase), pick(digits), pick(special)];
+
   // Fill the rest randomly
-  for (let i = password.length; i < length; i++) {
-    password += allChars[Math.floor(Math.random() * allChars.length)];
+  while (password.length < length) {
+    password.push(pick(allChars));
   }
-  
-  // Shuffle the password
-  return password.split('').sort(() => Math.random() - 0.5).join('');
+
+  // Fisher-Yates shuffle so the required characters can be anywhere
+  for (let i = password.length - 1; i > 0; i--) {
+    const j = crypto.randomInt(i + 1);
+    [password[i], password[j]] = [password[j], password[i]];
+  }
+  return password.join('');
 }
 
 /**
@@ -709,3 +715,6 @@ exports.handler = async (event) => {
     region: region || PRIMARY_REGION
   };
 };
+
+// Exported for unit tests.
+exports.generateOntapPassword = generateOntapPassword;
