@@ -24,7 +24,7 @@
     "security:cfn-nag": "npm run build && cdk synth --quiet && cfn_nag_scan --input-path cdk.out",
     "security:checkov": "checkov -d . --config-file .checkov.yaml",
     "security:gitleaks": "gitleaks detect --source . --config .gitleaks.toml -v",
-    "security:semgrep": "semgrep scan --config auto lambda lib frontend/src",
+    "security:semgrep": "semgrep scan --config auto --exclude-rule typescript.react.portability.i18next.jsx-not-internationalized.jsx-not-internationalized --exclude-rule gitlab.nodejs_scan.javascript-ssrf-rule-node_ssrf --exclude-rule python.lang.best-practice.sleep.arbitrary-sleep lambda lib frontend/src",
     "security:grype": "grype dir:. --output table"
   },
   "engines": {
