@@ -4,7 +4,6 @@
 !lambda/**/*.js
 !ssm-documents/**/*.js
 !scripts/**/*.js
-*.d.ts
 node_modules
 
 # CDK asset staging directory
@@ -112,10 +111,6 @@ parameters.json
 # Okta sensitive configuration
 okta-metadata.xml
 okta-provider.json
-
-# Identity Center sensitive configuration
-identity-center-metadata.xml
-identity-center-provider.json
 
 # Identity Center sensitive configuration
 identity-center-metadata.xml

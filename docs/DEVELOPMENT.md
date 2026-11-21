@@ -139,7 +139,8 @@ The development server will:
    - **Fixes**: the issues it closes
    - **Upgrade notes**: anything an operator must do when upgrading, or "None"
    - **Live test results**: what you deployed and checked, and how
-   - **Security review**: semgrep on the changed files, IAM changes, and
+   - **Security review**: an ASH scan (see
+     [Security Scanning](SECURITY_SCANNING.md)), IAM changes, and
      authorization on any new or changed API routes
    - **Follow-ups**: issues filed for work left out
    - **Release plan**: which release ships it, or "No release"
