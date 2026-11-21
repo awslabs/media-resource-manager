@@ -70,7 +70,7 @@ ASH configures its scanners itself. Most per-tool config files in the tree are
 | checkov | CloudFormation and Dockerfile misconfiguration | `.checkov.yaml` | No. ASH doesn't read a `.checkov.yaml` from the scanned tree, so the `skip-check` list there applies only to `npm run security:checkov`. ASH reports those checks; triage them as ASH suppressions. |
 | detect-secrets | Secrets in the working tree | none | Tuned with `.ash.yaml` suppressions. |
 | gitleaks | Secrets in the working tree (ASH) or git history (legacy) | `.gitleaks.toml`, `.gitleaksignore` | No. ASH uses gitleaks' default rules and reports findings that `.gitleaksignore` would drop, so they can be suppressed in `.ash.yaml` instead. |
-| cfn-lint, cfn-nag, cfn-guard, cdk-nag | CloudFormation templates in the tree (`scripts/*.yaml`) | none | Configured in `.ash.yaml` if needed. The CDK app's own cdk-nag checks run during `cdk synth` (`npm run nag`); see [CDK_NAG.md](CDK_NAG.md). |
+| cfn-lint, cfn-nag, cfn-guard, cdk-nag | CloudFormation templates in the tree (`scripts/*.yaml`) | none | Configured in `.ash.yaml` if needed. ASH skips `cdk.out*`, so it doesn't check the synthesized CDK templates, and the CDK app doesn't add cdk-nag's `AwsSolutionsChecks` yet (#61); see [CDK_NAG.md](CDK_NAG.md). |
 | grype, syft, trivy, npm-audit | Dependency vulnerabilities and SBOM | none | Configured in `.ash.yaml` if needed. |
 
 ### Why both gitleaks configs and detect-secrets exist
