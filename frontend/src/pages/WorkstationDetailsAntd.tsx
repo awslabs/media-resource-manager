@@ -37,6 +37,8 @@ import type { ColumnsType } from 'antd/es/table';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
+import { toDcvClientUrl } from '../utils/dcvClient';
+import { useDcvClientPrompt } from '../components/DcvClientPrompt';
 
 const { Title, Text, Link } = Typography;
 
@@ -81,11 +83,34 @@ const WorkstationDetailsAntd: React.FC<WorkstationDetailsAntdProps> = ({
   const [deleteOnDetach, setDeleteOnDetach] = useState(false);
   const [volumeActionLoading, setVolumeActionLoading] = useState(false);
 
+  const [browserSessionsEnabled, setBrowserSessionsEnabled] = useState(true);
+  const { connectWithClient, promptModal: dcvClientPromptModal } = useDcvClientPrompt(browserSessionsEnabled);
+
   useEffect(() => {
     if (instanceId) {
       fetchWorkstationDetails();
     }
   }, [instanceId]);
+
+  // Same settings call the Workstations and Dashboard pages make.
+  useEffect(() => {
+    const fetchSettings = async () => {
+      try {
+        const token = getAuthToken();
+        if (!token) return;
+        const response = await apiCall('settings', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setBrowserSessionsEnabled(data.browserSessionsEnabled !== false);
+        }
+      } catch (error) {
+        console.log('Could not fetch settings:', error);
+      }
+    };
+    fetchSettings();
+  }, []);
 
   useEffect(() => {
     if (details?.workstation?.storageConfig) {
@@ -264,8 +289,7 @@ const WorkstationDetailsAntd: React.FC<WorkstationDetailsAntdProps> = ({
 
       if (sessionData.connectionUrl) {
         const baseUrl = sessionData.quicConnectionUrl || sessionData.connectionUrl;
-        const dcvUrl = baseUrl.replace('https://', 'dcv://');
-        window.location.href = dcvUrl;
+        await connectWithClient(toDcvClientUrl(baseUrl), sessionData.connectionUrl);
       }
     } catch (error) {
       console.error('Error connecting to workstation:', error);
@@ -870,6 +894,7 @@ const WorkstationDetailsAntd: React.FC<WorkstationDetailsAntdProps> = ({
             )}
           </Space>
         </Modal>
+        {dcvClientPromptModal}
       </div>
     </AppLayoutAntd>
   );

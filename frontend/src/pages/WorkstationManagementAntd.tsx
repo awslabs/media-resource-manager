@@ -52,6 +52,8 @@ import type { MenuProps } from 'antd';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
+import { toDcvClientUrl } from '../utils/dcvClient';
+import { useDcvClientPrompt } from '../components/DcvClientPrompt';
 import { useInstanceTypeCatalog } from '../hooks/useInstanceTypeCatalog';
 
 const { Title, Text, Link } = Typography;
@@ -132,6 +134,7 @@ const WorkstationManagementAntd: React.FC<WorkstationManagementAntdProps> = ({
   const [groups, setGroups] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [browserSessionsEnabled, setBrowserSessionsEnabled] = useState(true);
+  const { connectWithClient, promptModal: dcvClientPromptModal } = useDcvClientPrompt(browserSessionsEnabled);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showAssignModal, setShowAssignModal] = useState(false);
@@ -654,8 +657,7 @@ const WorkstationManagementAntd: React.FC<WorkstationManagementAntdProps> = ({
       if (sessionData.connectionUrl) {
         if (connectionType === 'client') {
           const baseUrl = sessionData.quicConnectionUrl || sessionData.connectionUrl;
-          const dcvUrl = baseUrl.replace('https://', 'dcv://');
-          window.location.href = dcvUrl;
+          await connectWithClient(toDcvClientUrl(baseUrl), sessionData.connectionUrl);
         } else {
           window.open(sessionData.connectionUrl, '_blank');
         }
@@ -2817,6 +2819,7 @@ const WorkstationManagementAntd: React.FC<WorkstationManagementAntdProps> = ({
           />
         </Space>
       </Modal>
+      {dcvClientPromptModal}
     </AppLayoutAntd>
   );
 };
