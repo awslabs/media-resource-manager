@@ -1082,19 +1082,28 @@ cdk destroy MRM-Infrastructure
 
 ```bash
 # Install dependencies
-npm install
-cd frontend && npm install
+npm ci
+for d in configure-ontap-cifs fsx-nfs-mount-manager jwt-authorizer volume-manager; do
+  (cd "lambda/$d" && npm ci)   # Lambda deps the unit tests load
+done
+(cd frontend && npm ci)
 
-# Frontend dev server with hot reload
-cd frontend && npm run dev
+# CDK and Lambda unit tests: build first, Jest loads the compiled lib/*.js
+npm run build
+npx jest
 
-# Run CDK tests
-npm test
+# Frontend checks and dev server with hot reload
+cd frontend
+npx tsc --noEmit -p .   # no new type errors
+npx vite build
+npx vitest run
+npm run dev
+cd ..
 
 # CDK commands
-cdk diff
-cdk synth
-cdk deploy
+npx cdk diff
+npx cdk synth
+npx cdk deploy
 ```
 
 For more details, see the [Development Guide](docs/DEVELOPMENT.md).
