@@ -18,7 +18,8 @@ export interface AuthConstructProps {
    * When `false`, skip creation of ALL Cognito CDK resources: User Pool,
    * User Pool Client, User Pool Domain, Identity Pool, authenticated IAM
    * role, pre-token-generation trigger, PreserveSamlProviders custom
-   * resource, CreateAdminGroups custom resource, and Cognito SSM parameters.
+   * resource, custom message trigger, and Cognito SSM parameters (and the
+   * Frontend stack's AdminSetup custom resource).
    * Only the LDAP layer is created. Defaults to `true` — today's behavior.
    *
    * Required for deployments in AWS accounts that deny `cognito-idp:*` or
@@ -36,8 +37,19 @@ export interface AuthConstructProps {
   ssoUserPoolDomain?: string;
 }
 
+/** Cognito admin groups and users for the Frontend stack's AdminSetup custom resource to create. */
+export interface AdminSetupConfig {
+  groups: string[];
+  emails: string[];
+}
+
 export class AuthConstruct extends Construct {
   public readonly ldapLayer: lambda.LayerVersion;
+  /**
+   * Admin groups and users to create. Set only for a local Cognito User Pool
+   * with at least one group or email.
+   */
+  public readonly adminSetup?: AdminSetupConfig;
   /** User Pool. Undefined when `useCognitoAuth=false`. */
   public readonly userPool?: cognito.IUserPool;
   /** User Pool Client. Undefined when `useCognitoAuth=false`. */
@@ -195,8 +207,13 @@ export class AuthConstruct extends Construct {
     };
 
     // Cognito User Pool for SAML authentication
-    const loginUrl = props.frontendUrl || 'your CloudFront URL (check deployment outputs)';
+    // The CustomMessage trigger below replaces this invite with one that
+    // carries the login URL from SSM. This template is its fallback, used
+    // only while that URL isn't set or can't be read.
     const displayName = props.productName || props.pascalCaseName;
+    const loginLine = props.frontendUrl
+      ? `<strong>Login URL:</strong> <a href="${props.frontendUrl}">${props.frontendUrl}</a><br/>`
+      : `<strong>Login URL:</strong> ask your administrator for the ${displayName} web address<br/>`;
     this.userPool = new cognito.UserPool(this, 'UserPool', {
       userPoolName: `${props.acronym}-UserPool`,
       signInAliases: { email: true },
@@ -210,8 +227,8 @@ export class AuthConstruct extends Construct {
       userInvitation: {
         emailSubject: `You're invited to ${displayName}`,
         emailBody: `<p>Hello,</p>
-<p>You have been granted admin access to <strong>${displayName}</strong>.</p>
-<p><strong>Login URL:</strong> <a href="${loginUrl}">${loginUrl}</a><br/>
+<p>You have been granted access to <strong>${displayName}</strong>.</p>
+<p>${loginLine}
 <strong>Username:</strong> {username}<br/>
 <strong>Temporary Password:</strong> {####}</p>
 <p>You will be prompted to set a new password on first login.</p>`,
@@ -232,6 +249,31 @@ export class AuthConstruct extends Construct {
     });
 
     (this.userPool as cognito.UserPool).addTrigger(cognito.UserPoolOperation.PRE_TOKEN_GENERATION, preTokenGenerationFn);
+
+    // Custom Message trigger: builds the AdminCreateUser invite with the login
+    // URL from SSM at send time. The URL isn't known when the pool is created
+    // (the CloudFront distribution comes later, in the Frontend stack), and
+    // changing the pool's template with UpdateUserPool would reset the
+    // trigger configuration, since that call replaces every setting (#8).
+    const frontendUrlParamName = `/${props.pascalCaseName}/Frontend/Url`;
+    const customMessageFn = new lambda.Function(this, 'CustomMessageFunction', {
+      functionName: `${props.acronym.toLowerCase()}-cognito-custom-message`,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset('lambda/cognito-custom-message'),
+      timeout: cdk.Duration.seconds(5),
+      reservedConcurrentExecutions: 5,
+      environmentEncryption: props.encryptionKey,
+      environment: {
+        FRONTEND_URL_PARAM_NAME: frontendUrlParamName,
+        PRODUCT_NAME: displayName,
+      },
+    });
+    customMessageFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ssm:GetParameter'],
+      resources: [`arn:aws:ssm:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:parameter${frontendUrlParamName}`],
+    }));
+    (this.userPool as cognito.UserPool).addTrigger(cognito.UserPoolOperation.CUSTOM_MESSAGE, customMessageFn);
 
     // Configure supported identity providers
     const supportedIdentityProviders: cognito.UserPoolClientIdentityProvider[] = [
@@ -324,8 +366,7 @@ export class AuthConstruct extends Construct {
     // resets supportedIdentityProviders to just COGNITO. This custom resource
     // lists existing providers and updates the client to include them.
     // It also reads the frontend URL from SSM to set correct callback URLs.
-    const frontendUrlParamName = `/${props.pascalCaseName}/Frontend/Url`;
-    
+
     const preserveSamlProvidersLambda = new lambda.Function(this, 'PreserveSamlProvidersLambda', {
       functionName: `${props.acronym.toLowerCase()}-preserve-saml-providers`,
       runtime: lambda.Runtime.NODEJS_22_X,
@@ -410,35 +451,20 @@ export class AuthConstruct extends Construct {
     const cognitoGroups = allGroups.filter(g => !isUuid(g) && !isIdpPrefixed(g));
     const adminEmails = (props.adminEmails || '').split(',').map(e => e.trim()).filter(e => e);
 
+    // The groups and users are created by the Frontend stack (AdminSetup in
+    // lib/frontend-stack.ts), after it writes the real login URL to SSM, so
+    // the first invites carry that URL (#8, #20).
     if (cognitoGroups.length > 0 || adminEmails.length > 0) {
-      const adminSetupFn = new lambda.Function(this, 'CreateAdminGroupsFunction', {
-        functionName: `${props.acronym.toLowerCase()}-create-admin-groups`,
-        runtime: lambda.Runtime.NODEJS_22_X,
-        handler: 'index.handler',
-        timeout: cdk.Duration.seconds(30),
-        reservedConcurrentExecutions: 1,
-        environmentEncryption: props.encryptionKey,
-        code: lambda.Code.fromAsset('lambda/create-admin-groups'),
-      });
+      this.adminSetup = { groups: cognitoGroups, emails: adminEmails };
+    }
 
-      adminSetupFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: [
-          'cognito-idp:CreateGroup',
-          'cognito-idp:AdminCreateUser',
-          'cognito-idp:AdminGetUser',
-          'cognito-idp:AdminAddUserToGroup',
-        ],
-        resources: [this.userPool.userPoolArn],
-      }));
-
-      new cdk.CustomResource(this, 'AdminSetup', {
-        serviceToken: adminSetupFn.functionArn,
-        properties: {
-          UserPoolId: this.userPool.userPoolId,
-          Groups: JSON.stringify(cognitoGroups),
-          AdminEmails: JSON.stringify(adminEmails),
-        },
-      });
+    // Self sign-up is off, so with no AdminEmails nobody can sign in until an
+    // administrator creates a user. SAML-only installs don't need any (#20).
+    if (adminEmails.length === 0) {
+      cdk.Annotations.of(this).addWarningV2('mrm:auth:no-admin-emails',
+        'AdminEmails is empty, so no Cognito user is created and nobody can sign in to the web UI with a ' +
+        'username and password. Set AdminEmails and redeploy, or create a user with the commands in the ' +
+        'Frontend stack output AdminOnboardingCommands. Ignore this if every user signs in through SAML.');
     }
   }
 }

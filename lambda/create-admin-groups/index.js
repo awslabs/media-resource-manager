@@ -51,7 +51,13 @@ async function sendResponse(event, status, data = {}) {
 }
 
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify({ ...event, ResponseURL: event.ResponseURL && '[REDACTED]' }, null, 2));
+  // The event holds AdminEmails (personal data) and the pre-signed
+  // ResponseURL, so log only what identifies the request.
+  console.log('Event:', JSON.stringify({
+    RequestType: event.RequestType,
+    LogicalResourceId: event.LogicalResourceId,
+    RequestId: event.RequestId,
+  }));
 
   if (event.RequestType === 'Delete') {
     await sendResponse(event, 'SUCCESS', { Message: 'Delete - nothing to do' });
@@ -84,13 +90,15 @@ exports.handler = async (event) => {
     // Create admin users (idempotent — skips if user already exists)
     const firstGroup = groups.length > 0 ? groups[0] : null;
 
-    for (const email of emails) {
+    // Users are logged by their position in AdminEmails, not their address.
+    for (const [index, email] of emails.entries()) {
+      const user = `AdminEmails[${index}]`;
       try {
         await cognito.send(new AdminGetUserCommand({
           UserPoolId: userPoolId,
           Username: email,
         }));
-        console.log('User already exists:', email);
+        console.log('User already exists:', user);
       } catch (err) {
         if (err.name === 'UserNotFoundException') {
           await cognito.send(new AdminCreateUserCommand({
@@ -104,7 +112,7 @@ exports.handler = async (event) => {
             ],
             DesiredDeliveryMediums: ['EMAIL'],
           }));
-          console.log('Created user:', email);
+          console.log('Created user:', user);
         } else {
           throw err;
         }
@@ -118,7 +126,7 @@ exports.handler = async (event) => {
             Username: email,
             GroupName: firstGroup,
           }));
-          console.log('Added', email, 'to group:', firstGroup);
+          console.log('Added', user, 'to group:', firstGroup);
         } catch (err) {
           console.warn('Could not add user to group:', err.message);
         }
