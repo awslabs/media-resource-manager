@@ -23,7 +23,19 @@ const SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:/MediaR
 const KCPASSWORD_KEY = [0x7D, 0x89, 0x52, 0x23, 0xD2, 0xBC, 0xDD, 0xEA, 0xA3, 0xB9, 0x1F];
 
 /** Real tools the script uses. Each is wrapped so its arguments are logged. */
-const REAL_TOOLS = ['cat', 'cut', 'python3', 'tee'];
+const REAL_TOOLS = ['cat', 'cut', 'mktemp', 'mv', 'python3', 'rm', 'tee'];
+
+/**
+ * Extra lines for a tool's wrapper, run before the real tool. PYTHON_FAIL
+ * makes the encoder fail with no output ("empty") or after part of it
+ * ("partial").
+ */
+const WRAPPER_PRELUDE: Record<string, string> = {
+  python3: [
+    'if [ "$PYTHON_FAIL" = "empty" ]; then cat > /dev/null; echo "Traceback: encoder failed" >&2; exit 1; fi',
+    'if [ "$PYTHON_FAIL" = "partial" ]; then cat > /dev/null; printf "\\x01\\x02\\x03"; echo "Traceback: encoder failed" >&2; exit 1; fi',
+  ].join('\n'),
+};
 
 const STUBS: Record<string, string> = {
   sudo: 'echo "sudo $*" >> "$STUB_DIR/calls.log"\nexec "$@"',
@@ -45,6 +57,7 @@ interface RunResult {
   output: string;
   calls: string;
   kcpassword: Buffer | undefined;
+  tempFiles: string[];
 }
 
 let tmpRoot: string;
@@ -69,7 +82,7 @@ function run(env: Record<string, string> = {}): RunResult {
   for (const tool of REAL_TOOLS) {
     const real = which(tool);
     fs.writeFileSync(path.join(bin, tool),
-      `#!/bin/bash\necho "${tool} $*" >> "$STUB_DIR/calls.log"\nexec "${real}" "$@"\n`, { mode: 0o755 });
+      `#!/bin/bash\necho "${tool} $*" >> "$STUB_DIR/calls.log"\n${WRAPPER_PRELUDE[tool] ?? ''}\nexec "${real}" "$@"\n`, { mode: 0o755 });
   }
   for (const [name, body] of Object.entries(STUBS)) {
     fs.writeFileSync(path.join(bin, name), `#!/bin/bash\n${body}\n`, { mode: 0o755 });
@@ -94,6 +107,7 @@ function run(env: Record<string, string> = {}): RunResult {
     output: `${result.stdout}\n${result.stderr}`,
     calls: fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8') : '',
     kcpassword: fs.existsSync(kcpassword) ? fs.readFileSync(kcpassword) : undefined,
+    tempFiles: fs.readdirSync(dir).filter(f => f.startsWith('kcpassword.')),
   };
 }
 
@@ -135,6 +149,22 @@ describeBash('macOS phase 2: auto-login password', () => {
     expect(r.output).toContain('ERROR: Failed to retrieve password from Secrets Manager (Region us-east-1)');
     expect(r.output).not.toContain('Phase 2 complete!');
     expect(r.kcpassword).toBeUndefined();
+  });
+
+  it.each(['empty', 'partial'])('fails the step and writes no kcpassword file when the encoder fails (%s output)', mode => {
+    const r = run({ PYTHON_FAIL: mode });
+    expect(r.status).not.toBe(0);
+    expect(r.output).toContain('ERROR: Failed to encode the auto-login password');
+    expect(r.output).not.toContain('Phase 2 complete!');
+    expect(r.kcpassword).toBeUndefined();
+    expect(r.tempFiles).toEqual([]);
+    expect(r.calls).not.toContain('defaults write');
+  });
+
+  it('leaves no temporary file after a successful run', () => {
+    const r = run();
+    expect(r.status).toBe(0);
+    expect(r.tempFiles).toEqual([]);
   });
 
   it('fails the step when the secret is empty', () => {
