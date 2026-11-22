@@ -54,6 +54,22 @@ global_settings:
       path: 'scripts/deploy-pipeline.yaml'
       reason: 'Environment variable and parameter name mappings containing "Secret" in the key name — no actual secret values present'
 
+    # Linux phase 1 embeds the AWS CLI Team public key and pins its fingerprint to
+    # verify the AWS CLI installer (#78). Scoped to the file and each rule the
+    # public values trigger, not to lines, so edits to the script keep it valid.
+    - rule_id: 'SECRET-BASE64-HIGH-ENTROPY-STRING'
+      path: 'ssm-documents/linux-phase1-base-install.js'
+      reason: 'Public AWS CLI signing key from the AWS CLI install guide (PGP public key block) — not a secret'
+    - rule_id: 'SECRET-HEX-HIGH-ENTROPY-STRING'
+      path: 'ssm-documents/linux-phase1-base-install.js'
+      reason: 'Fingerprint of the public AWS CLI signing key from the AWS CLI install guide — not a secret'
+    - rule_id: 'SECRET-AWS-ACCESS-KEY'
+      path: 'ssm-documents/linux-phase1-base-install.js'
+      reason: 'Fingerprint of the public AWS CLI signing key (AWS_CLI_KEY_FPR) matches the access key pattern — not a credential'
+    - rule_id: 'generic-api-key'
+      path: 'ssm-documents/linux-phase1-base-install.js'
+      reason: 'Fingerprint of the public AWS CLI signing key (AWS_CLI_KEY_FPR) matches the generic API key pattern — not a secret'
+
 # Documented semgrep/opengrep rule exclusions. Reasons are in
 # docs/SECURITY_SCANNING.md; keep the two lists and that document in step.
 scanners:

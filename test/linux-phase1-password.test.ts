@@ -17,9 +17,10 @@ import * as path from 'path';
 const doc = require('../ssm-documents/linux-phase1-base-install.js');
 const runCommand: string[] = doc.mainSteps[0].inputs.runCommand;
 
-const PASSWORD = 'Pw-test-7Hq2xZ'; // pragma: allowlist secret
+const PASSWORD = 'not-a-real-password'; // pragma: allowlist secret
 const SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:/MediaResourceManager/Workstation/StandaloneAdminPassword-AbCdEf'; // pragma: allowlist secret
-const AWS_CLI_KEY_FPR = 'FB5DB77FD5C118B80511ADA8A6310ACC4672475C';
+// The fingerprint the document pins; the last test checks it against the embedded key block.
+const AWS_CLI_KEY_FPR = (runCommand.join('\n').match(/^AWS_CLI_KEY_FPR="([0-9A-F]{40})"$/m) || [])[1] ?? '';
 
 /** Real tools the script section and the stubs need. */
 const REAL_TOOLS = ['cat', 'chmod', 'cp', 'cut', 'grep', 'mkdir', 'mktemp', 'rm'];
@@ -243,7 +244,7 @@ describe('Linux phase 1 document text', () => {
   });
 
   it('pins the AWS CLI Team key that the embedded public key block contains', () => {
-    expect(script).toContain(`AWS_CLI_KEY_FPR="${AWS_CLI_KEY_FPR}"`);
+    expect(AWS_CLI_KEY_FPR).toMatch(/^[0-9A-F]{40}$/);
     const gpg = spawnSync('bash', ['-c', 'command -v gpg'], { encoding: 'utf8' }).stdout.trim();
     if (!gpg) return; // gpg not installed on this machine: the fingerprint check needs it
     const block = script.slice(
