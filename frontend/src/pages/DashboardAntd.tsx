@@ -39,6 +39,8 @@ import { useNavigate } from 'react-router-dom';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
+import { toDcvClientUrl } from '../utils/dcvClient';
+import { useDcvClientPrompt } from '../components/DcvClientPrompt';
 
 const { Title, Text } = Typography;
 
@@ -88,6 +90,7 @@ const DashboardAntd: React.FC<DashboardProps> = ({
   const [startingInstances, setStartingInstances] = useState<Set<string>>(new Set());
   const [stoppingInstances, setStoppingInstances] = useState<Set<string>>(new Set());
   const [browserSessionsEnabled, setBrowserSessionsEnabled] = useState(true);
+  const { connectWithClient, promptModal: dcvClientPromptModal } = useDcvClientPrompt(browserSessionsEnabled);
   const [isAutoRefreshing, setIsAutoRefreshing] = useState(false);
   const [actionAlert, setActionAlert] = useState<{type: 'success' | 'error', message: string} | null>(null);
 
@@ -363,7 +366,7 @@ const DashboardAntd: React.FC<DashboardProps> = ({
         
         if (connectionType === 'client') {
           const baseUrl = data.quicConnectionUrl || data.connectionUrl;
-          window.location.href = baseUrl.replace('https://', 'dcv://');
+          await connectWithClient(toDcvClientUrl(baseUrl), data.connectionUrl);
         } else {
           window.open(data.connectionUrl, '_blank');
         }
@@ -886,6 +889,7 @@ const DashboardAntd: React.FC<DashboardProps> = ({
           />
         </Space>
       </Modal>
+      {dcvClientPromptModal}
       </div>
     </AppLayoutAntd>
   );

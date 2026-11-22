@@ -14,8 +14,6 @@ skip-path:
   - __pycache__
   - .git
   - security-reports
-  - samples
-  - mcs-custom-module
 
 # Output format
 output: cli

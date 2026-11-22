@@ -25,8 +25,6 @@ global_settings:
       reason: 'Frontend build output — not source code'
     - path: '.ash'
       reason: 'ASH scan output directory'
-    - path: '.secrets.baseline'
-      reason: 'detect-secrets baseline file contains hashes of known findings — not secrets'
     - path: '.gitleaks.toml'
       reason: 'gitleaks allowlist config — contains regex patterns that intentionally match false-positive strings (e.g. PrivateSubnet1Id JMESPath, Microsoft KMS GVLK). Not actual secrets.'
 
@@ -37,8 +35,8 @@ global_settings:
     # Secrets Manager ARN reference (not a secret value, just a pointer to where secrets are stored)
     - rule_id: 'SECRET-SECRET-KEYWORD'
       path: 'lambda/generate-regional-hub-template/index.js'
-      line_start: 3747
-      line_end: 3747
+      line_start: 3814
+      line_end: 3814
       reason: 'SecretArn property with value "none" — CloudFormation response placeholder when no secret exists'
 
     # Base64 hash used as CDK CustomResource cache key (deterministic, not a secret)
@@ -48,7 +46,7 @@ global_settings:
 
     # Documentation example showing a file path parameter (not a key value)
     - rule_id: 'SECRET-SECRET-KEYWORD'
-      path: 'markdown/CUSTOM_DOMAIN_SETUP.md'
+      path: 'docs/CUSTOM_DOMAIN_SETUP.md'
       reason: 'Documentation example showing DcvPrivateKeyFile parameter — value is a file path, not a key'
 
     # Deploy pipeline env var name mappings (variable names contain "Secret", values are parameter key names)
@@ -56,9 +54,18 @@ global_settings:
       path: 'scripts/deploy-pipeline.yaml'
       reason: 'Environment variable and parameter name mappings containing "Secret" in the key name — no actual secret values present'
 
-    # Deploy pipeline DcvPrivateKeyFile path reference
-    - rule_id: 'SECRET-SECRET-KEYWORD'
-      path: 'scripts/deploy-pipeline.yaml'
-      line_start: 639
-      line_end: 639
-      reason: 'File path to DCV private key PEM file — not a key value'
+# Documented semgrep/opengrep rule exclusions. Reasons are in
+# docs/SECURITY_SCANNING.md; keep the two lists and that document in step.
+scanners:
+  semgrep:
+    options:
+      exclude_rule:
+        - 'typescript.react.portability.i18next.jsx-not-internationalized.jsx-not-internationalized'
+        - 'gitlab.nodejs_scan.javascript-ssrf-rule-node_ssrf'
+        - 'python.lang.best-practice.sleep.arbitrary-sleep'
+  opengrep:
+    options:
+      exclude_rule:
+        - 'typescript.react.portability.i18next.jsx-not-internationalized.jsx-not-internationalized'
+        - 'gitlab.nodejs_scan.javascript-ssrf-rule-node_ssrf'
+        - 'python.lang.best-practice.sleep.arbitrary-sleep'
