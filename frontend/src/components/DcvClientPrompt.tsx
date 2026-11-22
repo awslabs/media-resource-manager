@@ -70,8 +70,11 @@ export function useDcvClientPrompt(browserSessionsEnabled: boolean) {
       onOk={tryAgain}
       onCancel={close}
       // Not confirmLoading: Ant Design ignores Cancel while that is set, and
-      // Cancel must be able to stop a running Try again.
-      okButtonProps={{ loading: retrying }}
+      // Cancel must be able to stop a running Try again. autoFocus puts the
+      // initial focus on Try again; destroyOnHidden remounts the content so
+      // that happens on every open, not only the first.
+      okButtonProps={{ loading: retrying, autoFocus: true }}
+      destroyOnHidden
       footer={(_, { OkBtn, CancelBtn }) => (
         <>
           <CancelBtn />
@@ -80,9 +83,14 @@ export function useDcvClientPrompt(browserSessionsEnabled: boolean) {
         </>
       )}
     >
+      <Paragraph>Install the Amazon DCV client, then try again.</Paragraph>
       <Paragraph>
-        Install the Amazon DCV client, then try again.{' '}
-        <Link href={DCV_CLIENT_DOWNLOAD_URL} target="_blank" rel="noopener noreferrer">
+        <Link
+          href={DCV_CLIENT_DOWNLOAD_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{ whiteSpace: 'nowrap' }}
+        >
           <DownloadOutlined /> Download the DCV client
         </Link>
       </Paragraph>

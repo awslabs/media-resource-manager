@@ -123,8 +123,16 @@ describe('useDcvClientPrompt', () => {
 
     expect(document.querySelector('.ant-modal-title')?.textContent).toBe("DCV client didn't open");
     const body = document.querySelector('.ant-modal-body')!;
-    expect(body.textContent?.replace(/\s+/g, ' ').trim()).toBe('Install the Amazon DCV client, then try again. Download the DCV client');
-    const link = body.querySelector('a')!;
+    const paragraphs = Array.from(body.querySelectorAll('div.ant-typography'));
+    expect(paragraphs.map((el) => el.textContent?.replace(/\s+/g, ' ').trim())).toEqual([
+      'Install the Amazon DCV client, then try again.',
+      'Download the DCV client',
+    ]);
+    // The link has its own line and doesn't wrap mid-phrase.
+    const link = paragraphs[1].querySelector('a')!;
+    expect(link).not.toBeNull();
+    expect(paragraphs[0].querySelector('a')).toBeNull();
+    expect(link.style.whiteSpace).toBe('nowrap');
     expect(link.getAttribute('href')).toBe(DCV_CLIENT_DOWNLOAD_URL);
     expect(link.getAttribute('target')).toBe('_blank');
     expect(link.getAttribute('rel')).toBe('noopener noreferrer');
@@ -182,5 +190,37 @@ describe('useDcvClientPrompt', () => {
     add.mockClear();
     await connectAndTimeOut();
     expect(promptVisible()).toBe(true);
+  });
+
+  it('puts the initial focus on Try again on every open, not on the close button', async () => {
+    await connectAndTimeOut();
+    expect(document.activeElement?.textContent?.trim()).toBe('Try again');
+
+    await act(async () => {
+      button('Cancel').click();
+      vi.advanceTimersByTime(1000);
+    });
+    await connectAndTimeOut();
+    expect(promptVisible()).toBe(true);
+    expect(document.activeElement?.textContent?.trim()).toBe('Try again');
+    expect(document.activeElement?.classList.contains('ant-modal-close')).toBe(false);
+  });
+
+  it('still closes on Esc and on the close button', async () => {
+    await connectAndTimeOut();
+    await act(async () => {
+      (document.activeElement as HTMLElement).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    });
+    expect(promptVisible()).toBe(false);
+
+    await act(async () => {
+      vi.advanceTimersByTime(1000);
+    });
+    await connectAndTimeOut();
+    expect(promptVisible()).toBe(true);
+    await act(async () => {
+      (document.querySelector('.ant-modal-close') as HTMLButtonElement).click();
+    });
+    expect(promptVisible()).toBe(false);
   });
 });
