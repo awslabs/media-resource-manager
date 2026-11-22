@@ -103,10 +103,14 @@ else
 fi
 
 # 5. Semgrep - Static Analysis
+# Documented rule exclusions: see docs/SECURITY_SCANNING.md (same list as .ash.yaml).
+SEMGREP_EXCLUDES="--exclude-rule typescript.react.portability.i18next.jsx-not-internationalized.jsx-not-internationalized \
+--exclude-rule gitlab.nodejs_scan.javascript-ssrf-rule-node_ssrf \
+--exclude-rule python.lang.best-practice.sleep.arbitrary-sleep"
 echo -e "\n${BLUE}[5/6] Semgrep - Static Analysis${NC}"
 if command -v semgrep &> /dev/null; then
     run_scan "Semgrep" \
-        "semgrep scan --config auto --json '$PROJECT_DIR/lambda' '$PROJECT_DIR/lib' '$PROJECT_DIR/frontend/src' 2>/dev/null" \
+        "semgrep scan --config auto $SEMGREP_EXCLUDES --json '$PROJECT_DIR/lambda' '$PROJECT_DIR/lib' '$PROJECT_DIR/frontend/src' 2>/dev/null" \
         "$REPORT_DIR/semgrep-report.json" || true
 else
     echo -e "${YELLOW}⚠ Semgrep not installed, skipping${NC}"

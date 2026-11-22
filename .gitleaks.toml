@@ -15,11 +15,8 @@ paths = [
     '''frontend/package-lock\.json''',
     '''frontend/dist''',
     '''security-reports''',
-    '''pcsr-evidence''',
     # Untracked local files (gitignored, not in source control)
     '''certs/''',
-    # Scanner config and historical detect-secrets baseline
-    '''\.secrets\.baseline''',
 ]
 
 # Allow example/placeholder values and known false-positive patterns

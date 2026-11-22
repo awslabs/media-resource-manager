@@ -9,6 +9,7 @@ a test account, see the [Test-Deploy Runbook](TEST_DEPLOY.md).
 - [Build and Test](#build-and-test)
 - [Frontend Development](#frontend-development)
 - [How a Change Goes](#how-a-change-goes)
+- [Versioning and Releases](#versioning-and-releases)
 - [Architecture Rules](#architecture-rules)
 - [Regional Hubs](#regional-hubs)
 - [Deploying a Branch for Testing](#deploying-a-branch-for-testing)
@@ -139,7 +140,8 @@ The development server will:
    - **Fixes**: the issues it closes
    - **Upgrade notes**: anything an operator must do when upgrading, or "None"
    - **Live test results**: what you deployed and checked, and how
-   - **Security review**: semgrep on the changed files, IAM changes, and
+   - **Security review**: an ASH scan (see
+     [Security Scanning](SECURITY_SCANNING.md)), IAM changes, and
      authorization on any new or changed API routes
    - **Follow-ups**: issues filed for work left out
    - **Release plan**: which release ships it, or "No release"
@@ -148,10 +150,48 @@ The development server will:
    `major`, or an explicit `X.Y.Z`). The script bumps the version in the root
    and frontend `package.json` files, commits `release: vX.Y.Z` and tags
    `vX.Y.Z`. It does not push. Push `main` and the tag, then create the GitHub
-   release from the tag.
+   release from the tag. To choose the bump and write the release notes, see
+   [Versioning and Releases](#versioning-and-releases).
 
 Never commit account IDs, credentials, hostnames of real deployments or
 customer details, and never force-push or rewrite pushed history.
+
+## Versioning and Releases
+
+Operators deploy and upgrade their own installations, so a version number
+tells an operator what an upgrade asks of them. Pick the bump by the most
+demanding change in the release:
+
+- **Patch (`1.4.x`)**: bug and security fixes. Upgrading is a normal redeploy,
+  with no new settings and no admin action.
+- **Minor (`1.x.0`)**: new features; new or changed settings in
+  `parameters.json` or `cdk.json`; new stacks; or anything an admin must act
+  on after the deploy. A change to the regional hub template is a minor
+  release, because admins must update each hub from the **Update** banner on
+  the Regions page.
+- **Major (`x.0.0`)**: breaking upgrades, such as a removed or renamed
+  setting, a manual migration step, possible loss of data or sessions, or
+  dropped support for a platform.
+
+**Cadence.** Release once per batch of related work, not after every pull
+request. Security fixes are the exception: they ship as a patch release as
+soon as they merge. Group changes that each need a regional hub update into
+one release, so admins update their hubs once.
+
+**Release notes.** Title the release `vX.Y.Z — <theme>` and use these
+sections. Leave out any that would be empty, except **Upgrade notes**, which
+every release has:
+
+- **What's new**: one or two sentences on what the release does.
+- **Fixes**: each bug or security fix, and what an operator would have seen.
+- **New**: each new feature or setting.
+- **Upgrade notes**: always say plainly whether an operator needs to do
+  anything, even when the answer is "No action needed; redeploy." Call out
+  any regional hub update, and list any new or changed setting with its
+  default.
+- **Follow-ups**: one line of the issue numbers filed for work left out.
+- **Full changelog**: the compare link,
+  `https://github.com/awslabs/media-resource-manager/compare/vA.B.C...vX.Y.Z`.
 
 ## Architecture Rules
 
