@@ -10,6 +10,9 @@ node_modules
 .cdk.staging
 cdk.out
 cdk.out.scan
+cdk.out.nag
+# npm run nag-report logs
+reports/
 
 # CDK context - account/region specific, should not be shared
 cdk.context.json
