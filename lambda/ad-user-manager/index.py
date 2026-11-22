@@ -73,7 +73,7 @@ def create_dynamodb_user(username, is_admin):
     
     try:
         table.put_item(Item=user_item)
-        logger.info(f"Created DynamoDB user entry for: {username} with email: {user_item['email']}")
+        logger.info(f"Created DynamoDB user entry for: {username}")
     except Exception as e:
         logger.error(f"Error creating DynamoDB user entry for {username}: {str(e)}")
         # Don't fail the whole operation if DynamoDB write fails

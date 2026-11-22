@@ -221,8 +221,6 @@ exports.handler = async (event) => {
             displayName = lastName;
           }
           
-          console.log(`Cognito user: ${user.Username}, email: ${email}, emailPrefix: ${emailPrefix}, firstName: ${firstName}, lastName: ${lastName}, name: ${attributes.name || ''}, displayName: ${displayName}`);
-          
           users.push({
             userId: user.Username,
             email: email,
@@ -415,9 +413,6 @@ exports.handler = async (event) => {
         }));
         const users = usersResult.Items || [];
         console.log(`Fetched ${users.length} users from DynamoDB for display name resolution`);
-        users.forEach(u => {
-          console.log(`DynamoDB user: userId=${u.userId}, email=${u.email}, firstName=${u.firstName}, lastName=${u.lastName}`);
-        });
         
         // Get Cognito users for fallback display name resolution
         const cognitoUsers = await getCognitoUsersForDisplay();
