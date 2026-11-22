@@ -6,9 +6,9 @@
  * it opened.
  *
  * Browsers don't tell a page whether an app handles a URL scheme. When the
- * client opens, the browser window loses focus (`blur`) or the page becomes
- * hidden (`visibilitychange`). If neither happens within the timeout, we
- * report `not-detected`. That is a guess: a user who takes longer than the
+ * client opens, the page becomes hidden (`visibilitychange`), or the browser
+ * window loses focus (`blur`) and is still unfocused at the timeout. Otherwise
+ * we report `not-detected`. That is a guess: a user who takes longer than the
  * timeout to answer the browser's "Open Amazon DCV?" prompt also gets
  * `not-detected`, so callers should word their UI as a question.
  */
@@ -64,14 +64,23 @@ export function launchDcvClient(
       iframe = null;
       resolve(result);
     };
-    const onBlur = () => finish('launched');
+    // A blur alone isn't proof: a browser or OS prompt, or a click into
+    // DevTools, blurs the window briefly and hands focus back. So a blur is
+    // only counted if the window still doesn't have focus at the deadline.
+    let blurred = false;
+    const onBlur = () => {
+      blurred = true;
+    };
     const onVisibilityChange = () => {
       if (document.visibilityState === 'hidden') finish('launched');
     };
 
     window.addEventListener('blur', onBlur);
     document.addEventListener('visibilitychange', onVisibilityChange);
-    const timeoutId = setTimeout(() => finish('not-detected'), timeoutMs);
+    const timeoutId = setTimeout(
+      () => finish(blurred && !document.hasFocus() ? 'launched' : 'not-detected'),
+      timeoutMs,
+    );
 
     try {
       if (method === 'iframe') {

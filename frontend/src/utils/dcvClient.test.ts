@@ -20,6 +20,12 @@ function setVisibility(state: 'visible' | 'hidden') {
   Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
 }
 
+/** The window loses focus to another app (the DCV client) and stays unfocused. */
+function blurAway() {
+  vi.spyOn(document, 'hasFocus').mockReturnValue(false);
+  window.dispatchEvent(new Event('blur'));
+}
+
 describe('launchDcvClient', () => {
   let addWindow: ReturnType<typeof vi.spyOn>;
   let removeWindow: ReturnType<typeof vi.spyOn>;
@@ -51,7 +57,7 @@ describe('launchDcvClient', () => {
     expect(removeDocument).toHaveBeenCalledWith('visibilitychange', visibility![1]);
   }
 
-  it('opens the link in a hidden iframe and reports launched when the window loses focus', async () => {
+  it('opens the link in a hidden iframe and reports launched when the window loses focus and stays unfocused', async () => {
     const result = launchDcvClient(LINK, { method: 'iframe' });
 
     const iframe = document.querySelector('iframe');
@@ -59,7 +65,8 @@ describe('launchDcvClient', () => {
     expect(iframe!.style.display).toBe('none');
     expect(iframe!.getAttribute('src')).toBe(LINK);
 
-    window.dispatchEvent(new Event('blur'));
+    blurAway();
+    vi.advanceTimersByTime(DCV_LAUNCH_TIMEOUT_MS);
     await expect(result).resolves.toBe('launched');
     expect(document.querySelector('iframe')).toBeNull();
     expectListenersRemoved();
@@ -72,6 +79,17 @@ describe('launchDcvClient', () => {
     document.dispatchEvent(new Event('visibilitychange'));
     await expect(result).resolves.toBe('launched');
     expect(document.querySelector('iframe')).toBeNull();
+    expectListenersRemoved();
+  });
+
+  it('does not count a blur that hands focus back (a prompt or DevTools) as a launch', async () => {
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    const result = launchDcvClient(LINK, { method: 'top' });
+
+    window.dispatchEvent(new Event('blur'));
+    window.dispatchEvent(new Event('focus'));
+    vi.advanceTimersByTime(DCV_LAUNCH_TIMEOUT_MS);
+    await expect(result).resolves.toBe('not-detected');
     expectListenersRemoved();
   });
 
@@ -100,16 +118,18 @@ describe('launchDcvClient', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('settles once: a blur after the timeout does not change the result', async () => {
+  it('settles once: a hidden page after the timeout does not change the result', async () => {
     const result = launchDcvClient(LINK, { method: 'iframe' });
     vi.advanceTimersByTime(DCV_LAUNCH_TIMEOUT_MS);
-    window.dispatchEvent(new Event('blur'));
+    setVisibility('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
     await expect(result).resolves.toBe('not-detected');
   });
 
-  it('clears the timeout when the launch is detected', async () => {
+  it('clears the timeout when the page becomes hidden', async () => {
     const result = launchDcvClient(LINK, { method: 'iframe' });
-    window.dispatchEvent(new Event('blur'));
+    setVisibility('hidden');
+    document.dispatchEvent(new Event('visibilitychange'));
     await result;
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -120,7 +140,8 @@ describe('launchDcvClient', () => {
     const result = launchDcvClient(LINK, { method: 'top' });
     expect(document.querySelector('iframe')).toBeNull();
 
-    window.dispatchEvent(new Event('blur'));
+    blurAway();
+    vi.advanceTimersByTime(DCV_LAUNCH_TIMEOUT_MS);
     await expect(result).resolves.toBe('launched');
     expectListenersRemoved();
   });
