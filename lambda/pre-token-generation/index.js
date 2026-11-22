@@ -13,9 +13,24 @@
 // Native users derive admin status exclusively from native Cognito group
 // membership (existingGroups here, sourced from AdminAddUserToGroup).
 
-exports.handler = async (event) => {
-  console.log('Pre Token Generation event:', JSON.stringify(event, null, 2));
+//
+// LOGGING: the event carries the user's email address, username and other
+// attributes, and the response carries group names. Log only the trigger
+// source, the user type, group counts and, on failure, the error class.
 
+exports.handler = async (event) => {
+  try {
+    return buildResponse(event);
+  } catch (error) {
+    console.error('Pre Token Generation failed:', JSON.stringify({
+      triggerSource: event?.triggerSource,
+      errorClass: error?.name || typeof error,
+    }));
+    throw error;
+  }
+};
+
+function buildResponse(event) {
   const userAttributes = event.request.userAttributes || {};
   const existingGroups = event.request.groupConfiguration?.groupsToOverride || [];
 
@@ -53,10 +68,13 @@ exports.handler = async (event) => {
 
   const allGroups = [...new Set([...existingGroups, ...parsedGroups])];
 
-  console.log('User type:', isFederated ? 'federated' : 'native');
-  console.log('Existing groups (native Cognito membership):', existingGroups);
-  console.log('SAML groups (custom:groups, federated only):', parsedGroups);
-  console.log('Final groups:', allGroups);
+  console.log('Pre Token Generation:', JSON.stringify({
+    triggerSource: event.triggerSource,
+    userType: isFederated ? 'federated' : 'native',
+    nativeGroupCount: existingGroups.length,
+    samlGroupCount: parsedGroups.length,
+    groupCount: allGroups.length,
+  }));
 
   event.response = {
     claimsOverrideDetails: {
@@ -66,7 +84,5 @@ exports.handler = async (event) => {
     },
   };
 
-  console.log('Response:', JSON.stringify(event.response, null, 2));
-
   return event;
-};
+}
