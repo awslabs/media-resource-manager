@@ -212,11 +212,9 @@ async function authenticateWithLDAP(username, password) {
                     
                     if (attributes.displayName) {
                       displayName = attributes.displayName;
-                      console.log('Display name:', displayName);
                     }
                     if (attributes.mail) {
                       email = attributes.mail;
-                      console.log('Email:', email);
                     }
                     if (attributes.cn) {
                       displayName = displayName || attributes.cn;
