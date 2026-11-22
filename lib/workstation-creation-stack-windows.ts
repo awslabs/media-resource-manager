@@ -828,6 +828,39 @@ export class WindowsWorkstationCreationStack extends cdk.Stack {
       resources: ['*'],
     }));
 
+    // Lambda function that waits for a READY console session after the final
+    // reboot. The DCV server re-registers under a new ID after the reboot and
+    // its first session can take minutes, so the server being registered is
+    // not enough for Connect to work.
+    const checkConsoleSessionFunction = new lambda.Function(this, 'CheckConsoleSessionFunction', {
+      functionName: `${props.acronym.toLowerCase()}-console-session-ready-windows`,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.lambda_handler',
+      reservedConcurrentExecutions: 5,
+      environmentEncryption: props.dataEncryptionKey,
+      environment: {
+        PASCAL_CASE_NAME: props.pascalCaseName,
+      },
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/console-session-ready-windows')),
+      timeout: cdk.Duration.seconds(60),
+      vpc: props.vpc,
+      vpcSubnets: {
+        subnets: props.vpc.privateSubnets,
+      },
+      securityGroups: [props.workstationSecurityGroup],
+    });
+
+    checkConsoleSessionFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ssm:GetParameter'],
+      resources: ['Endpoint', 'ClientId', 'ClientPassword'].map(name =>
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/DCV/SessionManager/${name}`),
+    }));
+
+    if (props.dataEncryptionKey) {
+      props.dataEncryptionKey.grantDecrypt(checkConsoleSessionFunction);
+    }
+
     // Grant permissions to join domain function
     joinDomainFunction.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
@@ -1292,6 +1325,32 @@ export class WindowsWorkstationCreationStack extends cdk.Stack {
       time: stepfunctions.WaitTime.duration(cdk.Duration.minutes(1)),
     });
 
+    // After the final reboot, poll until a console session is READY so the
+    // first Connect works. Up to 20 checks 30 s apart (~10 minutes); after
+    // that the workstation is marked Complete anyway, as before.
+    const maxConsoleSessionChecks = 20;
+    const waitForConsoleSession = (suffix: string, complete: stepfunctions.IChainable): stepfunctions.IChainable => {
+      const check = new tasks.LambdaInvoke(this, `CheckConsoleSession${suffix}`, {
+        lambdaFunction: checkConsoleSessionFunction,
+        outputPath: '$.Payload',
+        retryOnServiceExceptions: false,
+      });
+      check.addRetry({
+        errors: ['Lambda.TooManyRequestsException', 'Lambda.ServiceException'],
+        interval: cdk.Duration.seconds(2),
+        maxAttempts: 6,
+        backoffRate: 2,
+      });
+      return check.next(new stepfunctions.Choice(this, `IsConsoleSessionReady${suffix}?`)
+        .when(stepfunctions.Condition.or(
+          stepfunctions.Condition.booleanEquals('$.consoleSessionReady', true),
+          stepfunctions.Condition.numberGreaterThanEquals('$.consoleSessionChecks', maxConsoleSessionChecks),
+        ), complete)
+        .otherwise(new stepfunctions.Wait(this, `WaitForConsoleSession${suffix}`, {
+          time: stepfunctions.WaitTime.duration(cdk.Duration.seconds(30)),
+        }).next(check)));
+    };
+
     // Success and failure states
     const successState = new stepfunctions.Succeed(this, 'WorkstationCreated');
     const failureState = new stepfunctions.Fail(this, 'WorkstationCreationFailed');
@@ -1385,8 +1444,7 @@ export class WindowsWorkstationCreationStack extends cdk.Stack {
                                                         .next(updateStatusFinalizing)
                                                         .next(restartInstanceTask)
                                                         .next(waitForRestart)
-                                                        .next(updateStatusReady)
-                                                        .next(successState)
+                                                        .next(waitForConsoleSession('', updateStatusReady.next(successState)))
                                                     )
                                                     .when(stepfunctions.Condition.booleanEquals('$.autoLoginInProgress', true),
                                                       // Still in progress - wait and check again
@@ -1474,8 +1532,8 @@ export class WindowsWorkstationCreationStack extends cdk.Stack {
                                             .next(new stepfunctions.Wait(this, 'WaitForRestartNoCleanup', {
                                               time: stepfunctions.WaitTime.duration(cdk.Duration.minutes(1)),
                                             }))
-                                            .next(updateStatusReadyNoCleanup)
-                                            .next(new stepfunctions.Succeed(this, 'WorkstationCreatedNoCleanup'))
+                                            .next(waitForConsoleSession('NoCleanup', updateStatusReadyNoCleanup
+                                              .next(new stepfunctions.Succeed(this, 'WorkstationCreatedNoCleanup'))))
                                         )
                                         .when(stepfunctions.Condition.booleanEquals('$.autoLoginInProgress', true),
                                           new stepfunctions.Wait(this, 'WaitForAutoLoginRetryNoCleanup', {
