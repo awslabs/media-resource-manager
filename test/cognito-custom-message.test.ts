@@ -62,6 +62,30 @@ describe('cognito-custom-message handler', () => {
     expect(result.response.emailMessage).not.toMatch(/check deployment outputs/i);
   });
 
+  it('uses a custom domain from SSM as the login URL', async () => {
+    ssmReturns('https://mrm.example.com');
+    const result = await handler(inviteEvent());
+    expect(result.response.emailMessage).toContain(
+      '<a href="https://mrm.example.com">https://mrm.example.com</a>');
+    expect(result.response.emailMessage).not.toContain('cloudfront.net');
+  });
+
+  it('puts a non-default product name in the subject and the HTML-escaped body', async () => {
+    const original = process.env.PRODUCT_NAME;
+    process.env.PRODUCT_NAME = 'Acme & <Studio> Manager';
+    try {
+      ssmReturns('https://mrm.example.com');
+      const result = await handler(inviteEvent());
+      // The subject is plain text, so it keeps the name as typed.
+      expect(result.response.emailSubject).toBe("You're invited to Acme & <Studio> Manager");
+      expect(result.response.emailMessage).toContain('<strong>Acme &amp; &lt;Studio&gt; Manager</strong>');
+      expect(result.response.emailMessage).not.toContain('<Studio>');
+      expect(result.response.emailMessage).not.toContain('Media Resource Manager');
+    } finally {
+      process.env.PRODUCT_NAME = original;
+    }
+  });
+
   it('escapes HTML in the URL', async () => {
     ssmReturns('https://example.com/"><script>');
     const result = await handler(inviteEvent());

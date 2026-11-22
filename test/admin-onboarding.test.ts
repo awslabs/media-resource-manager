@@ -13,6 +13,7 @@ import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import { Annotations, Match, Template } from 'aws-cdk-lib/assertions';
 import { AuthConstruct, AuthConstructProps } from '../lib/constructs/auth-construct';
 import { FrontendStack } from '../lib/frontend-stack';
+import { InfrastructureStack } from '../lib/infrastructure-stack';
 
 const env = { account: '123456789012', region: 'us-east-1' };
 
@@ -112,6 +113,31 @@ describe('AuthConstruct invite and admin seeding', () => {
     template.resourceCountIs('AWS::Cognito::UserPool', 0);
     expect(auth.adminSetup).toBeUndefined();
     Annotations.fromStack(stack).hasNoWarning('*', Match.anyValue());
+  });
+});
+
+describe('InfrastructureStack product name', () => {
+  it('passes a non-default productName to the CustomMessage function', () => {
+    // bin/media-resource-manager.ts passes the productName context to this
+    // stack as its display name.
+    const app = new cdk.App();
+    const stack = new InfrastructureStack(app, 'SAM-Infrastructure', {
+      env,
+      productName: 'Studio Asset Manager',
+      pascalCaseName: 'StudioAssetManager',
+      acronym: 'SAM',
+      adminGroupName: 'SAM-Admins',
+      adminEmails: 'admin@example.com',
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::Lambda::Function', {
+      FunctionName: 'sam-cognito-custom-message',
+      Environment: {
+        Variables: Match.objectLike({
+          PRODUCT_NAME: 'Studio Asset Manager',
+          FRONTEND_URL_PARAM_NAME: '/StudioAssetManager/Frontend/Url',
+        }),
+      },
+    });
   });
 });
 
