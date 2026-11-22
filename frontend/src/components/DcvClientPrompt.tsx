@@ -1,12 +1,12 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import React, { useState } from 'react';
-import { Button, Modal, Space, Typography } from 'antd';
+import React, { useRef, useState } from 'react';
+import { Button, Modal, Typography } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
 import { DCV_CLIENT_DOWNLOAD_URL, launchDcvClient } from '../utils/dcvClient';
 
-const { Paragraph } = Typography;
+const { Paragraph, Link } = Typography;
 
 interface PendingLaunch {
   dcvUrl: string;
@@ -15,7 +15,7 @@ interface PendingLaunch {
 
 /**
  * Launch the DCV client and, when the launch isn't detected, ask the user
- * whether it opened. Shared by the Ant Design Workstations, Dashboard and
+ * to install it. Shared by the Ant Design Workstations, Dashboard and
  * Workstation details pages.
  *
  * `connectWithClient` resolves once the launch is detected or the prompt is
@@ -24,21 +24,32 @@ interface PendingLaunch {
 export function useDcvClientPrompt(browserSessionsEnabled: boolean) {
   const [pending, setPending] = useState<PendingLaunch | null>(null);
   const [retrying, setRetrying] = useState(false);
+  // The Try again launch still running, so closing the dialog can stop it.
+  const retryLaunch = useRef<AbortController | null>(null);
 
   const connectWithClient = async (dcvUrl: string, browserUrl?: string) => {
     const result = await launchDcvClient(dcvUrl);
     if (result === 'not-detected') setPending({ dcvUrl, browserUrl });
   };
 
-  const close = () => setPending(null);
+  const close = () => {
+    retryLaunch.current?.abort();
+    retryLaunch.current = null;
+    setPending(null);
+  };
 
   // Runs inside the click handler, so the launch has a fresh user gesture.
   const tryAgain = async () => {
     if (!pending) return;
+    retryLaunch.current?.abort();
+    const controller = new AbortController();
+    retryLaunch.current = controller;
     setRetrying(true);
     try {
-      if ((await launchDcvClient(pending.dcvUrl)) === 'launched') close();
+      const result = await launchDcvClient(pending.dcvUrl, { signal: controller.signal });
+      if (result === 'launched' && !controller.signal.aborted) close();
     } finally {
+      if (retryLaunch.current === controller) retryLaunch.current = null;
       setRetrying(false);
     }
   };
@@ -53,32 +64,28 @@ export function useDcvClientPrompt(browserSessionsEnabled: boolean) {
   const promptModal = (
     <Modal
       open={!!pending}
-      title="Didn't the Amazon DCV client open?"
+      title="DCV client didn't open"
+      okText="Try again"
+      cancelText="Cancel"
+      onOk={tryAgain}
       onCancel={close}
-      footer={
-        <Space wrap>
-          <Button onClick={close}>Cancel</Button>
+      // Not confirmLoading: Ant Design ignores Cancel while that is set, and
+      // Cancel must be able to stop a running Try again.
+      okButtonProps={{ loading: retrying }}
+      footer={(_, { OkBtn, CancelBtn }) => (
+        <>
+          <CancelBtn />
           {showBrowserOption && <Button onClick={connectInBrowser}>Connect in browser</Button>}
-          <Button onClick={tryAgain} loading={retrying}>
-            Try again
-          </Button>
-          <Button
-            type="primary"
-            icon={<DownloadOutlined />}
-            href={DCV_CLIENT_DOWNLOAD_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Download the DCV client
-          </Button>
-        </Space>
-      }
+          <OkBtn />
+        </>
+      )}
     >
       <Paragraph>
-        If your browser asked whether to open Amazon DCV, choose Open. If the client isn't installed, download and
-        install it, then choose Try again.
+        Install the Amazon DCV client, then try again.{' '}
+        <Link href={DCV_CLIENT_DOWNLOAD_URL} target="_blank" rel="noopener noreferrer">
+          <DownloadOutlined /> Download the DCV client
+        </Link>
       </Paragraph>
-      {showBrowserOption && <Paragraph>You can also connect in a browser tab instead.</Paragraph>}
     </Modal>
   );
 

@@ -44,12 +44,15 @@ export function toDcvClientUrl(connectionUrl: string): string {
 export interface LaunchDcvClientOptions {
   timeoutMs?: number;
   method?: DcvLaunchMethod;
+  /** Aborting stops detection at once: listeners, timer and iframe are removed and the result is `not-detected`. */
+  signal?: AbortSignal;
 }
 
 export function launchDcvClient(
   url: string,
-  { timeoutMs = DCV_LAUNCH_TIMEOUT_MS, method = defaultLaunchMethod() }: LaunchDcvClientOptions = {},
+  { timeoutMs = DCV_LAUNCH_TIMEOUT_MS, method = defaultLaunchMethod(), signal }: LaunchDcvClientOptions = {},
 ): Promise<DcvLaunchResult> {
+  if (signal?.aborted) return Promise.resolve('not-detected');
   return new Promise((resolve) => {
     let iframe: HTMLIFrameElement | null = null;
     let settled = false;
@@ -60,6 +63,7 @@ export function launchDcvClient(
       clearTimeout(timeoutId);
       window.removeEventListener('blur', onBlur);
       document.removeEventListener('visibilitychange', onVisibilityChange);
+      signal?.removeEventListener('abort', onAbort);
       iframe?.remove();
       iframe = null;
       resolve(result);
@@ -75,8 +79,11 @@ export function launchDcvClient(
       if (document.visibilityState === 'hidden') finish('launched');
     };
 
+    const onAbort = () => finish('not-detected');
+
     window.addEventListener('blur', onBlur);
     document.addEventListener('visibilitychange', onVisibilityChange);
+    signal?.addEventListener('abort', onAbort);
     const timeoutId = setTimeout(
       () => finish(blurred && !document.hasFocus() ? 'launched' : 'not-detected'),
       timeoutMs,

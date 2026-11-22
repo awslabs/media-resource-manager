@@ -147,6 +147,38 @@ describe('launchDcvClient', () => {
   });
 });
 
+describe('launchDcvClient abort', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+    document.body.innerHTML = '';
+  });
+
+  it('stops at once when aborted: not-detected, iframe, listeners and timer removed', async () => {
+    const removeWindow = vi.spyOn(window, 'removeEventListener');
+    const removeDocument = vi.spyOn(document, 'removeEventListener');
+    const controller = new AbortController();
+    const result = launchDcvClient(LINK, { method: 'iframe', signal: controller.signal });
+    expect(document.querySelector('iframe')).not.toBeNull();
+
+    controller.abort();
+    await expect(result).resolves.toBe('not-detected');
+    expect(document.querySelector('iframe')).toBeNull();
+    expect(removeWindow).toHaveBeenCalledWith('blur', expect.any(Function));
+    expect(removeDocument).toHaveBeenCalledWith('visibilitychange', expect.any(Function));
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('does not open the link when the signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(launchDcvClient(LINK, { method: 'iframe', signal: controller.signal })).resolves.toBe('not-detected');
+    expect(document.querySelector('iframe')).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
 describe('defaultLaunchMethod', () => {
   it('uses an iframe in Firefox and a top-level navigation in Chromium browsers', () => {
     expect(defaultLaunchMethod('Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0')).toBe('iframe');
