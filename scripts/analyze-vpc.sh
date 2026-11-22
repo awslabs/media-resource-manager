@@ -498,24 +498,39 @@ console.log('✅ Subnets OK: one private' + (pub.length ? ' and one public' : ''
         return 1
     fi
 
-    # Changing the subnets of an existing install replaces AWS Managed Microsoft AD
-    # (and with it every domain join), so stop if they differ from the deployed ones.
-    local pascal=$(get_pascal_case)
-    local deployed out
-    out=$(aws ssm get-parameter --name "/${pascal}/Network/PrivateSubnetIds" --query 'Parameter.Value' --output text 2>&1)
-    if [[ $? -eq 0 ]]; then
-        deployed=$(echo "$out" | tr -d '[:space:]')
-        if [[ -n "$deployed" && "$deployed" != "$private_ids" ]]; then
-            print_error "PrivateSubnetIds differ from the subnets this install is deployed on."
-            echo "  Deployed:   $deployed"
-            echo "  Configured: $private_ids"
+    # Changing or reordering the subnets of an existing install replaces AWS Managed
+    # Microsoft AD (and with it every domain join), the DNS resolver endpoint and the
+    # load balancers, so stop if they differ from the ones it is deployed on.
+    check_deployed_subnets PrivateSubnetIds "$private_ids" || return 1
+    check_deployed_subnets PublicSubnetIds "$public_ids" || return 1
+    return 0
+}
+
+# Compare a configured subnet list with the one the install is deployed on
+# (the /<PascalName>/Network/<key> parameter that NetworkConstruct writes).
+# Order matters: CDK uses the list by position.
+check_deployed_subnets() {
+    local key=$1 configured=$2
+    local name="/$(get_pascal_case)/Network/${key}"
+    local out deployed
+    out=$(aws ssm get-parameter --name "$name" --query 'Parameter.Value' --output text 2>&1)
+    if [[ $? -ne 0 ]]; then
+        [[ "$out" == *ParameterNotFound* ]] && return 0
+        print_error "Could not read $name to compare with the deployed subnets: $out"
+        return 1
+    fi
+    deployed=$(echo "$out" | tr -d '[:space:]')
+    if [[ -n "$deployed" && "$deployed" != "$configured" ]]; then
+        print_error "$key differs from the subnets this install is deployed on (or is in a different order)."
+        echo "  Deployed:   $deployed"
+        echo "  Configured: ${configured:-<empty>}"
+        if [[ "$key" == PrivateSubnetIds ]]; then
             echo "  Changing them replaces the Managed AD directory (users and domain joins are lost),"
-            echo "  the DNS resolver endpoint and the load balancers. Set PrivateSubnetIds back to the"
-            echo "  deployed value to continue."
-            return 1
+            echo "  the DNS resolver endpoint and the internal load balancers."
+        else
+            echo "  Changing them moves the internet-facing DCV load balancer and connection gateway."
         fi
-    elif [[ "$out" != *ParameterNotFound* ]]; then
-        print_error "Could not read /${pascal}/Network/PrivateSubnetIds to compare with the deployed subnets: $out"
+        echo "  Set $key to the deployed value, in the same order, to continue."
         return 1
     fi
     return 0

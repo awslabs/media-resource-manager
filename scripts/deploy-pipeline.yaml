@@ -180,6 +180,9 @@ Parameters:
       (Optional) Existing VPC ID for deployment. Leave empty to create a
       new VPC. This value is written into parameters.json.
 
+  # String, not CommaDelimitedList or List<AWS::EC2::Subnet::Id>: an empty
+  # default must stay valid for installs where MRM creates the VPC, and a
+  # CommaDelimitedList applies AllowedPattern to each (here empty) item.
   PrivateSubnetIds:
     Type: String
     Default: ''

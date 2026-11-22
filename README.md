@@ -611,17 +611,26 @@ target of its default route. Set the subnets in one of these ways:
 - **Local deploy:** add `PrivateSubnetIds` and `PublicSubnetIds` to
   `parameters.json`, or run `./deploy.sh` in a terminal and pick them.
 
-Choose the subnets before the first deploy and don't change them later.
-AWS Managed Microsoft AD is created in the first two private subnets, and
-changing them replaces the directory, which loses its users and breaks every
-domain-joined workstation. The analyzer stops if `PrivateSubnetIds` differs
-from the subnets an install is deployed on.
+Choose the subnets before the first deploy and don't change or reorder them
+later. AWS Managed Microsoft AD is created in the first two private subnets,
+and changing them replaces the directory, which loses its users and breaks
+every domain-joined workstation. The analyzer stops if `PrivateSubnetIds` or
+`PublicSubnetIds` differs from, or is in a different order than, the subnets
+an install is deployed on.
 
-Without `PrivateSubnetIds`, CDK looks the VPC up and counts a subnet as
-private only when its default route goes to a NAT gateway or a transit
-gateway. A subnet that routes through a NAT instance or a network interface
-counts as isolated, and the synth stops with "found 0 private subnet(s)". Set
-`PrivateSubnetIds`, or tag those subnets `aws-cdk:subnet-type` = `Private`.
+**Private subnets that route through a NAT instance.** Without
+`PrivateSubnetIds`, CDK looks the VPC up and counts a subnet as private only
+when its default route goes to a NAT gateway or a transit gateway. A subnet
+whose default route goes to a NAT instance or a network interface counts as
+isolated, and the synth stops with "found 0 private subnet(s)". Either set
+`PrivateSubnetIds`, or tag those subnets so the lookup counts them as private:
+
+```bash
+aws ec2 create-tags --resources subnet-aaa subnet-bbb \
+  --tags Key=aws-cdk:subnet-type,Value=Private
+```
+
+Tag your public subnets `Value=Public` the same way if the lookup misses them.
 
 ### Hostname Customization
 

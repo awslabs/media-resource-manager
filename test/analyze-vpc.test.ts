@@ -61,7 +61,8 @@ case "$1 $2" in
     if [ -f "$STUB_DIR/stack-status" ]; then cat "$STUB_DIR/stack-status"
     else echo "An error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id $4 does not exist" >&2; exit 254; fi ;;
   "ssm get-parameter")
-    if [ -f "$STUB_DIR/deployed-private-ids" ]; then cat "$STUB_DIR/deployed-private-ids"
+    f="$STUB_DIR/deployed-$(basename "$4")"
+    if [ -f "$f" ]; then cat "$f"
     else echo "An error occurred (ParameterNotFound) when calling the GetParameter operation: " >&2; exit 254; fi ;;
   *) echo "unexpected aws call: $*" >&2; exit 99 ;;
 esac
@@ -71,7 +72,8 @@ interface RunOptions {
   params: Record<string, string>;
   subnets?: object[];
   stackStatus?: string;
-  deployedPrivateIds?: string;
+  /** Values of /<PascalName>/Network/<key> in SSM, i.e. the subnets the install is deployed on. */
+  deployed?: { PrivateSubnetIds?: string; PublicSubnetIds?: string };
   productName?: string;
 }
 
@@ -102,7 +104,9 @@ function run(opts: RunOptions): RunResult {
   fs.writeFileSync(path.join(stubDir, 'route-tables.json'), JSON.stringify(ROUTE_TABLES));
   fs.writeFileSync(path.join(stubDir, 'calls.log'), '');
   if (opts.stackStatus) fs.writeFileSync(path.join(stubDir, 'stack-status'), opts.stackStatus);
-  if (opts.deployedPrivateIds) fs.writeFileSync(path.join(stubDir, 'deployed-private-ids'), opts.deployedPrivateIds);
+  for (const [key, value] of Object.entries(opts.deployed ?? {})) {
+    fs.writeFileSync(path.join(stubDir, `deployed-${key}`), value);
+  }
   if (opts.productName) {
     fs.writeFileSync(path.join(workDir, 'cdk.json'), JSON.stringify({ context: { productName: opts.productName } }));
   }
@@ -139,12 +143,18 @@ describe('analyze-vpc.sh', () => {
 
   test('accepts explicit subnet IDs that match the deployed ones', () => {
     const r = run({
-      params: { VpcId: VPC_ID, AvailabilityZones: 'us-east-1a,us-east-1b', PrivateSubnetIds: 'subnet-0a02, subnet-0b02' },
-      deployedPrivateIds: 'subnet-0a02,subnet-0b02\n',
+      params: {
+        VpcId: VPC_ID,
+        AvailabilityZones: 'us-east-1a,us-east-1b',
+        PrivateSubnetIds: 'subnet-0a02, subnet-0b02',
+        PublicSubnetIds: 'subnet-0a01,subnet-0b01',
+      },
+      deployed: { PrivateSubnetIds: 'subnet-0a02,subnet-0b02\n', PublicSubnetIds: 'subnet-0a01,subnet-0b01\n' },
     });
     expect(r.status).toBe(0);
     expect(r.params.PrivateRouteTableIds).toBe('rtb-0a02,rtb-0b02');
     expect(r.calls).toMatch(/ssm get-parameter --name \/MediaResourceManager\/Network\/PrivateSubnetIds/);
+    expect(r.calls).toMatch(/ssm get-parameter --name \/MediaResourceManager\/Network\/PublicSubnetIds/);
   });
 
   test('rejects a subnet in the wrong AZ position and leaves parameters.json alone', () => {
@@ -162,12 +172,43 @@ describe('analyze-vpc.sh', () => {
     expect(r.params.PrivateRouteTableIds).toBeUndefined();
   });
 
-  test('stops when explicit subnet IDs differ from the deployed ones', () => {
-    const params = { VpcId: VPC_ID, PrivateSubnetIds: 'subnet-0a02,subnet-0b02' };
-    const r = run({ params, deployedPrivateIds: 'subnet-0a03,subnet-0b03' });
+  // Changing or reordering the deployed subnets would replace Managed AD (private)
+  // or move the DCV gateway load balancer (public), so each case must stop.
+  test.each<{ name: string; params: Record<string, string>; deployed: RunOptions['deployed']; key: string; shown: string }>([
+    {
+      name: 'different private subnets',
+      params: { AvailabilityZones: '', PrivateSubnetIds: 'subnet-0a02,subnet-0b02' },
+      deployed: { PrivateSubnetIds: 'subnet-0a03,subnet-0b03' },
+      key: 'PrivateSubnetIds',
+      shown: 'subnet-0a03,subnet-0b03',
+    },
+    {
+      name: 'reordered private subnets',
+      params: { AvailabilityZones: 'us-east-1b,us-east-1a', PrivateSubnetIds: 'subnet-0b02,subnet-0a02' },
+      deployed: { PrivateSubnetIds: 'subnet-0a02,subnet-0b02' },
+      key: 'PrivateSubnetIds',
+      shown: 'subnet-0a02,subnet-0b02',
+    },
+    {
+      name: 'different public subnets',
+      params: { AvailabilityZones: '', PrivateSubnetIds: 'subnet-0a02,subnet-0b02', PublicSubnetIds: 'subnet-0a03,subnet-0b03' },
+      deployed: { PrivateSubnetIds: 'subnet-0a02,subnet-0b02', PublicSubnetIds: 'subnet-0a01,subnet-0b01' },
+      key: 'PublicSubnetIds',
+      shown: 'subnet-0a01,subnet-0b01',
+    },
+    {
+      name: 'public subnets left out',
+      params: { AvailabilityZones: '', PrivateSubnetIds: 'subnet-0a02,subnet-0b02' },
+      deployed: { PrivateSubnetIds: 'subnet-0a02,subnet-0b02', PublicSubnetIds: 'subnet-0a01,subnet-0b01' },
+      key: 'PublicSubnetIds',
+      shown: 'subnet-0a01,subnet-0b01',
+    },
+  ])('stops on $name against the deployed install', ({ params: given, deployed, key, shown }) => {
+    const params = { VpcId: VPC_ID, ...given };
+    const r = run({ params, deployed });
     expect(r.status).toBe(1);
-    expect(r.output).toMatch(/differ from the subnets this install is deployed on/);
-    expect(r.output).toMatch(/Deployed: +subnet-0a03,subnet-0b03/);
+    expect(r.output).toContain(`${key} differs from the subnets this install is deployed on`);
+    expect(r.output).toMatch(new RegExp(`Deployed: +${shown}`));
     expect(r.params).toEqual(params);
   });
 
