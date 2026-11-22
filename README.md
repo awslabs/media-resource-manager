@@ -215,11 +215,11 @@ After deployment:
 
 1. **Get the frontend URL** from the deployment output or:
    ```bash
-   aws ssm get-parameter --name "/MediaResourceManager/Frontend/CloudFrontUrl" --query "Parameter.Value" --output text
+   aws ssm get-parameter --name "/MediaResourceManager/Frontend/Url" --query "Parameter.Value" --output text
    ```
 
 2. **Set up authentication** based on your `UseCognitoAuth` setting:
-   - **Cognito (recommended)**: See [Post-Deployment Setup](#post-deployment-setup) for Okta/Identity Center integration or native Cognito users
+   - **Cognito (recommended)**: Each address in `AdminEmails` gets an invite email with the frontend URL and a temporary password. If `AdminEmails` was empty, nobody can sign in yet: see [Native Cognito users](#2-authentication-setup) to add one, or set up Okta/Identity Center
    - **LDAP**: Retrieve ResourceAdmin credentials from Secrets Manager
 
 3. **Create your first workstation** from the admin console
@@ -333,7 +333,7 @@ The stack name you choose (e.g., `MRM-DeployPipeline`) is used to auto-generate 
 | `DcvCertificateArn` | *(empty)* | ACM certificate ARN for custom DCV domain |
 | `DcvDomainName` | *(empty)* | Custom domain for DCV connections |
 | `FrontendUrl` | *(empty)* | Custom URL for web console (e.g., `https://vdi.company.com`). Leave empty for auto-generated CloudFront URL. |
-| `AdminEmails` | *(empty)* | Comma-separated emails to create as Cognito admin users on first deploy (e.g., `admin@company.com`). Each receives a welcome email with temp password. |
+| `AdminEmails` | *(empty)* | Comma-separated emails to create as Cognito admin users (e.g., `admin@company.com`). Each receives a welcome email with the frontend URL and a temporary password. Addresses added later are created on the next deploy. With Cognito on and no SAML IdP, leave it empty only if you will [create users yourself](#2-authentication-setup): otherwise nobody can sign in. |
 | `IdentityCenterSyncGroups` | *(empty)* | Identity Center group(s) to sync users from |
 | `EnableBedrockFeatures` | `true` | Set to `false` to skip AI/Bedrock stacks and hide AI features in the frontend. Useful for accounts with SCPs that restrict Bedrock access. |
 | `MacBuildAvailabilityZone` | *(empty)* | AZ for macOS Image Builder builds (e.g., `us-east-1c`). Must match an AZ where mac dedicated hosts can be allocated. Leave empty to use the first private subnet's AZ. |
@@ -574,7 +574,7 @@ cp parameters.example.json parameters.json
 | `DcvDomainName` | *(empty)* | Custom domain for DCV connections |
 | `IdentityCenterSyncGroups` | *(empty)* | Groups to sync from Identity Center |
 | `FrontendUrl` | *(empty)* | Custom URL for web console |
-| `AdminEmails` | *(empty)* | Comma-separated emails to create as Cognito admin users on first deploy. Each receives a welcome email with temp password. |
+| `AdminEmails` | *(empty)* | Comma-separated emails to create as Cognito admin users. Each receives a welcome email with the frontend URL and a temporary password. Addresses added later are created on the next deploy. With Cognito on and no SAML IdP, leave it empty only if you will [create users yourself](#2-authentication-setup): otherwise nobody can sign in. |
 | `EnableBedrockFeatures` | `true` | Set to `false` to disable AI/Bedrock features. Useful for accounts with SCPs that restrict Bedrock access. |
 | `MacBuildAvailabilityZone` | *(empty)* | AZ for macOS Image Builder builds (e.g., `us-east-1c`). Must match an AZ where mac dedicated hosts can be allocated. Leave empty to use the first private subnet's AZ. |
 | `WafAllowedIps` | *(empty)* | Comma-separated CIDR ranges to whitelist for CloudFront access. When set, creates a WAF WebACL that blocks all traffic except from these IPs. Leave empty for no restriction. |
@@ -611,7 +611,7 @@ Numbers are assigned atomically via DynamoDB to prevent collisions during concur
 
 Get the frontend URL:
 ```bash
-aws ssm get-parameter --name "/MediaResourceManager/Frontend/CloudFrontUrl" --query "Parameter.Value" --output text
+aws ssm get-parameter --name "/MediaResourceManager/Frontend/Url" --query "Parameter.Value" --output text
 ```
 
 ### 2. Authentication Setup
@@ -631,22 +631,28 @@ aws ssm get-parameter --name "/MediaResourceManager/Frontend/CloudFrontUrl" --qu
    ```
 
 **With Native Cognito Users (no external IdP):**
+
+Self sign-up is off, so a user can sign in only after an administrator creates them. The easiest way is to list the first administrators in `AdminEmails` before you deploy (see [Configuration](#configuration)). The deployment creates the `AdminGroupName` group, creates a user for each address, adds them to the group, and Cognito emails each one the frontend URL and a temporary password.
+
+If you deployed with `AdminEmails` empty, the deployment warns that nobody can sign in. Either add addresses to `AdminEmails` and deploy again, or create a user yourself. The `MRM-Frontend` stack output `AdminOnboardingCommands` holds these commands with your User Pool ID filled in:
 ```bash
 USER_POOL_ID=$(aws ssm get-parameter --name "/MediaResourceManager/Auth/UserPoolId" --query "Parameter.Value" --output text)
 
-# Create admin group
-aws cognito-idp create-group --user-pool-id $USER_POOL_ID --group-name "MRM-Admins"
-
-# Create user
+# Create the user. Cognito emails them the frontend URL and a temporary password.
 aws cognito-idp admin-create-user --user-pool-id $USER_POOL_ID \
   --username "admin@example.com" \
   --user-attributes Name=email,Value=admin@example.com Name=email_verified,Value=true \
-  --temporary-password "TempPass123!"
+    Name=given_name,Value=Admin Name=family_name,Value=User \
+  --desired-delivery-mediums EMAIL
 
-# Add to admin group
+# Make them an administrator (the group from AdminGroupName, MRM-Admins by default)
 aws cognito-idp admin-add-user-to-group --user-pool-id $USER_POOL_ID \
   --username "admin@example.com" --group-name "MRM-Admins"
 ```
+
+You can also create the user in the Amazon Cognito console (**User pools** > `MRM-UserPool` > **Users** > **Create user**, with **Send an email invitation**) and add them to the admin group there.
+
+The `Identity/*` secrets in Secrets Manager are Active Directory accounts for workstations, not web UI logins.
 
 #### Option B: LDAP Authentication
 

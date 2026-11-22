@@ -541,6 +541,7 @@ const frontendStack = new FrontendStack(app, `${naming.acronym}-Frontend`, {
   frontendCertificateArn: getContextOrParameter('frontendCertificateArn'),
   enableBedrockFeatures,
   webAclArn: wafStack.webAclArn,
+  adminSetup: infrastructureStack.auth.adminSetup,
 });
 frontendStack.addDependency(apiStack);
 frontendStack.addDependency(wafStack);
