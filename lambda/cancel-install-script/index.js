@@ -10,7 +10,7 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { EC2Client, TerminateInstancesCommand, DescribeInstancesCommand } = require('@aws-sdk/client-ec2');
-const { requireAdmin } = require('./authz');
+const { requireAdmin } = require('../shared/authz');
 const { redactForLog } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });

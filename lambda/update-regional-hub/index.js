@@ -4,7 +4,7 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
-const { requireAdmin } = require('./authz');
+const { requireAdmin } = require('../shared/authz');
 const { redactForLog } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({});
