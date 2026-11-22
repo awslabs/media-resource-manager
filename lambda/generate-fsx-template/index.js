@@ -1,11 +1,11 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-const crypto = require('crypto');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand } = require('@aws-sdk/lib-dynamodb');
 const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
+const { redactForLog } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({});
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -16,36 +16,21 @@ const PRIMARY_REGION = process.env.AWS_REGION;
 const REGIONAL_HUBS_TABLE = process.env.REGIONAL_HUBS_TABLE_NAME;
 
 /**
- * Generate a secure random password for ONTAP admin
- * Must meet ONTAP password requirements: 8-50 chars, at least one letter and one digit
- * (FSx accepts any characters except NUL, NEL, LS, PS, CR and LF).
- * The special characters exclude `"` and `\` because the password is
- * substituted into a JSON secret string.
- * Uses crypto.randomInt, which is cryptographically secure and unbiased.
+ * ONTAP admin password settings for Secrets Manager GenerateSecretString.
+ * FSx accepts 8-50 characters (any except NUL, NEL, LS, PS, CR and LF) and
+ * ONTAP needs at least one letter and one digit. The only punctuation kept is
+ * !@#$%^&*, the set MRM has always used: this excludes `"` and `\` (the
+ * password sits inside a JSON secret string) and `{` `}` (dynamic reference
+ * syntax).
  */
-function generateOntapPassword() {
-  const length = 24;
-  const lowercase = 'abcdefghijklmnopqrstuvwxyz';
-  const uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-  const digits = '0123456789';
-  const special = '!@#$%^&*';
-  const allChars = lowercase + uppercase + digits + special;
-  const pick = (chars) => chars[crypto.randomInt(chars.length)];
+const ONTAP_PASSWORD_LENGTH = 24;
+const ONTAP_PASSWORD_EXCLUDED_CHARACTERS = '"\'()+,-./:;<=>?[\\]_`{|}~';
 
-  // Ensure at least one of each required type
-  const password = [pick(lowercase), pick(uppercase), pick(digits), pick(special)];
-
-  // Fill the rest randomly
-  while (password.length < length) {
-    password.push(pick(allChars));
-  }
-
-  // Fisher-Yates shuffle so the required characters can be anywhere
-  for (let i = password.length - 1; i > 0; i--) {
-    const j = crypto.randomInt(i + 1);
-    [password[i], password[j]] = [password[j], password[i]];
-  }
-  return password.join('');
+// Builds a {{resolve:secretsmanager:...}} reference to one JSON key of a
+// secret in this template. CloudFormation resolves it when it creates the
+// resource, so the value never appears in the template or its parameters.
+function secretKeyRef(secretLogicalId, jsonKey) {
+  return {"Fn::Sub": `{{resolve:secretsmanager:\${${secretLogicalId}}:SecretString:${jsonKey}}}`};
 }
 
 /**
@@ -289,7 +274,7 @@ async function generateFsxWindowsTemplate(storageId, storageName, configuration,
  * @param regionalNetworkConfig - If provided, uses hardcoded values for regional hub.
  *                                If null, uses SSM dynamic references for primary region.
  */
-function generateFsxOntapTemplate(storageId, storageName, configuration, productName, adminPassword, regionalNetworkConfig = null) {
+function generateFsxOntapTemplate(storageId, storageName, configuration, productName, regionalNetworkConfig = null) {
   const haPairs = configuration.haPairs || 1;
   const throughputPerHaPair = configuration.throughputCapacityPerHaPair || 3072;
   const deploymentType = configuration.deploymentType || 'SINGLE_AZ_2';
@@ -349,7 +334,7 @@ function generateFsxOntapTemplate(storageId, storageName, configuration, product
     "DailyAutomaticBackupStartTime": "05:00",
     "WeeklyMaintenanceStartTime": "1:05:00",
     "ThroughputCapacityPerHAPair": {"Ref": "ThroughputCapacityPerHaPair"},
-    "FsxAdminPassword": {"Ref": "AdminPassword"}
+    "FsxAdminPassword": secretKeyRef("OntapAdminSecret", "fsxadminPassword")
   };
 
   if (deploymentType === 'SINGLE_AZ_2') {
@@ -421,12 +406,6 @@ function generateFsxOntapTemplate(storageId, storageName, configuration, product
         "Default": sanitizedName,
         "Description": "Sanitized name for ONTAP resources (alphanumeric and underscores only)"
       },
-      "AdminPassword": {
-        "Type": "String",
-        "Default": adminPassword,
-        "NoEcho": true,
-        "Description": "Admin password for ONTAP file system and SVM (fsxadmin/vsadmin)"
-      },
       "StorageId": {
         "Type": "String",
         "Default": storageId,
@@ -434,12 +413,35 @@ function generateFsxOntapTemplate(storageId, storageName, configuration, product
       }
     },
     "Resources": {
+      // Secrets Manager generates the admin password inside this stack.
+      // GenerateSecretString fills only one JSON key, so this secret holds
+      // the generated value and OntapAdminSecret copies it into both admin
+      // keys through dynamic references.
+      "OntapAdminPasswordSource": {
+        "Type": "AWS::SecretsManager::Secret",
+        "Properties": {
+          "Name": {"Fn::Sub": "/${ProductName}/Storage/${StorageId}/OntapAdminPasswordSource"},
+          "Description": {"Fn::Sub": "Generated ONTAP admin password for ${StorageName}. OntapAdminCredentials holds the same value."},
+          "GenerateSecretString": {
+            "SecretStringTemplate": "{}",
+            "GenerateStringKey": "password",
+            "PasswordLength": ONTAP_PASSWORD_LENGTH,
+            "ExcludeCharacters": ONTAP_PASSWORD_EXCLUDED_CHARACTERS,
+            "IncludeSpace": false,
+            "RequireEachIncludedType": true
+          },
+          "Tags": [
+            {"Key": "Name", "Value": {"Fn::Sub": "${StorageName}-ontap-password-source"}},
+            {"Key": "StorageId", "Value": {"Ref": "StorageId"}}
+          ]
+        }
+      },
       "OntapAdminSecret": {
         "Type": "AWS::SecretsManager::Secret",
         "Properties": {
           "Name": {"Fn::Sub": "/${ProductName}/Storage/${StorageId}/OntapAdminCredentials"},
           "Description": {"Fn::Sub": "ONTAP admin credentials for ${StorageName}"},
-          "SecretString": {"Fn::Sub": `{"fsxadminPassword":"\${AdminPassword}","vsadminPassword":"\${AdminPassword}","username":"fsxadmin","svmUsername":"vsadmin"}`},
+          "SecretString": {"Fn::Sub": '{"fsxadminPassword":"{{resolve:secretsmanager:${OntapAdminPasswordSource}:SecretString:password}}","vsadminPassword":"{{resolve:secretsmanager:${OntapAdminPasswordSource}:SecretString:password}}","username":"fsxadmin","svmUsername":"vsadmin"}'},
           "Tags": [
             {"Key": "Name", "Value": {"Fn::Sub": "${StorageName}-ontap-credentials"}},
             {"Key": "StorageId", "Value": {"Ref": "StorageId"}}
@@ -491,7 +493,7 @@ function generateFsxOntapTemplate(storageId, storageName, configuration, product
         "Properties": {
           "FileSystemId": {"Ref": "FsxOntapFileSystem"},
           "Name": {"Ref": "SanitizedName"},
-          "SvmAdminPassword": {"Ref": "AdminPassword"},
+          "SvmAdminPassword": secretKeyRef("OntapAdminSecret", "vsadminPassword"),
           "RootVolumeSecurityStyle": {"Ref": "SecurityStyle"},
           "Tags": [{"Key": "Name", "Value": {"Fn::Sub": "${StorageName}-svm"}}]
         }
@@ -643,10 +645,10 @@ async function getAdCredentials(productName) {
 
 
 exports.handler = async (event) => {
-  console.log('GenerateFsxTemplate received event:', JSON.stringify(event, null, 2));
+  console.log('GenerateFsxTemplate received event:', JSON.stringify(redactForLog(event), null, 2));
 
   const { storageId, name, type, configuration, region } = event;
-  console.log('Extracted values:', { storageId, name, type, configuration, region });
+  console.log('Extracted values:', redactForLog({ storageId, name, type, configuration, region }));
 
   const productName = process.env.PRODUCT_NAME;
   const acronym = process.env.ACRONYM;
@@ -660,10 +662,8 @@ exports.handler = async (event) => {
   let parameters;
 
   if (type === 'fsx-ontap') {
-    // Generate a secure password for ONTAP admin access
-    const adminPassword = generateOntapPassword();
-    
-    template = generateFsxOntapTemplate(storageId, name, configuration, productName, adminPassword, regionalNetworkConfig);
+    // The stack generates the ONTAP admin password itself (OntapAdminPasswordSource).
+    template = generateFsxOntapTemplate(storageId, name, configuration, productName, regionalNetworkConfig);
     // Sanitize name for ONTAP resources (only alphanumeric and underscores allowed)
     const sanitizedName = name.replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 190);
     
@@ -687,7 +687,6 @@ exports.handler = async (event) => {
       { ParameterKey: 'ProductName', ParameterValue: productName },
       { ParameterKey: 'StorageName', ParameterValue: name },
       { ParameterKey: 'SanitizedName', ParameterValue: sanitizedName },
-      { ParameterKey: 'AdminPassword', ParameterValue: adminPassword },
       { ParameterKey: 'StorageId', ParameterValue: storageId }
     ];
   } else {
@@ -715,6 +714,3 @@ exports.handler = async (event) => {
     region: region || PRIMARY_REGION
   };
 };
-
-// Exported for unit tests.
-exports.generateOntapPassword = generateOntapPassword;

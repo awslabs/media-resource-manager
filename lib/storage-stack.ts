@@ -191,8 +191,7 @@ export class StorageStack extends cdk.Stack {
     this.functions.generateFsxTemplate = new lambda.Function(this, 'GenerateFsxTemplateFunction', {
       functionName: `${props.acronym.toLowerCase()}-generate-fsx-template`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/generate-fsx-template'),
+      ...lambdaCodeWithShared('generate-fsx-template'),
       description: 'Generate CloudFormation template for FSx',
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
@@ -328,6 +327,14 @@ export class StorageStack extends cdk.Stack {
         'secretsmanager:GetSecretValue'
       ],
       resources: ['*'] // Cross-region requires wildcard
+    }));
+
+    // The ONTAP template generates its admin password with GenerateSecretString.
+    // GetRandomPassword has no resource type, so it can only be granted on '*'.
+    this.functions.storageCfnWorker.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['secretsmanager:GetRandomPassword'],
+      resources: ['*']
     }));
 
     // Parse Stack Outputs Function
