@@ -283,6 +283,15 @@ existing workstations kept their instance profile.
   keeps the names the deployed stack already has (see
   `lambda/generate-regional-hub-template/deployed-names.js`). Don't rename
   hub IAM resources.
+- **Hub stacks deploy with a scoped role, and hub roles carry a boundary.**
+  CloudFormation deploys hub stacks with `<ProductName>-RegionalHub-CFN-Role`,
+  whose policies (`lib/regional-hub-iam.ts`) allow only the resource types and
+  name patterns the hub template uses. Every hub IAM role gets the
+  `<ProductName>-RegionalHub-Boundary` permissions boundary, and the role can
+  only create or grant a hub role that has it. When you add a resource type,
+  a name pattern, a managed policy or a permission to a hub role, update
+  `lib/regional-hub-iam.ts` too: `test/regional-hub-iam.test.ts` fails until
+  the CFN policies and the boundary cover it.
 - **The fingerprint excludes `node_modules`.** `FINGERPRINT_EXCLUDE` in
   `lib/regional-hub-version.ts` leaves out installed and generated files,
   because a native dependency build (`ssh2` in `configure-ontap-cifs`) writes

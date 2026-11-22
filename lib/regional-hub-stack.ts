@@ -11,7 +11,12 @@ import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as path from 'path';
 import { Construct } from 'constructs';
+import { NagSuppressions } from 'cdk-nag';
 import { REGIONAL_HUB_LAMBDAS, regionalHubTemplateVersion } from './regional-hub-version';
+import {
+  boundaryPolicyName, cfnIamPolicyName, cfnPolicyName, cfnRoleName, regionalHubBoundaryDocument,
+  regionalHubCfnPolicyDocuments,
+} from './regional-hub-iam';
 
 interface RegionalHubStackProps extends cdk.StackProps {
   regionalHubsTable: dynamodb.Table;
@@ -151,14 +156,51 @@ export class RegionalHubStack extends cdk.Stack {
     // CloudFormation Service Role for creating regional hub stacks
     // This role is assumed by CloudFormation to create resources in target regions
     const cfnServiceRole = new iam.Role(this, 'RegionalHubCfnServiceRole', {
-      roleName: `${props.pascalCaseName}-RegionalHub-CFN-Role`,
+      roleName: cfnRoleName(props.pascalCaseName),
       assumedBy: new iam.ServicePrincipal('cloudformation.amazonaws.com'),
       description: 'Role assumed by CloudFormation to create regional hub infrastructure',
     });
 
-    // TODO: Lock down permissions after regional hub deployment is working
-    // For now, grant admin access to bypass permission issues during development
-    cfnServiceRole.addManagedPolicy(iam.ManagedPolicy.fromAwsManagedPolicyName('AdministratorAccess'));
+    // Least privilege for hub stacks (lib/regional-hub-iam.ts). Every hub IAM
+    // role carries the boundary, and the CFN role can't create or grant a
+    // hub role without it.
+    const hubIamNames = {
+      account: this.account,
+      primaryRegion: this.region,
+      productName: props.pascalCaseName,
+      acronym: props.acronym,
+      dynamoDbKmsKeyArn: props.dataEncryptionKey?.keyArn,
+    };
+    const boundary = new iam.ManagedPolicy(this, 'RegionalHubBoundary', {
+      managedPolicyName: boundaryPolicyName(props.pascalCaseName),
+      description: 'Permissions boundary for the IAM roles in regional hub stacks',
+      document: regionalHubBoundaryDocument(hubIamNames),
+    });
+    const cfnPolicies = regionalHubCfnPolicyDocuments(hubIamNames);
+    const cfnPolicy = new iam.ManagedPolicy(this, 'RegionalHubCfnPolicy', {
+      managedPolicyName: cfnPolicyName(props.pascalCaseName),
+      description: 'What CloudFormation may do outside IAM when it deploys a regional hub stack',
+      document: cfnPolicies.services,
+    });
+    const cfnIamPolicy = new iam.ManagedPolicy(this, 'RegionalHubCfnIamPolicy', {
+      managedPolicyName: cfnIamPolicyName(props.pascalCaseName),
+      description: 'What CloudFormation may do in IAM when it deploys a regional hub stack',
+      document: cfnPolicies.iam,
+    });
+    cfnServiceRole.addManagedPolicy(cfnPolicy);
+    cfnServiceRole.addManagedPolicy(cfnIamPolicy);
+    NagSuppressions.addResourceSuppressions([cfnPolicy, cfnIamPolicy], [{
+      id: 'AwsSolutions-IAM5',
+      reason: 'Hubs can be in any region and their physical IDs are generated, so resources are scoped by ' +
+        'region wildcard and hub name prefix. EC2 networking actions do not support name scoping. ' +
+        'test/regional-hub-iam.test.ts checks the policy against the hub template.',
+    }]);
+    NagSuppressions.addResourceSuppressions(boundary, [{
+      id: 'AwsSolutions-IAM5',
+      reason: 'A permissions boundary caps what hub roles can be granted. It is the union of the hub roles\' ' +
+        'own policies and the AWS managed policies they attach, which use wildcards (SSM, CloudWatch and ' +
+        'Lambda VPC access).',
+    }]);
 
     // Lambda to create CloudFormation stack in target region (used by state machine)
     const createRegionalHubCfnFunction = new lambda.Function(this, 'CreateRegionalHubCfnFunction', {
