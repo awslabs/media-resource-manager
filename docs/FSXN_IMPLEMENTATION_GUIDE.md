@@ -298,7 +298,8 @@ Resources:
         ThroughputCapacityPerHAPair: !Ref ThroughputCapacity
         HAPairs: !Ref HAPairs
         PreferredSubnetId: !Ref SubnetId
-        FsxAdminPassword: !Ref FsxAdminPassword
+        # Generated in the stack (OntapAdminPasswordSource), read from OntapAdminSecret
+        FsxAdminPassword: !Sub '{{resolve:secretsmanager:${OntapAdminSecret}:SecretString:fsxadminPassword}}'
         AutomaticBackupRetentionDays: !Ref BackupRetention
 
   # 3. Storage Virtual Machine (SVM)
@@ -347,7 +348,6 @@ Outputs:
 | StorageCapacity | Number | 1024 | Total SSD storage in GiB |
 | VolumeSize | Number | 1024000 | Initial volume size in MiB |
 | BackupRetention | Number | 30 | Days to retain backups |
-| FsxAdminPassword | String | - | ONTAP admin password |
 
 ---
 
@@ -372,9 +372,6 @@ Outputs:
 │  (Minimum 1,024 GiB)                                        │
 │                                                             │
 │  Backup Retention: [____30____] days                        │
-│                                                             │
-│  FSxN Admin Password: [________________________]            │
-│  (8-50 characters, for ONTAP CLI/API access)               │
 │                                                             │
 │  [▼ Show Advanced Settings]                                 │
 │                                                             │
@@ -455,8 +452,7 @@ Outputs:
     "securityStyle": "MIXED",
     "storageEfficiencyEnabled": true,
     "tieringPolicy": "AUTO",
-    "backupRetention": 30,
-    "fsxAdminPassword": "<REPLACE_WITH_SECURE_PASSWORD>"
+    "backupRetention": 30
   }
 }
 ```
@@ -560,7 +556,12 @@ Outputs:
 - Encryption in transit (SMB 3.x, NFS with TLS)
 
 ### Admin Access
-- FSxN admin password stored securely
+- Each storage stack generates the ONTAP admin password with Secrets Manager.
+  Nobody enters it in the create form, and it is not a stack parameter.
+- The secret `/<ProductName>/Storage/<StorageId>/OntapAdminCredentials` holds
+  `username` (`fsxadmin`), `fsxadminPassword`, `svmUsername` (`vsadmin`) and
+  `vsadminPassword`. To SSH to the management endpoint as `fsxadmin`, read
+  `fsxadminPassword` from that secret in the Secrets Manager console.
 - ONTAP CLI/API access for advanced management
 - Audit logging via CloudTrail
 
