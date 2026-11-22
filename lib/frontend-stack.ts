@@ -14,6 +14,7 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as acm from 'aws-cdk-lib/aws-certificatemanager';
 import { Construct } from 'constructs';
+import { AdminSetupConfig } from './constructs/auth-construct';
 
 export interface FrontendStackProps extends cdk.StackProps {
   productName: string;
@@ -27,6 +28,11 @@ export interface FrontendStackProps extends cdk.StackProps {
   frontendCertificateArn?: string;
   enableBedrockFeatures?: boolean;
   webAclArn?: string;
+  /**
+   * Cognito admin groups and users to create (AuthConstruct.adminSetup).
+   * Set only when the Infrastructure stack creates a local User Pool.
+   */
+  adminSetup?: AdminSetupConfig;
 }
 
 export class FrontendStack extends cdk.Stack {
@@ -219,13 +225,17 @@ export class FrontendStack extends cdk.Stack {
       onEventHandler: updateParameterFunction,
     });
 
-    new cdk.CustomResource(this, 'UpdateFrontendUrlParameter', {
+    const updateFrontendUrlParameter = new cdk.CustomResource(this, 'UpdateFrontendUrlParameter', {
       serviceToken: updateParameterProvider.serviceToken,
       properties: {
         CloudFrontUrl: `https://${this.distribution.distributionDomainName}`,
         CustomFrontendUrl: props.frontendUrl || '',
       },
     });
+
+    if (props.adminSetup) {
+      this.createAdminSetup(props, props.adminSetup, updateFrontendUrlParameter);
+    }
 
     // Store config generator Lambda ARN in SSM for scripts to use
     new ssm.StringParameter(this, 'ConfigGeneratorArnParameter', {
@@ -242,6 +252,62 @@ export class FrontendStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'WebsiteBucketName', {
       value: this.websiteBucket.bucketName,
       description: 'S3 bucket name for frontend',
+    });
+  }
+
+  /**
+   * Creates the Cognito admin groups and AdminEmails users. It runs after
+   * UpdateFrontendUrlParameter, so the invites, which the User Pool's
+   * CustomMessage trigger builds from that parameter, carry the real login
+   * URL even on the first install (#8, #20). The pool ID is read from SSM at
+   * deploy time rather than through a cross-stack export.
+   */
+  private createAdminSetup(props: FrontendStackProps, adminSetup: AdminSetupConfig, after: Construct) {
+    const userPoolId = ssm.StringParameter.valueForStringParameter(this, `/${props.pascalCaseName}/Auth/UserPoolId`);
+    const userPoolArn = `arn:aws:cognito-idp:${this.region}:${this.account}:userpool/${userPoolId}`;
+
+    const adminSetupFn = new lambda.Function(this, 'AdminSetupFunction', {
+      functionName: `${props.acronym.toLowerCase()}-admin-setup`,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      handler: 'index.handler',
+      timeout: cdk.Duration.seconds(30),
+      reservedConcurrentExecutions: 1,
+      environmentEncryption: props.dataEncryptionKey,
+      code: lambda.Code.fromAsset('lambda/create-admin-groups'),
+    });
+
+    adminSetupFn.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'cognito-idp:CreateGroup',
+        'cognito-idp:AdminCreateUser',
+        'cognito-idp:AdminGetUser',
+        'cognito-idp:AdminAddUserToGroup',
+      ],
+      resources: [userPoolArn],
+    }));
+
+    const adminSetupResource = new cdk.CustomResource(this, 'AdminSetup', {
+      serviceToken: adminSetupFn.functionArn,
+      properties: {
+        UserPoolId: userPoolId,
+        Groups: JSON.stringify(adminSetup.groups),
+        AdminEmails: JSON.stringify(adminSetup.emails),
+      },
+    });
+    adminSetupResource.node.addDependency(after);
+
+    // How to add a user who can sign in, for installs without AdminEmails (#20).
+    const cli = `aws cognito-idp --region ${this.region}`;
+    const addToGroup = adminSetup.groups.length > 0
+      ? ` && ${cli} admin-add-user-to-group --user-pool-id ${userPoolId} --username EMAIL --group-name ${adminSetup.groups[0]}`
+      : '';
+    new cdk.CfnOutput(this, 'AdminOnboardingCommands', {
+      value: `${cli} admin-create-user --user-pool-id ${userPoolId} --username EMAIL ` +
+        '--user-attributes Name=email,Value=EMAIL Name=email_verified,Value=true ' +
+        'Name=given_name,Value=FIRST Name=family_name,Value=LAST --desired-delivery-mediums EMAIL' +
+        addToGroup,
+      description: 'Creates a web UI user (replace EMAIL, FIRST and LAST) and makes them an admin. ' +
+        'Cognito emails them a temporary password and the login URL.',
     });
   }
 }

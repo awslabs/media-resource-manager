@@ -51,7 +51,13 @@ async function sendResponse(event, status, data = {}) {
 }
 
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify({ ...event, ResponseURL: event.ResponseURL && '[REDACTED]' }, null, 2));
+  // The event holds AdminEmails (personal data) and the pre-signed
+  // ResponseURL, so log only what identifies the request.
+  console.log('Event:', JSON.stringify({
+    RequestType: event.RequestType,
+    LogicalResourceId: event.LogicalResourceId,
+    RequestId: event.RequestId,
+  }));
 
   if (event.RequestType === 'Delete') {
     await sendResponse(event, 'SUCCESS', { Message: 'Delete - nothing to do' });
@@ -84,15 +90,23 @@ exports.handler = async (event) => {
     // Create admin users (idempotent — skips if user already exists)
     const firstGroup = groups.length > 0 ? groups[0] : null;
 
-    for (const email of emails) {
+    // An existing user is never created again, so a redeploy or upgrade
+    // re-sends no invite and resets no password. Users are logged by their
+    // position in AdminEmails, not their address.
+    let created = 0;
+    let existing = 0;
+    for (const [index, email] of emails.entries()) {
+      const user = `AdminEmails[${index}]`;
       try {
         await cognito.send(new AdminGetUserCommand({
           UserPoolId: userPoolId,
           Username: email,
         }));
-        console.log('User already exists:', email);
+        existing++;
+        console.log('User already exists:', user);
       } catch (err) {
-        if (err.name === 'UserNotFoundException') {
+        if (err.name !== 'UserNotFoundException') throw err;
+        try {
           await cognito.send(new AdminCreateUserCommand({
             UserPoolId: userPoolId,
             Username: email,
@@ -104,9 +118,14 @@ exports.handler = async (event) => {
             ],
             DesiredDeliveryMediums: ['EMAIL'],
           }));
-          console.log('Created user:', email);
-        } else {
-          throw err;
+          created++;
+          console.log('Created user:', user);
+        } catch (createErr) {
+          // Created since the lookup, or the address is another user's email
+          // alias. Either way the user exists: skip rather than fail the deploy.
+          if (createErr.name !== 'UsernameExistsException' && createErr.name !== 'AliasExistsException') throw createErr;
+          existing++;
+          console.log('User already exists:', user, `(${createErr.name})`);
         }
       }
 
@@ -118,12 +137,14 @@ exports.handler = async (event) => {
             Username: email,
             GroupName: firstGroup,
           }));
-          console.log('Added', email, 'to group:', firstGroup);
+          console.log('Added', user, 'to group:', firstGroup);
         } catch (err) {
           console.warn('Could not add user to group:', err.message);
         }
       }
     }
+
+    console.log(`Admin users: ${created} created, ${existing} already existed`);
 
     await sendResponse(event, 'SUCCESS', {
       GroupsCreated: groups.join(','),
