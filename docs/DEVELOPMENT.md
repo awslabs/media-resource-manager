@@ -197,11 +197,14 @@ every release has:
 
 ## Architecture Rules
 
-- **The API stack is at the CloudFormation resource limit.** The `<ACRONYM>-Api`
-  stack is close to CloudFormation's limit of 500 resources per stack, so a
-  change that adds API routes fails to deploy until
-  [#59](https://github.com/awslabs/media-resource-manager/issues/59) is fixed.
-  Check the resource count in the synthesized template before you add routes.
+- **API Lambda integrations use one invoke permission per function.** In
+  `lib/api-stack.ts`, create every Lambda integration with the local
+  `integrate(fn)` helper, which sets `scopePermissionToMethod: false`. CDK then
+  adds one invoke permission per function for the API, instead of two per
+  method. The `<ACRONYM>-Api` stack has about 356 of CloudFormation's 500
+  resources per stack, and `test/api-stack-resources.test.ts` fails if a
+  function gets more than one permission or the stack reaches 400. Check the
+  resource count in the synthesized template before you add routes.
 - **Shared Lambda code lives in `lambda/shared/`.** A Lambda that requires a
   shared module (for example `require('../shared/log-redact')`) must be
   defined with `lambdaCodeWithShared('<dir>')` from `lib/lambda-code.ts` in
