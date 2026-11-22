@@ -321,6 +321,8 @@ The stack name you choose (e.g., `MRM-DeployPipeline`) is used to auto-generate 
 | `GitBranch` | `main` | Branch or tag to deploy. Use `main` for latest, or pin to a release tag (e.g., `v0.1.0`) for stability. |
 | `GitHubTokenSecretName` | *(empty)* | Secrets Manager secret for private GitHub repos |
 | `VpcId` | *(empty)* | Existing VPC ID, or empty to create new |
+| `PrivateSubnetIds` | *(empty)* | Existing VPC only: comma-separated private subnet IDs, one per AZ, in the same order as `AvailabilityZones`. Required when the VPC has more than one private subnet in an AZ. See [Using an existing VPC](#using-an-existing-vpc). |
+| `PublicSubnetIds` | *(empty)* | Existing VPC only: comma-separated public subnet IDs, one per AZ, in the same AZ order as `PrivateSubnetIds`. |
 | `VpcCidr` | `10.1.0.0/16` | CIDR for new VPC |
 | `DomainName` | `studio.mrm.internal` | Active Directory domain name |
 | `UseCognitoAuth` | `true` | `true` for Cognito/SAML, `false` for LDAP |
@@ -564,6 +566,7 @@ cp parameters.example.json parameters.json
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `VpcId` | *(empty)* | Existing VPC ID, or empty to create new |
+| `PrivateSubnetIds` / `PublicSubnetIds` | *(empty)* | Existing VPC only: one subnet per AZ, comma-separated. See [Using an existing VPC](#using-an-existing-vpc). |
 | `VpcCidr` | `10.1.0.0/16` | CIDR for new VPC |
 | `DomainName` | `studio.mrm.internal` | AD domain for workstation domain-joining |
 | `UseCognitoAuth` | `true` | `true` for Cognito/SAML, `false` for LDAP |
@@ -583,13 +586,42 @@ cp parameters.example.json parameters.json
 | `SsoUserPoolClientId` | *(empty)* | Client ID of the external SSO User Pool. Required when `SsoUserPoolArn` is set. |
 | `SsoUserPoolDomain` | *(empty)* | Domain URL of the external SSO User Pool. Required when `SsoUserPoolArn` is set. |
 
-**Using an existing VPC:**
+#### Using an existing VPC
+
+MRM uses one private subnet and one public subnet in each Availability Zone,
+in at least 2 AZs. The private subnets need outbound internet access (a NAT
+gateway, NAT instance or transit gateway).
 
 When you set `VpcId`, the deployment script automatically runs `scripts/analyze-vpc.sh` to:
 - Inspect subnet layout
-- Prompt for subnet selection (if multiple subnets per AZ)
-- Save `PrivateSubnetIds`, `PublicSubnetIds`, `AvailabilityZones` to parameters.json
+- Check the subnets in `PrivateSubnetIds` and `PublicSubnetIds` when you set them: each must be in the VPC, one per AZ, in the order of `AvailabilityZones` (filled in from the subnets when empty)
+- Prompt for subnet selection (if multiple subnets per AZ and you run `./deploy.sh` in a terminal)
+- Save `PrivateSubnetIds`, `PublicSubnetIds`, `AvailabilityZones` and the private route tables to parameters.json
 - Check NACLs for DCV UDP/QUIC compatibility
+
+If the VPC has more than one private or public subnet in an AZ, choose them
+yourself when there is no terminal (the deploy pipeline). On a first deploy
+the analyzer stops with exit code 3 and lists each candidate subnet with the
+target of its default route. Set the subnets in one of these ways:
+
+- **Deploy pipeline:** update the pipeline stack and set its `PrivateSubnetIds`
+  and `PublicSubnetIds` parameters, for example `subnet-aaa,subnet-bbb`.
+- **One pipeline build:** start the build with
+  `MRM_PARAM_OVERRIDES={"PrivateSubnetIds":"subnet-aaa,subnet-bbb","PublicSubnetIds":"subnet-ccc,subnet-ddd"}`.
+- **Local deploy:** add `PrivateSubnetIds` and `PublicSubnetIds` to
+  `parameters.json`, or run `./deploy.sh` in a terminal and pick them.
+
+Choose the subnets before the first deploy and don't change them later.
+AWS Managed Microsoft AD is created in the first two private subnets, and
+changing them replaces the directory, which loses its users and breaks every
+domain-joined workstation. The analyzer stops if `PrivateSubnetIds` differs
+from the subnets an install is deployed on.
+
+Without `PrivateSubnetIds`, CDK looks the VPC up and counts a subnet as
+private only when its default route goes to a NAT gateway or a transit
+gateway. A subnet that routes through a NAT instance or a network interface
+counts as isolated, and the synth stops with "found 0 private subnet(s)". Set
+`PrivateSubnetIds`, or tag those subnets `aws-cdk:subnet-type` = `Private`.
 
 ### Hostname Customization
 

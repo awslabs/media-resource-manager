@@ -2,6 +2,17 @@
 
 # VPC Analyzer Script
 # Analyzes an imported VPC and helps select subnets when multiple exist per AZ
+#
+# Modes:
+#   - PrivateSubnetIds set in parameters.json: validate the given subnets
+#     (no prompt) and write PrivateRouteTableIds.
+#   - One subnet of each type per AZ: save those subnets.
+#   - Several per AZ, with a terminal: prompt for the subnets to use.
+#   - Several per AZ, no terminal (CodeBuild): exit 3 on a fresh install with
+#     the candidate subnets; on an existing install, warn and keep the VPC
+#     lookup it was deployed with.
+#
+# Exit codes: 0 = done, 1 = error, 3 = subnet selection needed but no terminal.
 
 # Don't use set -e as we need to handle exit codes manually
 set +e
@@ -29,6 +40,34 @@ get_vpc_id() {
     node -p "JSON.parse(require('fs').readFileSync('parameters.json')).find(p => p.ParameterKey === 'VpcId')?.ParameterValue || ''" 2>/dev/null
 }
 
+# Get a parameter value from parameters.json (empty if unset)
+get_param() {
+    [[ -f "parameters.json" ]] || return 0
+    PARAM_KEY="$1" node -p "(JSON.parse(require('fs').readFileSync('parameters.json')).find(p => p.ParameterKey === process.env.PARAM_KEY)?.ParameterValue || '').replace(/\s+/g, '')" 2>/dev/null
+}
+
+# Product naming, as in bin/media-resource-manager.ts. The pipeline exports
+# ACRONYM and PASCAL_CASE; local runs derive them from cdk.json.
+get_product_name() {
+    node -p "(require('./cdk.json').context || {}).productName || 'Media Resource Manager'" 2>/dev/null || echo "Media Resource Manager"
+}
+get_acronym() {
+    if [[ -n "$ACRONYM" ]]; then echo "$ACRONYM"; return; fi
+    PRODUCT_NAME="$(get_product_name)" node -p "process.env.PRODUCT_NAME.trim().replace(/\s+/g, ' ').split(' ').map(w => w.charAt(0).toUpperCase()).join('')"
+}
+get_pascal_case() {
+    if [[ -n "$PASCAL_CASE" ]]; then echo "$PASCAL_CASE"; return; fi
+    PRODUCT_NAME="$(get_product_name)" node -p "process.env.PRODUCT_NAME.trim().replace(/\s+/g, '').replace(/[^a-zA-Z0-9]/g, '')"
+}
+
+# All subnets in the VPC (same shape for every caller)
+describe_vpc_subnets() {
+    aws ec2 describe-subnets \
+        --filters "Name=vpc-id,Values=$1" \
+        --query 'Subnets[*].{SubnetId:SubnetId,AZ:AvailabilityZone,CidrBlock:CidrBlock,MapPublicIpOnLaunch:MapPublicIpOnLaunch,Name:Tags[?Key==`Name`].Value|[0]}' \
+        --output json 2>/dev/null
+}
+
 # Get current region
 get_region() {
     aws configure get region 2>/dev/null || echo "${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
@@ -43,10 +82,7 @@ analyze_vpc() {
     echo ""
     
     # Get all subnets in the VPC
-    local subnets=$(aws ec2 describe-subnets \
-        --filters "Name=vpc-id,Values=$vpc_id" \
-        --query 'Subnets[*].{SubnetId:SubnetId,AZ:AvailabilityZone,CidrBlock:CidrBlock,MapPublicIpOnLaunch:MapPublicIpOnLaunch,Name:Tags[?Key==`Name`].Value|[0]}' \
-        --output json 2>/dev/null)
+    local subnets=$(describe_vpc_subnets "$vpc_id")
     
     if [[ -z "$subnets" ]] || [[ "$subnets" == "[]" ]]; then
         print_error "No subnets found in VPC $vpc_id"
@@ -108,7 +144,7 @@ const result = {
 };
 
 // Write to temp file for bash to read
-require('fs').writeFileSync('/tmp/vpc-analysis.json', JSON.stringify(result, null, 2));
+require('fs').writeFileSync(process.env.ANALYSIS_FILE, JSON.stringify(result, null, 2));
 
 if (hasMultiplePrivatePerAz || hasMultiplePublicPerAz) {
     console.log('');
@@ -127,13 +163,15 @@ if (hasMultiplePrivatePerAz || hasMultiplePublicPerAz) {
 "
     # Capture the exit code before || true modifies it
     local node_exit=$?
+    if [[ $node_exit -ne 0 && $node_exit -ne 2 ]] || [[ ! -s "$ANALYSIS_FILE" ]]; then
+        print_error "Could not analyze the subnets of VPC $vpc_id"
+        return 1
+    fi
     
     # Read the result from the temp file
-    if [[ -f "/tmp/vpc-analysis.json" ]]; then
-        local needs_selection=$(node -p "JSON.parse(require('fs').readFileSync('/tmp/vpc-analysis.json')).hasMultiplePrivatePerAz || JSON.parse(require('fs').readFileSync('/tmp/vpc-analysis.json')).hasMultiplePublicPerAz")
-        if [[ "$needs_selection" == "true" ]]; then
-            return 2
-        fi
+    local needs_selection=$(node -p "const a = JSON.parse(require('fs').readFileSync(process.env.ANALYSIS_FILE)); a.hasMultiplePrivatePerAz || a.hasMultiplePublicPerAz")
+    if [[ "$needs_selection" == "true" ]]; then
+        return 2
     fi
     
     # Check NACLs for UDP rules needed by DCV
@@ -141,7 +179,7 @@ if (hasMultiplePrivatePerAz || hasMultiplePublicPerAz) {
     
     # For simple VPCs (one subnet per AZ), auto-write subnet IDs to parameters.json
     # This avoids Vpc.fromLookup() which requires cdk.context.json cache
-    auto_save_simple_subnets "$vpc_id"
+    auto_save_simple_subnets "$vpc_id" || return 1
     
     return 0
 }
@@ -153,15 +191,15 @@ auto_save_simple_subnets() {
     local vpc_id=$1
     local region=$(get_region)
     
-    if [[ ! -f "/tmp/vpc-analysis.json" ]]; then
-        return
+    if [[ ! -s "$ANALYSIS_FILE" ]]; then
+        return 1
     fi
     
     local vpc_cidr=$(aws ec2 describe-vpcs --vpc-ids "$vpc_id" --query 'Vpcs[0].CidrBlock' --output text --region "$region" 2>/dev/null)
     
     node -e "
 const fs = require('fs');
-const analysis = JSON.parse(fs.readFileSync('/tmp/vpc-analysis.json'));
+const analysis = JSON.parse(fs.readFileSync(process.env.ANALYSIS_FILE));
 const subnets = analysis.subnets;
 const azs = Object.keys(subnets).sort();
 
@@ -179,7 +217,7 @@ const result = {
     publicSubnetIds: publicIds,
     availabilityZones: azs
 };
-fs.writeFileSync('/tmp/selected-subnets.json', JSON.stringify(result, null, 2));
+fs.writeFileSync(process.env.SELECTION_FILE, JSON.stringify(result, null, 2));
 "
     
     # Reuse the existing update_parameters function
@@ -243,15 +281,12 @@ select_subnets() {
     print_status "🎯 Interactive Subnet Selection"
     echo ""
     
-    # Read the analysis
-    local analysis=$(cat /tmp/vpc-analysis.json)
-    
     # Use node to handle the interactive selection
     node -e "
 const readline = require('readline');
 const fs = require('fs');
 
-const analysis = JSON.parse(fs.readFileSync('/tmp/vpc-analysis.json', 'utf8'));
+const analysis = JSON.parse(fs.readFileSync(process.env.ANALYSIS_FILE, 'utf8'));
 const subnets = analysis.subnets;
 const azs = Object.keys(subnets).sort();
 
@@ -329,7 +364,7 @@ async function selectSubnets() {
     console.log('  AZs:', azs.join(','));
     console.log('='.repeat(60));
     
-    fs.writeFileSync('/tmp/selected-subnets.json', JSON.stringify(result, null, 2));
+    fs.writeFileSync(process.env.SELECTION_FILE, JSON.stringify(result, null, 2));
 }
 
 selectSubnets().catch(console.error);
@@ -338,15 +373,14 @@ selectSubnets().catch(console.error);
 
 # Update parameters.json with selected subnets
 update_parameters() {
-    if [[ ! -f "/tmp/selected-subnets.json" ]]; then
+    if [[ ! -s "$SELECTION_FILE" ]]; then
         print_error "No subnet selection found"
         return 1
     fi
     
-    local selected=$(cat /tmp/selected-subnets.json)
-    local private_ids=$(echo "$selected" | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin')).privateSubnetIds.join(',')")
-    local public_ids=$(echo "$selected" | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin')).publicSubnetIds.join(',')")
-    local azs=$(echo "$selected" | node -p "JSON.parse(require('fs').readFileSync('/dev/stdin')).availabilityZones.join(',')")
+    local private_ids=$(node -p "JSON.parse(require('fs').readFileSync(process.env.SELECTION_FILE)).privateSubnetIds.join(',')")
+    local public_ids=$(node -p "JSON.parse(require('fs').readFileSync(process.env.SELECTION_FILE)).publicSubnetIds.join(',')")
+    local azs=$(node -p "JSON.parse(require('fs').readFileSync(process.env.SELECTION_FILE)).availabilityZones.join(',')")
     
     # Get VPC CIDR block
     local vpc_id=$(get_vpc_id)
@@ -367,8 +401,8 @@ update_parameters() {
     
     print_status "📝 Updating parameters.json with selected subnets..."
     
-    # Update parameters.json using node
-    node -e "
+    # Update parameters.json using node (values passed through the environment, not the script text)
+    SEL_PRIVATE="$private_ids" SEL_PUBLIC="$public_ids" SEL_AZS="$azs" SEL_CIDR="$vpc_cidr" SEL_RTS="$private_route_tables" node -e "
 const fs = require('fs');
 const params = JSON.parse(fs.readFileSync('parameters.json', 'utf8'));
 
@@ -386,15 +420,15 @@ function setParam(key, value, description) {
     }
 }
 
-setParam('PrivateSubnetIds', '$private_ids', 'Private subnet IDs (one per AZ) for Load Balancers and workstations');
-setParam('PublicSubnetIds', '$public_ids', 'Public subnet IDs (one per AZ) for internet-facing resources');
-setParam('AvailabilityZones', '$azs', 'Availability zones in use');
-setParam('VpcCidr', '$vpc_cidr', 'VPC CIDR block');
-setParam('PrivateRouteTableIds', '$private_route_tables', 'Route table IDs for private subnets (for VPC endpoint association)');
+setParam('PrivateSubnetIds', process.env.SEL_PRIVATE, 'Private subnet IDs (one per AZ) for Load Balancers and workstations');
+setParam('PublicSubnetIds', process.env.SEL_PUBLIC, 'Public subnet IDs (one per AZ) for internet-facing resources');
+setParam('AvailabilityZones', process.env.SEL_AZS, 'Availability zones in use');
+setParam('VpcCidr', process.env.SEL_CIDR, 'VPC CIDR block');
+setParam('PrivateRouteTableIds', process.env.SEL_RTS, 'Route table IDs for private subnets (for VPC endpoint association)');
 
 fs.writeFileSync('parameters.json', JSON.stringify(params, null, 2));
 console.log('✅ parameters.json updated successfully');
-"
+" || return 1
     
     print_success "Subnet configuration saved to parameters.json"
     echo ""
@@ -402,6 +436,138 @@ console.log('✅ parameters.json updated successfully');
     print_info "Public Subnets: $public_ids"
     print_info "Availability Zones: $azs"
     print_info "VPC CIDR: $vpc_cidr"
+}
+
+# Validate PrivateSubnetIds / PublicSubnetIds from parameters.json without
+# prompting, then write the selection for update_parameters. Never reorders:
+# CDK places subnet i in AvailabilityZones[i].
+validate_explicit_subnets() {
+    local vpc_id=$1
+    local private_ids=$(get_param PrivateSubnetIds)
+    local public_ids=$(get_param PublicSubnetIds)
+    local azs=$(get_param AvailabilityZones)
+
+    print_status "🔍 Checking the configured subnets against VPC $vpc_id..."
+
+    local subnets=$(describe_vpc_subnets "$vpc_id")
+    if [[ -z "$subnets" ]] || [[ "$subnets" == "[]" ]]; then
+        print_error "No subnets found in VPC $vpc_id"
+        return 1
+    fi
+
+    echo "$subnets" | SEL_PRIVATE="$private_ids" SEL_PUBLIC="$public_ids" SEL_AZS="$azs" VPC_ID="$vpc_id" node -e "
+const fs = require('fs');
+const inVpc = new Map(JSON.parse(fs.readFileSync('/dev/stdin', 'utf8')).map(s => [s.SubnetId, s]));
+const list = v => (v || '').split(',').map(s => s.trim()).filter(Boolean);
+const priv = list(process.env.SEL_PRIVATE);
+const pub = list(process.env.SEL_PUBLIC);
+let azs = list(process.env.SEL_AZS);
+const errors = [];
+
+for (const id of [...priv, ...pub]) {
+    if (!/^subnet-[0-9a-f]+\$/.test(id)) errors.push(id + ' is not a subnet ID');
+    else if (!inVpc.has(id)) errors.push(id + ' is not in VPC ' + process.env.VPC_ID);
+}
+const all = [...priv, ...pub];
+const dups = all.filter((id, i) => all.indexOf(id) !== i);
+if (dups.length) errors.push('listed more than once: ' + [...new Set(dups)].join(','));
+
+if (!errors.length) {
+    const az = id => inVpc.get(id).AZ;
+    if (priv.length < 2) errors.push('PrivateSubnetIds needs one subnet per AZ in at least 2 AZs (got ' + priv.length + ')');
+    const privAzs = priv.map(az);
+    if (new Set(privAzs).size !== privAzs.length) errors.push('PrivateSubnetIds has more than one subnet in an AZ (' + priv.map(id => id + '=' + az(id)).join(', ') + ')');
+    if (!azs.length) azs = privAzs;
+    if (azs.length !== priv.length) errors.push('AvailabilityZones lists ' + azs.length + ' AZ(s) (' + azs.join(',') + ') but PrivateSubnetIds has ' + priv.length + ' subnet(s)');
+    priv.forEach((id, i) => { if (azs[i] && az(id) !== azs[i]) errors.push('PrivateSubnetIds[' + i + '] ' + id + ' is in ' + az(id) + ', expected ' + azs[i] + ' (same order as AvailabilityZones)'); });
+    if (pub.length) {
+        if (pub.length !== priv.length) errors.push('PublicSubnetIds has ' + pub.length + ' subnet(s); give one per AZ, like PrivateSubnetIds (' + priv.length + ')');
+        pub.forEach((id, i) => { if (azs[i] && az(id) !== azs[i]) errors.push('PublicSubnetIds[' + i + '] ' + id + ' is in ' + az(id) + ', expected ' + azs[i] + ' (same order as AvailabilityZones)'); });
+    }
+}
+
+if (errors.length) {
+    errors.forEach(e => console.error('  - ' + e));
+    process.exit(1);
+}
+fs.writeFileSync(process.env.SELECTION_FILE, JSON.stringify({ privateSubnetIds: priv, publicSubnetIds: pub, availabilityZones: azs }, null, 2));
+console.log('✅ Subnets OK: one private' + (pub.length ? ' and one public' : '') + ' subnet in each of ' + azs.join(', '));
+"
+    if [[ $? -ne 0 ]]; then
+        print_error "PrivateSubnetIds / PublicSubnetIds are not valid for this VPC (see above)"
+        return 1
+    fi
+
+    # Changing the subnets of an existing install replaces AWS Managed Microsoft AD
+    # (and with it every domain join), so stop if they differ from the deployed ones.
+    local pascal=$(get_pascal_case)
+    local deployed out
+    out=$(aws ssm get-parameter --name "/${pascal}/Network/PrivateSubnetIds" --query 'Parameter.Value' --output text 2>&1)
+    if [[ $? -eq 0 ]]; then
+        deployed=$(echo "$out" | tr -d '[:space:]')
+        if [[ -n "$deployed" && "$deployed" != "$private_ids" ]]; then
+            print_error "PrivateSubnetIds differ from the subnets this install is deployed on."
+            echo "  Deployed:   $deployed"
+            echo "  Configured: $private_ids"
+            echo "  Changing them replaces the Managed AD directory (users and domain joins are lost),"
+            echo "  the DNS resolver endpoint and the load balancers. Set PrivateSubnetIds back to the"
+            echo "  deployed value to continue."
+            return 1
+        fi
+    elif [[ "$out" != *ParameterNotFound* ]]; then
+        print_error "Could not read /${pascal}/Network/PrivateSubnetIds to compare with the deployed subnets: $out"
+        return 1
+    fi
+    return 0
+}
+
+# Explain how to choose subnets when there is no terminal, listing each
+# candidate with the target of its default route.
+print_selection_help() {
+    local vpc_id=$1
+    local route_tables=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$vpc_id" --query 'RouteTables' --output json 2>/dev/null)
+    [[ -n "$route_tables" ]] || route_tables='[]'
+
+    print_error "VPC $vpc_id has more than one subnet of a type in an Availability Zone, and there is no terminal to choose them."
+    echo ""
+    echo "Set PrivateSubnetIds and PublicSubnetIds to one subnet per AZ (comma-separated, same AZ order), then deploy again:"
+    echo "  - Deploy pipeline: update the pipeline stack and set its PrivateSubnetIds and PublicSubnetIds parameters, or"
+    echo "    pass them for one build in MRM_PARAM_OVERRIDES, e.g."
+    echo "    {\"PrivateSubnetIds\":\"subnet-aaa,subnet-bbb\",\"PublicSubnetIds\":\"subnet-ccc,subnet-ddd\"}"
+    echo "  - Local deploy: add PrivateSubnetIds and PublicSubnetIds to parameters.json, or run ./deploy.sh in a terminal to choose."
+    echo ""
+    echo "Private subnets need outbound internet access (a NAT gateway, NAT instance or transit gateway)."
+    echo ""
+    echo "$route_tables" | node -e "
+const fs = require('fs');
+const analysis = JSON.parse(fs.readFileSync(process.env.ANALYSIS_FILE, 'utf8'));
+const tables = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8') || '[]');
+const main = tables.find(t => (t.Associations || []).some(a => a.Main));
+const tableFor = id => tables.find(t => (t.Associations || []).some(a => a.SubnetId === id)) || main;
+function defaultRoute(id) {
+    const t = tableFor(id);
+    const r = t && (t.Routes || []).find(r => r.DestinationCidrBlock === '0.0.0.0/0');
+    if (!r) return 'no default route';
+    const state = r.State === 'blackhole' ? ' (blackhole)' : '';
+    if (r.NatGatewayId) return 'NAT gateway ' + r.NatGatewayId + state;
+    if (r.TransitGatewayId) return 'transit gateway ' + r.TransitGatewayId + state;
+    if (r.InstanceId) return 'instance ' + r.InstanceId + state;
+    if (r.NetworkInterfaceId) return 'network interface ' + r.NetworkInterfaceId + state;
+    if (r.VpcPeeringConnectionId) return 'VPC peering ' + r.VpcPeeringConnectionId + state;
+    if (r.GatewayId && r.GatewayId.startsWith('igw-')) return 'internet gateway ' + r.GatewayId + state;
+    if (r.GatewayId) return 'gateway ' + r.GatewayId + state;
+    return 'other' + state;
+}
+console.log('Candidate subnets (default route):');
+for (const az of Object.keys(analysis.subnets).sort()) {
+    console.log('  ' + az);
+    for (const type of ['private', 'public']) {
+        for (const s of analysis.subnets[az][type]) {
+            console.log('    ' + type.padEnd(8) + s.SubnetId + '  ' + s.CidrBlock + '  ' + (s.Name || 'No Name') + '  -> ' + defaultRoute(s.SubnetId));
+        }
+    }
+}
+"
 }
 
 # Main execution
@@ -412,17 +578,53 @@ main() {
         print_warning "No VPC ID found in parameters.json - will create new VPC"
         exit 0
     fi
+
+    # Private working files (no fixed /tmp names, so a stale selection from an
+    # earlier run is never picked up)
+    WORK_DIR=$(mktemp -d) || exit 1
+    trap 'rm -rf "$WORK_DIR"' EXIT
+    export ANALYSIS_FILE="$WORK_DIR/vpc-analysis.json"
+    export SELECTION_FILE="$WORK_DIR/selected-subnets.json"
+
+    # Subnets given explicitly: validate them, no prompt
+    if [[ -n "$(get_param PrivateSubnetIds)" ]]; then
+        validate_explicit_subnets "$vpc_id" || exit 1
+        check_nacl_udp_rules "$vpc_id"
+        update_parameters || exit 1
+        exit 0
+    fi
     
     # Analyze the VPC
     analyze_vpc "$vpc_id"
     local result=$?
-    
-    if [[ $result -eq 2 ]]; then
-        # Multiple subnets per AZ detected - proceed with selection
+    [[ $result -eq 0 ]] && exit 0
+    [[ $result -eq 2 ]] || exit 1
+
+    # Multiple subnets per AZ detected - prompt when there is a terminal
+    if [[ -t 0 ]]; then
         select_subnets "$vpc_id"
-        update_parameters
+        update_parameters || exit 1
         exit 0
     fi
+
+    # No terminal (CodeBuild). An existing install keeps the VPC lookup it was
+    # deployed with: pinning subnets now could move its resources.
+    local infra_stack="$(get_acronym)-Infrastructure"
+    local status rc
+    status=$(aws cloudformation describe-stacks --stack-name "$infra_stack" --query 'Stacks[0].StackStatus' --output text 2>&1)
+    rc=$?
+    if [[ $rc -eq 0 && "$status" != "ROLLBACK_COMPLETE" && "$status" != "REVIEW_IN_PROGRESS" ]]; then
+        print_warning "$infra_stack exists ($status): keeping the VPC lookup this install was deployed with."
+        print_warning "To pin subnets, set PrivateSubnetIds and PublicSubnetIds to the subnets it already uses."
+        exit 0
+    fi
+    if [[ $rc -ne 0 && "$status" != *"does not exist"* ]]; then
+        print_error "Could not check whether $infra_stack exists: $status"
+        exit 1
+    fi
+
+    print_selection_help "$vpc_id"
+    exit 3
 }
 
 main "$@"
