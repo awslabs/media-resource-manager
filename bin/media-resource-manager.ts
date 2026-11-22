@@ -4,8 +4,8 @@
 
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
-import { Aspects } from 'aws-cdk-lib';
-import { AwsSolutionsChecks, NagSuppressions } from 'cdk-nag';
+import { NagSuppressions } from 'cdk-nag';
+import { addNagChecks } from '../lib/nag';
 import { ApiStack } from '../lib/api-stack';
 import { DcvInfrastructureStack } from '../lib/dcv-infrastructure-stack';
 import { FrontendStack } from '../lib/frontend-stack';
@@ -1027,3 +1027,6 @@ if (agentCoreStack) {
     },
   ]);
 }
+
+// cdk-nag runs only with `-c nag=true` (npm run nag); see docs/CDK_NAG.md.
+addNagChecks(app);

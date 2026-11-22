@@ -1,161 +1,96 @@
-# CDK Nag Implementation Guide
+# CDK Nag
 
-This document explains how CDK Nag is implemented in the Workstation Management CDK application for security and compliance validation.
+[cdk-nag](https://github.com/cdklabs/cdk-nag) checks the CDK app against the
+AWS Solutions rule pack (`AwsSolutionsChecks`). It is **opt-in**: it runs only
+when you synthesize with `-c nag=true`. A normal `cdk synth`, `cdk deploy` or
+pipeline build does not run it, and the templates are the same with or without
+the flag (the checks only add annotations).
 
-## Overview
-
-CDK Nag is integrated into the application to validate AWS resources against security best practices and compliance standards. It runs automatically during `cdk synth` operations and provides detailed feedback on potential security issues.
+Turning it on in the build is tracked in
+[#61](https://github.com/awslabs/media-resource-manager/issues/61).
 
 ## Usage
 
-### Running CDK Nag Checks
-
 ```bash
-# Quick check (quiet output)
+# Synthesize with cdk-nag on; findings are printed as synth errors/warnings
 npm run nag
 
-# Verbose output with detailed information
-npm run nag-verbose
-
-# Generate comprehensive report
+# Same synth, plus a summary by severity, rule and stack
 npm run nag-report
 ```
 
-### Understanding Output
+Both commands synthesize into `cdk.out.nag/` (gitignored), so they don't touch
+`cdk.out/`. The app needs the same `cdk.json`, `parameters.json`, built
+frontend and AWS credentials as a normal synth; pass a profile after `--`, for
+example `npm run nag -- --profile <your-profile>`.
 
-CDK Nag provides three types of findings:
+- `npm run nag` exits non-zero when there are findings, because the CLI
+  reports cdk-nag errors as synth errors.
+- `npm run nag-report` runs `scripts/generate-nag-report.sh`. It saves the
+  synth output to `reports/cdk-nag-report_<timestamp>.txt` (gitignored),
+  prints the counts, and exits 0 once the synth has run. It exits non-zero
+  only when the build fails or the synth fails without reporting any finding.
+- cdk-nag also writes one CSV report per stack,
+  `cdk.out.nag/AwsSolutions-*-NagReport.csv`, listing every rule result with
+  its compliance state (non-compliant or suppressed) and suppression reason.
 
-- **[Error]**: Security issues that should be addressed
-- **[Warning]**: Best practices that should be considered
-- **[Info]**: Informational messages
+How it is wired: `lib/nag.ts` exports `addNagChecks(app)`, which adds the
+`AwsSolutionsChecks` aspect when the `nag` context value is `true`.
+`bin/media-resource-manager.ts` calls it after all stacks are created.
 
-## Suppression Strategy
+## Reading the output
 
-The application uses a comprehensive suppression strategy to handle acceptable security patterns:
+The CDK CLI prints each finding as:
 
-### Global Suppressions
-
-Applied to all stacks for common patterns:
-
-- **AwsSolutions-IAM4**: AWS managed policies (acceptable for standard services)
-- **AwsSolutions-IAM5**: Wildcard permissions (needed for dynamic resource management)
-- **AwsSolutions-L1**: Lambda runtime versions (will be updated regularly)
-
-### Stack-Specific Suppressions
-
-#### DCV Infrastructure Stack
-- **AwsSolutions-EC23**: Security group rules (necessary for DCV access)
-- **AwsSolutions-EC26**: EBS encryption (will be enabled in production)
-- **AwsSolutions-AS3**: Auto Scaling notifications (production feature)
-- **AwsSolutions-ELB2**: Load balancer logging (production feature)
-
-#### Authentication Stack
-- **AwsSolutions-COG2**: MFA requirements (production feature)
-- **AwsSolutions-COG3**: Advanced security mode (production feature)
-
-#### API Gateway Stack
-- **AwsSolutions-APIG1**: Access logging (production feature)
-- **AwsSolutions-APIG2**: Request validation (production feature)
-- **AwsSolutions-APIG4**: Some endpoints allow public access (by design)
-
-#### Frontend Stack
-- **AwsSolutions-S1**: S3 access logging (production feature)
-- **AwsSolutions-S10**: SSL-only access (production feature)
-- **AwsSolutions-CFR3**: CloudFront logging (production feature)
-
-## Production Readiness
-
-Several suppressions are marked for production implementation:
-
-### Security Features to Enable in Production
-
-1. **Encryption**
-   - Enable EBS encryption for all volumes
-   - Configure KMS keys for encryption at rest
-
-2. **Logging and Monitoring**
-   - Enable VPC Flow Logs
-   - Configure S3 access logging
-   - Enable CloudFront access logging
-   - Configure API Gateway access logging
-
-3. **Authentication and Authorization**
-   - Enable MFA for Cognito User Pool
-   - Configure advanced security mode
-   - Implement WAF for API Gateway
-
-4. **Step Functions**
-   - Enable CloudWatch logging for all events
-   - Configure X-Ray tracing
-
-## Custom Rules
-
-The application can be extended with custom CDK Nag rules:
-
-```typescript
-import { IConstruct } from 'constructs';
-import { CdkNagRuleMetadata, CdkNagRuleResult } from 'cdk-nag';
-
-export class CustomWorkstationRule implements CdkNagRule {
-  public readonly ruleName = 'CustomWorkstation-1';
-  
-  public validate(node: IConstruct): CdkNagRuleResult {
-    // Custom validation logic
-    return { compliance: true };
-  }
-}
+```
+ERROR AwsSolutions-IAM5: The IAM entity contains wildcard permissions ... (Construct Annotations)
+   MRM-Api/SomeFunction/ServiceRole/DefaultPolicy/Resource
 ```
 
-## Continuous Integration
+`ERROR` is a rule cdk-nag treats as an error, `WARNING` a rule it treats as a
+warning. The indented line is the construct path; its first segment is the
+stack. Other `ERROR` or `WARNING` lines (for example a context lookup without
+credentials) come from CDK itself, not cdk-nag, and the report lists them
+separately.
 
-CDK Nag can be integrated into CI/CD pipelines:
+## Current findings
 
-```yaml
-# GitHub Actions example
-- name: Run CDK Nag
-  run: |
-    npm run nag-report
-    if [ $? -ne 0 ]; then
-      echo "CDK Nag found security issues"
-      exit 1
-    fi
-```
+With cdk-nag 2.38.2 (the version in `package-lock.json`), a synth reports
+**639 findings** (637 errors, 2 warnings) and 426 suppressed results across
+19 stacks. By rule: IAM5 482, L1 96, IAM4 37, SMG4 6, SF1 3, SF2 3, S10 2, and
+10 other rules with 1 each. The stacks with the most findings are MRM-Api (92),
+MRM-Storage (88) and MRM-DataSync (61).
 
-## Report Analysis
+`AwsSolutions-L1` flags every Lambda function whose runtime is older than the
+newest runtime cdk-nag knows about. Its count grows with each cdk-nag upgrade
+even when the app does not change, so compare counts only across runs with the
+same cdk-nag version. Any future "fail on findings" gate has to handle L1
+(suppress it or pin cdk-nag).
 
-The `npm run nag-report` command generates detailed reports in the `reports/` directory:
+These counts are a snapshot; run `npm run nag-report` for the current numbers.
 
-- **Timestamp-based filenames** for tracking changes over time
-- **Error and warning counts** for quick assessment
-- **Category breakdown** to identify common issues
-- **Detailed findings** with specific resource paths
+## Suppressions
 
-## Best Practices
+Suppressions are applied per stack in `bin/media-resource-manager.ts` with
+`NagSuppressions.addStackSuppressions(...)`, each with a reason and, for the
+IAM rules, an `appliesTo` list. They are written into the templates as
+`cdk_nag` metadata whether or not the checks run.
 
-1. **Regular Reviews**: Run CDK Nag checks regularly during development
-2. **Justified Suppressions**: Always provide clear reasons for suppressions
-3. **Production Planning**: Address production-related suppressions before deployment
-4. **Team Training**: Ensure team members understand CDK Nag findings
-5. **Documentation**: Keep suppression reasons up to date
+`lib/nag-suppressions.ts` (`NagSuppressionHelper`) is a set of generic,
+stack-wide suppression helpers that nothing imports. It is not part of the
+current suppression set; calling it would add new suppressions (and change
+template metadata), so treat it as a starting point for the triage below, not
+as active configuration.
 
-## Troubleshooting
+When you add a suppression, scope it as narrowly as you can (`appliesTo`, or
+`NagSuppressions.addResourceSuppressions` on one construct) and give a reason
+that explains why the finding is acceptable.
 
-### Common Issues
+## Next steps (#61)
 
-1. **Version Compatibility**: Ensure CDK Nag version matches your CDK version
-2. **Suppression Syntax**: Use exact resource paths and rule IDs
-3. **Stack Dependencies**: Apply suppressions after stack creation
+Done: the opt-in flag and report, and this document. Still open:
 
-### Getting Help
-
-- CDK Nag Documentation: https://github.com/cdklabs/cdk-nag
-- AWS CDK Documentation: https://docs.aws.amazon.com/cdk/
-- Community Support: AWS CDK Slack/Discord channels
-
-## Configuration Files
-
-- `cdk-nag.config.json`: Rule configuration and global settings
-- `lib/nag-suppressions.ts`: Reusable suppression helpers
-- `scripts/generate-nag-report.sh`: Report generation script
-
-This implementation provides a solid foundation for security validation while maintaining development velocity and production readiness.
+- Triage the findings stack by stack: fix them, or add scoped suppressions
+  with specific reasons.
+- When a stack is clean, run the checks by default so new findings fail the
+  build. This needs a decision on `AwsSolutions-L1` first.
