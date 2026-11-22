@@ -3,13 +3,11 @@
 
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand } = require('@aws-sdk/lib-dynamodb');
-const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { redactForLog } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({});
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
-const secretsManager = new SecretsManagerClient({});
 const ssm = new SSMClient({});
 
 const PRIMARY_REGION = process.env.AWS_REGION;
@@ -27,8 +25,9 @@ const ONTAP_PASSWORD_LENGTH = 24;
 const ONTAP_PASSWORD_EXCLUDED_CHARACTERS = '"\'()+,-./:;<=>?[\\]_`{|}~';
 
 // Builds a {{resolve:secretsmanager:...}} reference to one JSON key of a
-// secret in this template. CloudFormation resolves it when it creates the
-// resource, so the value never appears in the template or its parameters.
+// secret: a secret resource in this template, or a parameter holding a secret
+// name or ARN. CloudFormation resolves it when it creates the resource, so
+// the value never appears in the template or its parameters.
 function secretKeyRef(secretLogicalId, jsonKey) {
   return {"Fn::Sub": `{{resolve:secretsmanager:\${${secretLogicalId}}:SecretString:${jsonKey}}}`};
 }
@@ -95,12 +94,15 @@ async function resolveAzToSubnetIndex(productName, az) {
  *                whose AZ matches configuration.availabilityZone (default 1).
  *                PreferredSubnetId is not emitted (AWS rejects it on Single-AZ).
  *
- * AD credentials are passed as CFN parameters (retrieved by this Lambda at
- * generate time) instead of `{{resolve:secretsmanager:...}}` dynamic references
- * because the CFN service principal would otherwise need explicit KMS decrypt
- * on the customer secret's key - handled as a separate hardening pass.
+ * AD credentials: the template takes the name or ARN of the AD service-account
+ * secret (ADSecretId) and reads its username and password through
+ * `{{resolve:secretsmanager:...}}` dynamic references, which CloudFormation
+ * resolves when it creates the file system. CloudFormation resolves them with
+ * the credentials of the caller that creates the stack (storage-cfn-worker),
+ * so that role needs secretsmanager:GetSecretValue on the secret and
+ * kms:Decrypt on its key.
  */
-async function generateFsxWindowsTemplate(storageId, storageName, configuration, productName, adCredentials) {
+async function generateFsxWindowsTemplate(storageId, storageName, configuration, productName, adSecretId) {
   const resilience = (configuration.resilience || 'multi-az').toLowerCase();
   if (resilience !== 'single-az' && resilience !== 'multi-az') {
     throw new Error(`resilience must be 'single-az' or 'multi-az' (got: '${configuration.resilience}')`);
@@ -161,17 +163,10 @@ async function generateFsxWindowsTemplate(storageId, storageName, configuration,
         "Default": storageName,
         "Description": "Name of the storage resource"
       },
-      "ADUsername": {
+      "ADSecretId": {
         "Type": "String",
-        "Default": adCredentials.username,
-        "NoEcho": true,
-        "Description": "Active Directory service account username"
-      },
-      "ADPassword": {
-        "Type": "String",
-        "Default": adCredentials.password,
-        "NoEcho": true,
-        "Description": "Active Directory service account password"
+        "Default": adSecretId,
+        "Description": "Name or ARN of the Secrets Manager secret that holds the Active Directory service account username and password"
       }
     },
     "Resources": {
@@ -237,8 +232,8 @@ async function generateFsxWindowsTemplate(storageId, storageName, configuration,
                   {"Fn::Join": ["", ["{{resolve:ssm:/", {"Ref": "ProductName"}, "/Identity/ActiveDirectoryServerIP2}}"]]}
                 ],
                 "DomainName": {"Fn::Join": ["", ["{{resolve:ssm:/", {"Ref": "ProductName"}, "/Identity/ActiveDirectoryDomainName}}"]]},
-                "UserName": {"Ref": "ADUsername"},
-                "Password": {"Ref": "ADPassword"}
+                "UserName": secretKeyRef("ADSecretId", "username"),
+                "Password": secretKeyRef("ADSecretId", "password")
               }
             },
             // PreferredSubnetId is required on MULTI_AZ_1 and rejected on
@@ -603,43 +598,25 @@ async function getRegionalNetworkConfig(region) {
 
 
 /**
- * Retrieve AD credentials from Secrets Manager for FSx Windows file systems
- * that need to join a self-managed AD domain.
+ * Find the AD service-account secret that FSx for Windows file systems use to
+ * join a self-managed AD domain. Returns its ARN or name, never its value: the
+ * stack reads the username and password through dynamic references.
  *
  * Reads the mode-agnostic /${productName}/Identity/AdServiceAccountSecretArn
  * SSM parameter (populated by IdentityConstruct in both managed and connector
- * modes) and fetches the secret it points at. Falls back to the legacy
- * well-known secret name for backward compat with deployments that predate
- * PR 3 and do not yet have the AdServiceAccountSecretArn parameter.
+ * modes). Falls back to the legacy well-known secret name for backward compat
+ * with deployments that predate PR 3 and do not yet have the
+ * AdServiceAccountSecretArn parameter.
  */
-async function getAdCredentials(productName) {
-  let secretId;
+async function getAdSecretId(productName) {
   const ssmParamName = `/${productName}/Identity/AdServiceAccountSecretArn`;
   try {
     const ssmResult = await ssm.send(new GetParameterCommand({ Name: ssmParamName }));
-    secretId = ssmResult.Parameter.Value;
     console.log(`Resolved AD service-account secret ARN via ${ssmParamName}`);
+    return ssmResult.Parameter.Value;
   } catch (ssmErr) {
     console.warn(`SSM parameter ${ssmParamName} not found (${ssmErr.name}), falling back to legacy secret name`);
-    secretId = `/${productName}/Identity/ResourceAdminActiveDirectoryLoginCredentials`;
-  }
-  console.log(`Retrieving AD credentials from: ${secretId}`);
-
-  try {
-    const response = await secretsManager.send(new GetSecretValueCommand({
-      SecretId: secretId
-    }));
-
-    const secret = JSON.parse(response.SecretString);
-    console.log('Successfully retrieved AD credentials');
-
-    return {
-      username: secret.username,
-      password: secret.password
-    };
-  } catch (error) {
-    console.error(`Failed to retrieve AD credentials: ${error.message}`);
-    throw new Error(`Failed to retrieve AD credentials from Secrets Manager: ${error.message}`);
+    return `/${productName}/Identity/ResourceAdminActiveDirectoryLoginCredentials`;
   }
 }
 
@@ -690,19 +667,18 @@ exports.handler = async (event) => {
       { ParameterKey: 'StorageId', ParameterValue: storageId }
     ];
   } else {
-    // FSx Windows - retrieve AD credentials from Secrets Manager
-    // This avoids KMS permission issues with CloudFormation's {{resolve:secretsmanager:...}} dynamic references
-    const adCredentials = await getAdCredentials(productName);
+    // FSx Windows - the stack reads the AD credentials from this secret
+    // through dynamic references.
+    const adSecretId = await getAdSecretId(productName);
 
-    template = await generateFsxWindowsTemplate(storageId, name, configuration, productName, adCredentials);
+    template = await generateFsxWindowsTemplate(storageId, name, configuration, productName, adSecretId);
     parameters = [
       { ParameterKey: 'SSDStorageCapacity', ParameterValue: configuration.ssdStorageCapacity.toString() },
       { ParameterKey: 'ThroughputCapacity', ParameterValue: configuration.throughputCapacity.toString() },
       { ParameterKey: 'AutomaticBackupRetentionPeriod', ParameterValue: configuration.automaticBackupRetentionPeriod.toString() },
       { ParameterKey: 'ProductName', ParameterValue: productName },
       { ParameterKey: 'StorageName', ParameterValue: name },
-      { ParameterKey: 'ADUsername', ParameterValue: adCredentials.username },
-      { ParameterKey: 'ADPassword', ParameterValue: adCredentials.password }
+      { ParameterKey: 'ADSecretId', ParameterValue: adSecretId }
     ];
   }
 
