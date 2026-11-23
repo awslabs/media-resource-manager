@@ -258,8 +258,6 @@ client prompt.
   `parameters.json` (`0` turns it off). In the CodeBuild pipeline, start a
   build with `MRM_PARAM_OVERRIDES` set to `{"LambdaLogRetentionDays":"90"}`,
   with the value written as a string.
-- Optional: to keep only log events in the new format, delete the Lambda log
-  streams written before the upgrade in the CloudWatch console.
 
 ### Added
 
