@@ -11,6 +11,7 @@ import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as path from 'path';
 import { Construct } from 'constructs';
+import { regionalWorkstationPassRoleStatement } from './regional-workstation-role';
 
 interface WorkstationCreationStackProps extends cdk.StackProps {
   productName: string;
@@ -176,12 +177,11 @@ export class WindowsWorkstationCreationStack extends cdk.Stack {
     createInstanceFunction.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['iam:PassRole'],
-      resources: [
-        props.workstationLaunchTemplate.role!.roleArn,
-        // Allow passing regional workstation roles for satellite region deployments
-        `arn:aws:iam::${this.account}:role/${props.pascalCaseName}-Regional-Workstation-Role`,
-      ],
+      resources: [props.workstationLaunchTemplate.role!.roleArn],
     }));
+    // Regional hub workstation roles, for workstations in other Regions
+    createInstanceFunction.addToRolePolicy(
+      regionalWorkstationPassRoleStatement(this.account, props.pascalCaseName, props.acronym));
 
     props.workstationTable.grantReadWriteData(createInstanceFunction);
     props.imagePipelinesTable.grantReadData(createInstanceFunction);
