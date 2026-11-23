@@ -117,6 +117,10 @@ function cfnServicesDocument(n: RegionalHubIamNames): iam.PolicyDocument {
         `arn:aws:s3:::${ac}-regional-nlb-logs-${account}-*`,
         `arn:aws:s3:::${ac}-regional-nlb-logs-${account}-*/*`,
       ]),
+      // CloudFormation checks VPC and EC2 quotas before it creates a hub.
+      allow('ServiceQuotas', ['servicequotas:GetServiceQuota'], [
+        `arn:aws:servicequotas:*:${account}:vpc/*`, `arn:aws:servicequotas:*:${account}:ec2/*`,
+      ]),
       // Logs resource policies are per account and region, not per resource.
       allow('LogsResourcePolicy', ['logs:DeleteResourcePolicy', 'logs:PutResourcePolicy'], ['*']),
       // Lambda reads the hub function code with the caller's credentials.
@@ -230,7 +234,7 @@ function cfnIamDocument(n: RegionalHubIamNames): iam.PolicyDocument {
       // CloudFormation reads the boundary (and attached policies) when it
       // plans a role change.
       allow('IamPolicyRead', ['iam:GetPolicy'], [boundaryArn, ...HUB_MANAGED_POLICY_ARNS]),
-      allow('IamBoundaryEntities', ['iam:ListEntitiesForPolicy'], [boundaryArn]),
+      allow('IamBoundaryRead', ['iam:GetPolicyVersion', 'iam:ListEntitiesForPolicy'], [boundaryArn]),
       // Granting a hub role access needs the boundary on the role.
       allow('IamBoundedRoleWrites', ['iam:CreateRole', 'iam:PutRolePermissionsBoundary', 'iam:PutRolePolicy'], hubRoles, {
         StringEquals: { 'iam:PermissionsBoundary': boundaryArn },

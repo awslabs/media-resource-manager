@@ -220,8 +220,13 @@ function cfnCalls(template: any, v: typeof VARIANTS[number]): Record<string, (id
   const { resolve, arn } = resolver(template, v);
   const roleOfProfile = (r: any) => resolve(r.Properties.Roles[0]);
   return {
-    'AWS::EC2::VPC': () => onAny(['ec2:CreateVpc', 'ec2:DeleteVpc', 'ec2:ModifyVpcAttribute', 'ec2:DescribeVpcs',
-      'ec2:DescribeVpcAttribute', 'ec2:DescribeNetworkAcls', 'ec2:DescribeSecurityGroups', ...ec2Tags]),
+    'AWS::EC2::VPC': () => [
+      ...onAny(['ec2:CreateVpc', 'ec2:DeleteVpc', 'ec2:ModifyVpcAttribute', 'ec2:DescribeVpcs',
+        'ec2:DescribeVpcAttribute', 'ec2:DescribeNetworkAcls', 'ec2:DescribeSecurityGroups', ...ec2Tags]),
+      // Quota checks seen in CloudTrail at the start of a hub create.
+      ['servicequotas:GetServiceQuota', `arn:aws:servicequotas:${v.region}:${ACCOUNT}:vpc/L-F678F1CE`],
+      ['servicequotas:GetServiceQuota', `arn:aws:servicequotas:${v.region}:${ACCOUNT}:ec2/L-0263D0A3`],
+    ],
     'AWS::EC2::InternetGateway': () => onAny(['ec2:CreateInternetGateway', 'ec2:DeleteInternetGateway',
       'ec2:DescribeInternetGateways', ...ec2Tags]),
     'AWS::EC2::VPCGatewayAttachment': () => onAny(['ec2:AttachInternetGateway', 'ec2:DetachInternetGateway',
@@ -296,6 +301,7 @@ function cfnCalls(template: any, v: typeof VARIANTS[number]): Record<string, (id
         // Seen in CloudTrail when CloudFormation plans a role change.
         ['iam:GetPolicy', resolve(r.Properties.PermissionsBoundary)],
         ['iam:ListEntitiesForPolicy', resolve(r.Properties.PermissionsBoundary)],
+        ['iam:GetPolicyVersion', resolve(r.Properties.PermissionsBoundary)],
         ...resolve(r.Properties.ManagedPolicyArns || []).map((p: string): Call => ['iam:GetPolicy', p]),
         ...resolve(r.Properties.ManagedPolicyArns || []).map((p: string): Call =>
           ['iam:AttachRolePolicy', arn(id), { ...ctx, 'iam:PolicyARN': p }]),
