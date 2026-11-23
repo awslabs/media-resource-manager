@@ -86,7 +86,7 @@ and the deployment pipeline get several fixes. Regional hubs need an update.
   subnet per Availability Zone. The analyzer validates the choice and stops
   the build with a clear message when it's missing or invalid.
   ([#89](https://github.com/awslabs/media-resource-manager/pull/89),
-  [#18](https://github.com/awslabs/media-resource-manager/issues/18)) <!-- pending merge -->
+  [#18](https://github.com/awslabs/media-resource-manager/issues/18))
 
 ### Changed
 
