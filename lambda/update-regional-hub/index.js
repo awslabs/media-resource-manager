@@ -105,6 +105,7 @@ exports.handler = async (event) => {
         enableWindows,
         enableLinux,
         enableMacOS,
+        dcvAllowedPrefixListIds: hub.dcvAllowedPrefixListIds,
         // Keeps the IAM names the hub's stack already uses.
         isUpdate: true
       })

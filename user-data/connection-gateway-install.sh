@@ -103,8 +103,8 @@ fi
 echo "$(date -u) Installing DCV Connection Gateway..." | tee -a "$LOG_PATH"
 tar -xvzf "$TMP_DIR/nice-dcv-server.tgz" -C "$TMP_DIR"
 
-# Install web viewer first, then connection gateway
-for package_pattern in "nice-dcv-web-viewer*" "nice-dcv-connection-gateway.$package_extension"; do
+# Install the connection gateway only: the browser viewer is served by the console
+for package_pattern in "nice-dcv-connection-gateway.$package_extension"; do
     package_full_path=$(find "$TMP_DIR" -name "$package_pattern")
     if [ -n "$package_full_path" ]; then
         $package_manager install -y "$package_full_path"
@@ -114,9 +114,10 @@ done
 # Clean up temp files
 rm -rf "$TMP_DIR"
 
-# Enable web access through the gateway
 CONFIG_FILE="/etc/dcv-connection-gateway/dcv-connection-gateway.conf"
-sed -i 's|url = "https://localhost:8080"|local-resources-path = "/usr/share/dcv/www"|' "$CONFIG_FILE"
+# Token-only gateway: [web-resources] sets neither url nor local-resources-path,
+# so HTTP requests without a session token get an empty 404.
+sed -i -E '/^\[web-resources\]/,/^\[/{/^[[:space:]]*(local-resources-path|url)[[:space:]]*=/d}' "$CONFIG_FILE"
 
 # Enable and start gateway initially
 echo "$(date -u) Starting DCV Connection Gateway service..." | tee -a "$LOG_PATH"

@@ -57,6 +57,12 @@ describe('decideUpdateOutcome', () => {
       .toEqual({ status: 'available', templateVersion: CURRENT });
   });
 
+  it("records the stack's browser gateway URL when the update succeeds", () => {
+    const outputs = { Outputs: [{ OutputKey: 'BrowserGatewayUrl', OutputValue: 'https://d111111abcdef8.cloudfront.net' }] };
+    expect(decideUpdateOutcome(hub, stack('UPDATE_COMPLETE', undefined, outputs), startedMs + 600000))
+      .toEqual({ status: 'available', templateVersion: CURRENT, browserGatewayUrl: 'https://d111111abcdef8.cloudfront.net' });
+  });
+
   it('records the reason when the update rolls back or fails', () => {
     expect(decideUpdateOutcome(hub, stack('UPDATE_ROLLBACK_COMPLETE', undefined, { StackStatusReason: 'Resource failed' }), startedMs + 600000))
       .toEqual({ status: 'update_failed', lastError: 'Resource failed' });

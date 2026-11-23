@@ -335,6 +335,10 @@ The stack name you choose (e.g., `MRM-DeployPipeline`) is used to auto-generate 
 | `PrivateSubnetMask` | `24` | Subnet mask for private subnets |
 | `DcvCertificateArn` | *(empty)* | ACM certificate ARN for custom DCV domain |
 | `DcvDomainName` | *(empty)* | Custom domain for DCV connections |
+| `DcvBrowserPath` | `cloudfront` | How browser sessions reach the DCV Connection Gateway: `cloudfront` (a CloudFront distribution per gateway Region, trusted certificate, no domain needed) or `direct` (the gateway's TCP 8443). See [Gateway browser path](docs/GATEWAY_BROWSER_PATH.md). |
+| `DcvHostedZoneId` | *(empty)* | Optional Route 53 hosted zone. With `cloudfront`, the hop from CloudFront to the origin load balancer uses HTTPS with a DNS-validated certificate. |
+| `DcvAllowedClientCidrs` | *(empty)* | Comma-separated CIDR ranges allowed to reach the gateway's public ports (TCP 8443, UDP 8444), primary and hubs. Empty: open. |
+| `DcvAllowedPrefixListIds` | *(empty)* | Up to 2 managed prefix list IDs allowed to reach the primary gateway's public ports. |
 | `FrontendUrl` | *(empty)* | Custom URL for web console (e.g., `https://vdi.company.com`). Leave empty for auto-generated CloudFront URL. |
 | `AdminEmails` | *(empty)* | Comma-separated emails to create as Cognito admin users (e.g., `admin@company.com`). Each receives a welcome email with the frontend URL and a temporary password. Addresses added later are created on the next deploy. With Cognito on and no SAML IdP, leave it empty only if you will [create users yourself](#2-authentication-setup): otherwise nobody can sign in. |
 | `IdentityCenterSyncGroups` | *(empty)* | Identity Center group(s) to sync users from |
@@ -579,6 +583,10 @@ cp parameters.example.json parameters.json
 | `HostnameDigits` | `4` | Digits in hostname suffix (e.g., `vdi-0001`) |
 | `DcvCertificateArn` | *(empty)* | ACM certificate ARN for custom DCV domain |
 | `DcvDomainName` | *(empty)* | Custom domain for DCV connections |
+| `DcvBrowserPath` | `cloudfront` | How browser sessions reach the DCV Connection Gateway: `cloudfront` (a CloudFront distribution per gateway Region, trusted certificate, no domain needed) or `direct` (the gateway's TCP 8443). See [Gateway browser path](docs/GATEWAY_BROWSER_PATH.md). |
+| `DcvHostedZoneId` | *(empty)* | Optional Route 53 hosted zone. With `cloudfront`, the hop from CloudFront to the origin load balancer uses HTTPS with a DNS-validated certificate. |
+| `DcvAllowedClientCidrs` | *(empty)* | Comma-separated CIDR ranges allowed to reach the gateway's public ports (TCP 8443, UDP 8444), primary and hubs. Empty: open. |
+| `DcvAllowedPrefixListIds` | *(empty)* | Up to 2 managed prefix list IDs allowed to reach the primary gateway's public ports. |
 | `IdentityCenterSyncGroups` | *(empty)* | Groups to sync from Identity Center |
 | `FrontendUrl` | *(empty)* | Custom URL for web console |
 | `AdminEmails` | *(empty)* | Comma-separated emails to create as Cognito admin users. Each receives a welcome email with the frontend URL and a temporary password. Addresses added later are created on the next deploy. With Cognito on and no SAML IdP, leave it empty only if you will [create users yourself](#2-authentication-setup): otherwise nobody can sign in. |

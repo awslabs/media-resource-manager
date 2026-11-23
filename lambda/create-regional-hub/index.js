@@ -46,7 +46,9 @@ exports.handler = async (event) => {
       dcvCertificateArn,
       enableWindows = true,
       enableLinux = true,
-      enableMacOS = false
+      enableMacOS = false,
+      // Optional: managed prefix lists (IDs in the hub's Region) that may reach the gateway.
+      dcvAllowedPrefixListIds
     } = body;
     
     // Validate required fields
@@ -63,6 +65,14 @@ exports.handler = async (event) => {
       return response(400, { error: 'At least 2 availability zones are required' });
     }
     
+    // Same rule as the template generator (gateway-browser-path.js).
+    if (dcvAllowedPrefixListIds !== undefined && dcvAllowedPrefixListIds !== null) {
+      const ids = Array.isArray(dcvAllowedPrefixListIds) ? dcvAllowedPrefixListIds : null;
+      if (!ids || ids.length > 2 || !ids.every(id => typeof id === 'string' && /^pl-[0-9a-f]{8,17}$/.test(id))) {
+        return response(400, { error: 'dcvAllowedPrefixListIds must be a list of at most 2 prefix list IDs' });
+      }
+    }
+
     // Validate VPC CIDR format
     const cidrRegex = /^(\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/;
     if (!cidrRegex.test(vpcCidr)) {
@@ -118,6 +128,7 @@ exports.handler = async (event) => {
       enableWindows,
       enableLinux,
       enableMacOS,
+      ...(dcvAllowedPrefixListIds ? { dcvAllowedPrefixListIds } : {}),
       status: 'pending',
       createdAt: now,
       updatedAt: now
@@ -149,7 +160,8 @@ exports.handler = async (event) => {
         dcvCertificateArn,
         enableWindows,
         enableLinux,
-        enableMacOS
+        enableMacOS,
+        dcvAllowedPrefixListIds
       })
     }));
     
