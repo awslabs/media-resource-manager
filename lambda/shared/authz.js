@@ -17,9 +17,10 @@
 // Denial responses carry the same CORS headers the rest of the handlers use,
 // so a rejected caller still sees a well-formed cross-origin response.
 //
-// NOTE: This file is duplicated verbatim into each affected Lambda directory
-// because each Lambda is bundled from its own source directory (no shared
-// layer / no monorepo bundling step). Keep every copy byte-identical.
+// Lambdas load it with require('../shared/authz'). Their CDK definition must
+// use lambdaCodeWithShared('<dir>') (lib/lambda-code.ts), so that shared/ is
+// in their package. Regional hub Lambdas can't use it: a hub builds each of
+// them from its own folder.
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
