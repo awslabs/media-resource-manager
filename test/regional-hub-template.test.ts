@@ -77,6 +77,17 @@ describe('regional hub template', () => {
   it('outputs the workstation instance profile name from the resource itself', () => {
     expect(generate().Outputs.WorkstationInstanceProfileName.Value).toEqual({ Ref: 'WorkstationInstanceProfile' });
   });
+
+  it('lets the DCV Lambdas read AMIs in the hub Region only, for the Linux session owner', () => {
+    const statements = generate().Resources.DcvLambdaRole.Properties.Policies[0].PolicyDocument.Statement;
+    const images = statements.filter((s: any) => [s.Action].flat().includes('ec2:DescribeImages'));
+    expect(images).toEqual([{
+      Effect: 'Allow',
+      Action: ['ec2:DescribeImages'],
+      Resource: '*',
+      Condition: { StringEquals: { 'aws:RequestedRegion': { Ref: 'AWS::Region' } } },
+    }]);
+  });
 });
 
 describe('keepDeployedIamNames', () => {

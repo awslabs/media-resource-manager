@@ -129,6 +129,7 @@ describe('LinuxWorkstationCreationStack console session check', () => {
           SESSION_PLATFORM: 'Linux',
           PASCAL_CASE_NAME: 'MediaResourceManager',
           WORKSTATION_TABLE_NAME: Match.anyValue(),
+          REGIONAL_SESSION_MANAGER_FUNCTION: 'mrm-regional-dcv-session-manager',
         }),
       },
     });
@@ -151,6 +152,12 @@ describe('LinuxWorkstationCreationStack console session check', () => {
 
     const ec2Statements = statements.filter((st: any) => [st.Action].flat().some((a: string) => a.startsWith('ec2:')));
     expect(ec2Statements).toEqual([expect.objectContaining({ Action: 'ec2:DescribeImages', Resource: '*' })]);
+
+    // Hub workstations: only the hubs' dcv-session-manager copies.
+    const invoke = statements.filter((st: any) => [st.Action].flat().some((a: string) => a.startsWith('lambda:')));
+    expect(invoke).toHaveLength(1);
+    expect(invoke[0].Action).toBe('lambda:InvokeFunction');
+    expect(JSON.stringify(invoke[0].Resource)).toMatch(/arn:aws:lambda:\*:.*:function:mrm-regional-dcv-session-manager"/);
 
     const writes = statements.flatMap((st: any) => [st.Action].flat())
       .filter((a: string) => /^(dynamodb:(Put|Update|Delete|BatchWrite)|ssm:Put|ec2:(Run|Terminate|Create))/.test(a));

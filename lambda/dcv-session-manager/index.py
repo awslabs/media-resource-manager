@@ -3,12 +3,22 @@
 
 import json
 import os
+import re
+import time
 import boto3
 import urllib.request
 import urllib.parse
 import urllib.error
 import ssl
 import base64
+
+# API Gateway ends a request after 29 seconds. A hub workstation's request
+# also spends time in the primary copy and the cross-Region invoke, so stop
+# waiting for a new console session after this many seconds from the start of
+# the request and tell the browser to try again (HTTP 409, session-starting).
+SESSION_WAIT_BUDGET_SECONDS = 15
+SESSION_POLL_SECONDS = 3
+SESSION_RETRY_AFTER_SECONDS = 5
 
 def get_workstation_region(server_id):
     """Look up the region for a workstation from DynamoDB.
@@ -239,7 +249,85 @@ def safe_urlopen(url_or_request, *args, **kwargs):
         raise ValueError(f"Unsafe URL scheme: {parsed.scheme}")
     return urllib.request.urlopen(url_or_request, *args, **kwargs)  # nosec B310 # nosemgrep: dynamic-urllib-use-detected
 
+# The primary Region's console-session-ready Lambda checks a hub workstation's
+# console session through the hub's copy of this Lambda, because only the hub
+# can reach its Session Manager. It sends {'consoleSessionBrokerCall': {'api',
+# 'body'}} by direct invoke. API Gateway events always carry httpMethod and
+# requestContext and callers only set the body, so this shape can't come from
+# the API. Only these calls, and only a console session pinned to one instance.
+CONSOLE_CHECK_APIS = {'describeServers', 'describeSessions'}
+CONSOLE_SESSION_REQUIREMENT = re.compile(r"^server:Host\.Aws\.Ec2InstanceId = 'i-[0-9a-f]{8,17}'$")
+
+
+def is_console_session_broker_call(event):
+    return (isinstance(event, dict) and 'consoleSessionBrokerCall' in event
+            and 'httpMethod' not in event and 'requestContext' not in event
+            and _primary_region() != os.environ.get('AWS_REGION'))
+
+
+def _valid_console_check_call(api, body):
+    if api in CONSOLE_CHECK_APIS:
+        return isinstance(body, dict) and set(body) <= {'NextToken'}
+    if api == 'createSessions':
+        return (isinstance(body, list) and len(body) == 1 and isinstance(body[0], dict)
+                and set(body[0]) == {'Name', 'Owner', 'Type', 'Requirements'}
+                and body[0]['Type'] == 'CONSOLE' and isinstance(body[0]['Owner'], str)
+                and CONSOLE_SESSION_REQUIREMENT.match(str(body[0]['Requirements'])) is not None)
+    return False
+
+
+def console_session_broker_call(call):
+    """Run one Session Manager call for console-session-ready and return its JSON as the body."""
+    api = (call or {}).get('api')
+    body = (call or {}).get('body')
+    if not _valid_console_check_call(api, body):
+        return {'statusCode': 400, 'body': json.dumps({'error': 'Unsupported console session check call'})}
+    ssm = boto3.client('ssm')
+    prefix = f"/{os.environ.get('PASCAL_CASE_NAME', 'MediaResourceManager')}/DCV/SessionManager"
+    host = ssm.get_parameter(Name=f'{prefix}/Endpoint')['Parameter']['Value']
+    client_id = ssm.get_parameter(Name=f'{prefix}/ClientId')['Parameter']['Value']
+    client_password = ssm.get_parameter(Name=f'{prefix}/ClientPassword', WithDecryption=True)['Parameter']['Value']
+    # The broker uses a self-signed certificate, as in the handler below.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    basic = base64.b64encode(f'{client_id}:{client_password}'.encode()).decode()
+    base_url = f'https://{host}:8443'
+    try:
+        token_request = urllib.request.Request(
+            f'{base_url}/oauth2/token?grant_type=client_credentials', method='POST',
+            headers={'Authorization': f'Basic {basic}'})
+        with safe_urlopen(token_request, context=ctx, timeout=10) as response:
+            access_token = json.loads(response.read().decode())['access_token']
+        request = urllib.request.Request(
+            f'{base_url}/{api}', data=json.dumps(body).encode(), method='POST',
+            headers={'Authorization': f'Bearer {access_token}', 'Content-Type': 'application/json'})
+        with safe_urlopen(request, context=ctx, timeout=10) as response:
+            return {'statusCode': 200, 'body': response.read().decode()}
+    except urllib.error.HTTPError as e:
+        print(f'Console session check {api} failed: HTTP {e.code}')
+        return {'statusCode': 502, 'body': json.dumps({'error': f'Session Manager {api} returned HTTP {e.code}'})}
+
+
+def session_starting_response(cors_headers, session_id):
+    """The console session exists but isn't READY yet: the browser retries."""
+    return {
+        'statusCode': 409,
+        'headers': {'Content-Type': 'application/json', **cors_headers},
+        'body': json.dumps({
+            'status': 'session-starting',
+            'sessionId': session_id,
+            'retryAfterSeconds': SESSION_RETRY_AFTER_SECONDS,
+            'error': 'The workstation session is still starting. Try Connect again in a minute.',
+        }),
+    }
+
+
 def lambda_handler(event, context):
+    started = time.monotonic()
+    if is_console_session_broker_call(event):
+        return console_session_broker_call(event['consoleSessionBrokerCall'])
+
     # CORS headers
     cors_headers = {
         'Access-Control-Allow-Origin': '*',
@@ -616,6 +704,9 @@ def lambda_handler(event, context):
                 # UNKNOWN sessions often don't exist on the actual DCV server after reboots
                 usable_states = ['READY']
                 print(f"Only accepting READY sessions (ignoring UNKNOWN/stale sessions)")
+                # A session still CREATING on this workstation (for example from a
+                # request that returned session-starting) is waited for, not created again.
+                starting_session_id = None
                 
                 for session in sessions_response.get('Sessions', []):
                     session_state = session.get('State', '').upper()
@@ -626,6 +717,10 @@ def lambda_handler(event, context):
                     if existing_session_name.startswith('test-readiness-'):
                         print(f"Skipping test session: {session.get('Id')} ({existing_session_name})")
                         continue
+                    
+                    if (session_server_id in matching_server_ids and session_state == 'CREATING' and
+                            session.get('Owner') == session_owner and not starting_session_id):
+                        starting_session_id = session.get('Id')
                     
                     # Check if session is on ANY of the matching servers (handles duplicate server entries)
                     if (session_server_id in matching_server_ids and 
@@ -639,6 +734,10 @@ def lambda_handler(event, context):
                         dcv_server_id = session_server_id  # Use the server ID that has the session
                         print(f"Found existing usable session: {created_session_id} (state: {session_state}, server: {dcv_server_id})")
                         break
+                
+                if not created_session_id and starting_session_id:
+                    created_session_id = starting_session_id
+                    print(f"Waiting for session {created_session_id}, still CREATING")
                 
                 if server_available and not created_session_id:
                     # Step 3a: Create new session (only if no existing READY session found)
@@ -722,12 +821,15 @@ def lambda_handler(event, context):
                 
                 # Step 4: Wait for session to be ready, then get connection data
                 print("Step 4: Waiting for session to be ready...")
-                import time
+                
+                def can_poll_again():
+                    return time.monotonic() - started + SESSION_POLL_SECONDS < SESSION_WAIT_BUDGET_SECONDS
                 
                 max_attempts = 10
                 attempt = 0
                 connection_data = None
                 session_invalid = False
+                session_starting = False
                 
                 while attempt < max_attempts:
                     try:
@@ -740,7 +842,8 @@ def lambda_handler(event, context):
                             }
                         )
                         
-                        with safe_urlopen(connection_request, context=ssl_context, timeout=10) as response:
+                        # Short timeout: this call runs inside SESSION_WAIT_BUDGET_SECONDS.
+                        with safe_urlopen(connection_request, context=ssl_context, timeout=5) as response:
                             connection_data = json.loads(response.read().decode())
                             print(f"Connection data received for session {created_session_id} (fields: {sorted(connection_data)})")
                             break  # Success - exit the loop
@@ -754,10 +857,12 @@ def lambda_handler(event, context):
                         if e.code == 400 and ("not in READY" in error_body or "neither in READY" in error_body):
                             # Session not ready yet, wait and retry
                             attempt += 1
-                            if attempt < max_attempts:
-                                print(f"Session not ready, waiting 3 seconds before retry {attempt + 1}/{max_attempts}...")
-                                time.sleep(3)  # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep
+                            if attempt < max_attempts and can_poll_again():
+                                print(f"Session not ready, waiting {SESSION_POLL_SECONDS} seconds before retry {attempt + 1}/{max_attempts}...")
+                                time.sleep(SESSION_POLL_SECONDS)  # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep
                                 continue
+                            session_starting = True
+                            break
                         
                         # Check for invalid session errors - session might not exist on server
                         if e.code == 404 or (e.code == 400 and ("invalid" in error_body.lower() or "not found" in error_body.lower())):
@@ -816,7 +921,7 @@ def lambda_handler(event, context):
                                 }
                             )
                             
-                            with safe_urlopen(connection_request, context=ssl_context, timeout=10) as response:
+                            with safe_urlopen(connection_request, context=ssl_context, timeout=5) as response:
                                 connection_data = json.loads(response.read().decode())
                                 print(f"Connection data received for session {created_session_id} (fields: {sorted(connection_data)})")
                                 break
@@ -824,12 +929,17 @@ def lambda_handler(event, context):
                             error_body = e.read().decode() if e.fp else ''
                             if e.code == 400 and ("not in READY" in error_body or "neither in READY" in error_body):
                                 attempt += 1
-                                if attempt < max_attempts:
-                                    print(f"Fresh session not ready, waiting 3 seconds...")
-                                    time.sleep(3)  # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep
+                                if attempt < max_attempts and can_poll_again():
+                                    print(f"Fresh session not ready, waiting {SESSION_POLL_SECONDS} seconds...")
+                                    time.sleep(SESSION_POLL_SECONDS)  # nosemgrep: python.lang.best-practice.sleep.arbitrary-sleep
                                     continue
+                                session_starting = True
+                                break
                             raise e
                 
+                if connection_data is None and session_starting:
+                    print(f"Session {created_session_id} not READY after {time.monotonic() - started:.1f}s; returning session-starting")
+                    return session_starting_response(cors_headers, created_session_id)
                 if connection_data is None:
                     raise Exception(f"Session {created_session_id} did not become ready after {max_attempts} attempts")
                 

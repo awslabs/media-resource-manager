@@ -115,6 +115,14 @@ describe('WindowsWorkstationCreationStack post-reboot console session check', ()
       expect(resources).toContain(`:parameter/MediaResourceManager/DCV/SessionManager/${name}`);
     }
     expect(ssm[0].Resource).toHaveLength(3);
+
+    // Hub workstations: the check runs through the hubs' dcv-session-manager copies.
+    expect(Object.values(fns)[0].Properties.Environment.Variables.REGIONAL_SESSION_MANAGER_FUNCTION)
+      .toBe('mrm-regional-dcv-session-manager');
+    const invoke = statements.filter((st: any) => [st.Action].flat().some((a: string) => a.startsWith('lambda:')));
+    expect(invoke).toHaveLength(1);
+    expect(invoke[0].Action).toBe('lambda:InvokeFunction');
+    expect(JSON.stringify(invoke[0].Resource)).toMatch(/arn:aws:lambda:\*:.*:function:mrm-regional-dcv-session-manager"/);
   });
 });
 

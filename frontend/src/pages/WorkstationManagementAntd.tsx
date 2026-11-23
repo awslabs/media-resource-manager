@@ -53,6 +53,7 @@ import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
 import { nativeClientUrl, openBrowserViewer, parseNativeClientTransport, DEFAULT_NATIVE_CLIENT_TRANSPORT } from '../utils/dcvClient';
+import { postCreateSession, sessionNameFor, STARTING_SESSION_MESSAGE } from '../utils/dcvViewer';
 import { useDcvClientPrompt } from '../components/DcvClientPrompt';
 import { useInstanceTypeCatalog } from '../hooks/useInstanceTypeCatalog';
 
@@ -635,21 +636,8 @@ const WorkstationManagementAntd: React.FC<WorkstationManagementAntdProps> = ({
     }
     setConnectingInstances((prev) => new Set(prev).add(instanceId));
     try {
-      const token = getAuthToken();
-      if (!token) throw new Error('No current user');
-
-      const response = await apiCall('/dcv', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          action: 'create-session',
-          serverId: instanceId,
-          sessionName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.email?.split('@')[0] || 'User',
-          sessionType: 'console',
-        }),
+      const response = await postCreateSession(instanceId, sessionNameFor(user), {
+        onStarting: () => setAlert({ type: 'info', message: STARTING_SESSION_MESSAGE }),
       });
 
       if (!response.ok) {
