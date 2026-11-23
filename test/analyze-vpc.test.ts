@@ -20,7 +20,8 @@ const VPC_ID = 'vpc-0abc1234def567890';
 // Two AZs. Per AZ: a public subnet, an "app" subnet with a default route to a
 // NAT gateway (1a) or a NAT instance's network interface (1b), and a "mgmt"
 // subnet routed to the internet gateway without public IPs. The analyzer
-// counts app and mgmt as private, so it needs a selection.
+// counts mgmt as public (its default route is the internet gateway), so each AZ
+// has two public subnets and it needs a selection.
 const MULTI_SUBNETS = [
   { SubnetId: 'subnet-0a01', AZ: 'us-east-1a', CidrBlock: '10.0.0.0/24', MapPublicIpOnLaunch: true, Name: 'public-a' },
   { SubnetId: 'subnet-0a02', AZ: 'us-east-1a', CidrBlock: '10.0.1.0/24', MapPublicIpOnLaunch: false, Name: 'app-a' },
@@ -230,6 +231,15 @@ describe('analyze-vpc.sh', () => {
     expect(r.output).toMatch(/subnet-0a01 .*-> internet gateway igw-0abc/);
     expect(r.calls).toMatch(/describe-stacks --stack-name MRM-Infrastructure/);
     expect(r.params).toEqual(params);
+  });
+
+  test('lists a subnet routed to an internet gateway as public even without public IPs', () => {
+    const r = run({ params: { VpcId: VPC_ID } });
+    expect(r.status).toBe(3);
+    expect(r.output).toMatch(/public\s+subnet-0a03 /);
+    expect(r.output).toMatch(/public\s+subnet-0b03 /);
+    expect(r.output).not.toMatch(/private\s+subnet-0a03 /);
+    expect(r.output).toMatch(/private\s+subnet-0a02 /);
   });
 
   test('treats a rolled-back first deploy as a fresh install', () => {

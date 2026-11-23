@@ -41,16 +41,32 @@ function Analyze-Vpc {
         return 1
     }
 
+    # Route tables, to count subnets whose default route is an internet gateway as public
+    $routeTablesJson = aws ec2 describe-route-tables `
+        --filters "Name=vpc-id,Values=$VpcId" `
+        --query 'RouteTables' --output json --region $region 2>$null
+    if (-not $routeTablesJson) { $routeTablesJson = "[]" }
+    $env:ROUTE_TABLES = ($routeTablesJson -join "`n")
+
     # Use node to analyze and display subnet info
     $analysisScript = @"
 const fs = require('fs');
-const subnets = JSON.parse(process.argv[1]);
+const subnets = JSON.parse(process.argv[2]);
+const tables = JSON.parse(process.env.ROUTE_TABLES || '[]');
+const mainTable = tables.find(t => (t.Associations || []).some(a => a.Main));
+const tableFor = id => tables.find(t => (t.Associations || []).some(a => a.SubnetId === id)) || mainTable;
+function routesToIgw(id) {
+    const t = tableFor(id);
+    const r = t && (t.Routes || []).find(r => r.DestinationCidrBlock === '0.0.0.0/0');
+    return !!(r && r.GatewayId && r.GatewayId.startsWith('igw-'));
+}
 
 // Group subnets by AZ
 const byAz = {};
 subnets.forEach(s => {
     if (!byAz[s.AZ]) byAz[s.AZ] = { public: [], private: [] };
-    const isPublic = s.MapPublicIpOnLaunch || (s.Name && s.Name.toLowerCase().includes('public'));
+    // Public: default route to an internet gateway, public IPs on launch, or 'public' in the name
+    const isPublic = routesToIgw(s.SubnetId) || s.MapPublicIpOnLaunch || (s.Name && s.Name.toLowerCase().includes('public'));
     if (isPublic) {
         byAz[s.AZ].public.push(s);
     } else {
@@ -116,6 +132,7 @@ if (hasMultiplePrivatePerAz || hasMultiplePublicPerAz) {
     node $tempScript $subnetsJson
     $nodeExit = $LASTEXITCODE
     Remove-Item $tempScript -ErrorAction SilentlyContinue
+    Remove-Item Env:ROUTE_TABLES -ErrorAction SilentlyContinue
 
     if ($nodeExit -eq 2) {
         return 2
@@ -147,7 +164,7 @@ function Check-NaclUdpRules {
     }
 
     $checkScript = @"
-const nacls = JSON.parse(process.argv[1]);
+const nacls = JSON.parse(process.argv[2]);
 let hasIssue = false;
 
 for (const nacl of nacls) {
