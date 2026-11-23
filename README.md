@@ -617,8 +617,8 @@ for SUBNET in <private-subnet-1> <private-subnet-2> <public-subnet-1> <public-su
 done
 
 # Wait until each exclusion is "create-complete"
-aws ec2 describe-vpc-block-public-access-exclusions --region <region> \
-  --query 'VpcBlockPublicAccessExclusions[].[SubnetId,State]' --output table
+aws ec2 describe-vpc-block-public-access-exclusions --region <region> --max-results 50 \
+  --query 'VpcBlockPublicAccessExclusions[].[ResourceArn,State]' --output table
 ```
 
 Creating exclusions needs `ExclusionsAllowed: allowed` in `describe-vpc-block-public-access-options`; an AWS Organizations declarative policy can turn it off. A VPC-level exclusion (`--vpc-id`) also works, but it opens every subnet in the VPC, so we don't recommend it.
@@ -634,7 +634,11 @@ Creating exclusions needs `ExclusionsAllowed: allowed` in `describe-vpc-block-pu
 
 Regional hubs weren't tested with BPA.
 
-**Upgrading an existing installation:** _pending Phase 4. Upgrade notes for installations in a VPC with BPA on will be added here._
+**Upgrading an existing installation:**
+
+- Starting with v1.5.0, browser sessions go through a CloudFront VPC origin by default (`DcvBrowserPath=cloudfront`), including installations that never set `DcvBrowserPath`. With BPA on, create the exclusions for the two `PrivateSubnetIds` subnets before you upgrade, or set `DcvBrowserPath=direct` to keep the previous browser path. Without them, the VPC origin can't be created and the `<ACRONYM>-Dcv-Infrastructure` update fails.
+- If you deployed into an existing VPC with several private subnets per Availability Zone and passed `PrivateSubnetIds` and `PublicSubnetIds` through `MRM_PARAM_OVERRIDES`, set the same subnets, in the same order, as the pipeline stack's `PrivateSubnetIds` and `PublicSubnetIds` parameters. Changing them replaces the Managed Microsoft AD directory. With the same subnets, the upgrade replaces one resource: the DynamoDB gateway endpoint in `<ACRONYM>-Infrastructure`, which is now attached to the private subnets' route tables. The previous endpoint wasn't attached to any route table, so DynamoDB access isn't interrupted. Nothing else in the VPC changes: the directory, interface endpoints, load balancers, subnets and route tables stay as they are.
+- After you update the pipeline stack, start a build yourself (`aws codebuild start-build --project-name <project-name>`). A stack update doesn't start one.
 
 **Planned improvements:** [#106](https://github.com/awslabs/media-resource-manager/issues/106) (an optional `CreateBpaExclusions` parameter that creates these exclusions, also in regional hubs) and [#107](https://github.com/awslabs/media-resource-manager/issues/107) (an internal-only gateway for users on VPN, Direct Connect or Transit Gateway, which works with BPA on and no exclusions).
 
