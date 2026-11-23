@@ -145,6 +145,21 @@ async function lookupOriginFacingPrefixListId(region) {
   return id;
 }
 
+// IPv4 CIDR blocks of an existing hub's VPC other than vpcCidr. The template
+// creates the VPC with one block, but one can be associated later; rules that
+// mean "from within the VPC" then cover it too.
+async function lookupAdditionalVpcCidrs(region, stackName, vpcCidr) {
+  // eslint-disable-next-line global-require
+  const { CloudFormationClient: Cfn, DescribeStacksCommand } = require('@aws-sdk/client-cloudformation');
+  // eslint-disable-next-line global-require
+  const { EC2Client, DescribeVpcsCommand } = require('@aws-sdk/client-ec2');
+  const stacks = await new Cfn({ region }).send(new DescribeStacksCommand({ StackName: stackName }));
+  const output = (stacks.Stacks[0].Outputs || []).find(o => o.OutputKey === 'VpcId');
+  if (!output) return [];
+  const vpcs = await new EC2Client({ region }).send(new DescribeVpcsCommand({ VpcIds: [output.OutputValue] }));
+  return browserPath.additionalVpcCidrs(vpcs.Vpcs[0], vpcCidr);
+}
+
 // Domain name of the Route 53 hosted zone for the HTTPS origin hop.
 async function lookupHostedZoneName(hostedZoneId) {
   // eslint-disable-next-line global-require
@@ -323,6 +338,8 @@ exports.handler = async (event) => {
   const regionCode = region.replace(/-/g, '');
   const stackName = `${acronym}-Regional-Hub-${regionCode}`;
 
+  const additionalVpcCidrs = isUpdate ? await lookupAdditionalVpcCidrs(region, stackName, vpcCidr) : [];
+
   let originFacingPrefixListId;
   let hostedZone = null;
   if (gatewayBrowserPath === 'cloudfront') {
@@ -350,7 +367,8 @@ exports.handler = async (event) => {
     originFacingPrefixListId,
     hostedZone,
     allowedClientCidrs,
-    allowedPrefixListIds
+    allowedPrefixListIds,
+    additionalVpcCidrs
   });
 
   // An update keeps the IAM names the stack already uses (see deployed-names.js).
@@ -426,7 +444,8 @@ function generateCloudFormationTemplate(config) {
     originFacingPrefixListId,
     hostedZone = null,
     allowedClientCidrs = [],
-    allowedPrefixListIds = []
+    allowedPrefixListIds = [],
+    additionalVpcCidrs = []
   } = config;
   
   // Lowercase acronym for S3 bucket names (S3 doesn't allow uppercase)
@@ -643,6 +662,10 @@ function generateCloudFormationTemplate(config) {
             // The Session Manager sits behind an internal NLB; its callers are in the VPC.
             { IpProtocol: 'tcp', FromPort: 8443, ToPort: 8443, CidrIp: { Ref: 'VpcCidr' }, Description: 'CLI to Broker API' },
             { IpProtocol: 'tcp', FromPort: 8445, ToPort: 8445, CidrIp: { Ref: 'VpcCidr' }, Description: 'Agent to Broker' },
+            ...additionalVpcCidrs.flatMap(cidr => [
+              { IpProtocol: 'tcp', FromPort: 8443, ToPort: 8443, CidrIp: cidr, Description: 'CLI to Broker API (secondary VPC CIDR)' },
+              { IpProtocol: 'tcp', FromPort: 8445, ToPort: 8445, CidrIp: cidr, Description: 'Agent to Broker (secondary VPC CIDR)' }
+            ]),
             { IpProtocol: 'tcp', FromPort: 8447, ToPort: 8447, CidrIp: { Ref: 'VpcCidr' }, Description: 'Gateway to Broker resolver' }
           ],
           Tags: [{ Key: 'Name', Value: { 'Fn::Sub': '${ProductName}-Regional-SessionManager-SG' } }]
@@ -682,7 +705,10 @@ function generateCloudFormationTemplate(config) {
             // UDP 8444 (QUIC). The NLB keeps the client IP.
             ...gatewayClients.ingress,
             // NLB health checks come from the NLB's addresses in the VPC.
-            { IpProtocol: 'tcp', FromPort: 8989, ToPort: 8989, CidrIp: { Ref: 'VpcCidr' }, Description: 'Health check' }
+            { IpProtocol: 'tcp', FromPort: 8989, ToPort: 8989, CidrIp: { Ref: 'VpcCidr' }, Description: 'Health check' },
+            ...additionalVpcCidrs.map(cidr => (
+              { IpProtocol: 'tcp', FromPort: 8989, ToPort: 8989, CidrIp: cidr, Description: 'Health check (secondary VPC CIDR)' }
+            ))
           ],
           Tags: [{ Key: 'Name', Value: { 'Fn::Sub': '${ProductName}-Regional-ConnectionGateway-SG' } }]
         }

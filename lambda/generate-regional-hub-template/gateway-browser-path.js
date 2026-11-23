@@ -127,6 +127,18 @@ function selectVpcOriginSubnets(subnets) {
   return allowed;
 }
 
+/**
+ * Associated IPv4 CIDR blocks of a VPC (DescribeVpcs shape) other than
+ * `primaryCidr`, in association order.
+ */
+function additionalVpcCidrs(vpc, primaryCidr) {
+  if (!vpc) return [];
+  const cidrs = [vpc.CidrBlock, ...(vpc.CidrBlockAssociationSet || [])
+    .filter(a => a.CidrBlockState && a.CidrBlockState.State === 'associated')
+    .map(a => a.CidrBlock)];
+  return [...new Set(cidrs.filter(c => c && c !== primaryCidr))];
+}
+
 /** DNS name of the origin load balancer when a hosted zone is set. */
 function originDomainName(region, hostedZoneName) {
   return `dcv-gateway-origin.${region}.${String(hostedZoneName).replace(/\.$/, '')}`;
@@ -400,6 +412,7 @@ module.exports = {
   parseAllowedClientCidrs,
   parseAllowedPrefixListIds,
   selectVpcOriginSubnets,
+  additionalVpcCidrs,
   originDomainName,
   gatewayClientIngressTemplate,
   cloudFrontBrowserPathTemplate,

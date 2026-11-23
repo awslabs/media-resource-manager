@@ -16,6 +16,9 @@ const { generateCloudFormationTemplate } = require('../lambda/generate-regional-
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const browserPath = require('../lambda/generate-regional-hub-template/gateway-browser-path.js');
 
+// A module, so its helpers don't clash with other test files' globals.
+export {};
+
 const PREFIX_LIST = 'pl-0123456789abcdef0';
 
 function generate(overrides: Record<string, unknown> = {}) {
@@ -103,6 +106,36 @@ describe('hub security groups', () => {
       IpProtocol: 'tcp', FromPort: 8443, ToPort: 8443,
       SourceSecurityGroupId: { Ref: 'GatewayBrowserAlbSecurityGroup' },
     }));
+  });
+});
+
+describe('hub VPC CIDR blocks', () => {
+  it('creates the VPC with one CIDR block, so VpcCidr covers it', () => {
+    expect(resourcesOfType(generate(), 'AWS::EC2::VPCCidrBlock')).toEqual([]);
+  });
+
+  it('adds the narrowed rules for each additional CIDR block of an existing hub VPC', () => {
+    const template = generate({ additionalVpcCidrs: ['100.64.0.0/16'] });
+    const sm = ingressOf(template, 'SessionManagerSecurityGroup');
+    for (const port of [8443, 8445]) {
+      expect(sm).toContainEqual(expect.objectContaining({ FromPort: port, CidrIp: '100.64.0.0/16' }));
+      expect(sm).toContainEqual(expect.objectContaining({ FromPort: port, CidrIp: { Ref: 'VpcCidr' } }));
+    }
+    expect(ingressOf(template, 'ConnectionGatewaySecurityGroup'))
+      .toContainEqual(expect.objectContaining({ FromPort: 8989, CidrIp: '100.64.0.0/16' }));
+  });
+
+  it('reads the additional blocks from DescribeVpcs, skipping the primary and disassociated ones', () => {
+    const vpc = {
+      CidrBlock: '10.2.0.0/16',
+      CidrBlockAssociationSet: [
+        { CidrBlock: '10.2.0.0/16', CidrBlockState: { State: 'associated' } },
+        { CidrBlock: '100.64.0.0/16', CidrBlockState: { State: 'associated' } },
+        { CidrBlock: '100.65.0.0/16', CidrBlockState: { State: 'disassociated' } },
+      ],
+    };
+    expect(browserPath.additionalVpcCidrs(vpc, '10.2.0.0/16')).toEqual(['100.64.0.0/16']);
+    expect(browserPath.additionalVpcCidrs(undefined, '10.2.0.0/16')).toEqual([]);
   });
 });
 

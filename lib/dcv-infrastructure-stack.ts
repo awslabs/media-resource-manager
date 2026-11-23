@@ -282,18 +282,69 @@ export class DcvInfrastructureStack extends cdk.Stack {
       'allow Gateway to Broker communication from NLB within VPC'
     );
 
+    // Every IPv4 CIDR block of the VPC, as a prefix list: an imported VPC can
+    // have secondary blocks, and MRM's subnets may sit in any of them.
+    const vpcCidrsFunction = new lambda.Function(this, 'VpcCidrPrefixListFunction', {
+      functionName: `${props.acronym.toLowerCase()}-vpc-cidr-prefix-list`,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/vpc-cidr-prefix-list')),
+      timeout: cdk.Duration.minutes(3),
+    });
+    const vpcCidrsTag = { key: `${props.pascalCaseName}:VpcCidrs`, value: 'true' };
+    // Describe calls don't support resource-level permissions.
+    vpcCidrsFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:DescribeVpcs', 'ec2:DescribeManagedPrefixLists', 'ec2:GetManagedPrefixListEntries'],
+      resources: ['*'],
+    }));
+    vpcCidrsFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:CreateManagedPrefixList'],
+      resources: [`arn:aws:ec2:${this.region}:${this.account}:prefix-list/*`],
+      conditions: { StringEquals: { [`aws:RequestTag/${vpcCidrsTag.key}`]: vpcCidrsTag.value } },
+    }));
+    vpcCidrsFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:CreateTags'],
+      resources: [`arn:aws:ec2:${this.region}:${this.account}:prefix-list/*`],
+      conditions: { StringEquals: { 'ec2:CreateAction': 'CreateManagedPrefixList' } },
+    }));
+    vpcCidrsFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:ModifyManagedPrefixList', 'ec2:DeleteManagedPrefixList'],
+      resources: [`arn:aws:ec2:${this.region}:${this.account}:prefix-list/*`],
+      conditions: { StringEquals: { [`aws:ResourceTag/${vpcCidrsTag.key}`]: vpcCidrsTag.value } },
+    }));
+    const vpcCidrsProvider = new cr.Provider(this, 'VpcCidrPrefixListProvider', {
+      onEventHandler: vpcCidrsFunction,
+    });
+    const vpcCidrs = new cdk.CustomResource(this, 'VpcCidrPrefixList', {
+      serviceToken: vpcCidrsProvider.serviceToken,
+      properties: {
+        VpcId: vpcId,
+        PrefixListName: `${props.pascalCaseName}-VpcCidrs`,
+        TagKey: vpcCidrsTag.key,
+        TagValue: vpcCidrsTag.value,
+        // Re-read the VPC on every deploy, so a CIDR block associated later
+        // is added. A no-op when nothing changed.
+        Refresh: Date.now().toString(),
+      },
+    });
+    const vpcCidrsPeer = ec2.Peer.prefixList(vpcCidrs.getAttString('PrefixListId'));
+    // Have the list before the groups drop their older rules, so the rules
+    // that reference it follow within seconds.
+    sessionManagerSg.node.addDependency(vpcCidrs);
+    connectionGatewaySg.node.addDependency(vpcCidrs);
+
     // The Session Manager sits behind an internal NLB, so its callers
     // (Lambdas, gateway, workstations) are in the VPC.
     // CLI to Broker communication
     sessionManagerSg.addIngressRule(
-      ec2.Peer.ipv4(vpcCidr),
+      vpcCidrsPeer,
       ec2.Port.tcp(8443),
       'allow CLI to Broker communication from within VPC'
     );
 
     // Agent to Broker communication (workstations)
     sessionManagerSg.addIngressRule(
-      ec2.Peer.ipv4(vpcCidr),
+      vpcCidrsPeer,
       ec2.Port.tcp(8445),
       'allow Agent to Broker communication from within VPC'
     );
@@ -341,7 +392,7 @@ export class DcvInfrastructureStack extends cdk.Stack {
 
     // Health check port for Network Load Balancer (NLB nodes are in the VPC)
     connectionGatewaySg.addIngressRule(
-      ec2.Peer.ipv4(vpcCidr),
+      vpcCidrsPeer,
       ec2.Port.tcp(8989),
       'allow health check for NLB targets from within VPC'
     );

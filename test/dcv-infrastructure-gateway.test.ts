@@ -9,10 +9,16 @@ import * as cdk from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { DcvInfrastructureStack, DcvInfrastructureStackProps } from '../lib/dcv-infrastructure-stack';
 
+const command = (name: string) => jest.fn((input: any) => ({ name, input }));
 jest.mock('@aws-sdk/client-ec2', () => ({
   EC2Client: jest.fn(),
-  DescribeSubnetsCommand: jest.fn(input => ({ name: 'DescribeSubnets', input })),
-  DescribeManagedPrefixListsCommand: jest.fn(input => ({ name: 'DescribeManagedPrefixLists', input })),
+  DescribeSubnetsCommand: command('DescribeSubnets'),
+  DescribeManagedPrefixListsCommand: command('DescribeManagedPrefixLists'),
+  DescribeVpcsCommand: command('DescribeVpcs'),
+  CreateManagedPrefixListCommand: command('CreateManagedPrefixList'),
+  GetManagedPrefixListEntriesCommand: command('GetManagedPrefixListEntries'),
+  ModifyManagedPrefixListCommand: command('ModifyManagedPrefixList'),
+  DeleteManagedPrefixListCommand: command('DeleteManagedPrefixList'),
 }), { virtual: true });
 jest.mock('@aws-sdk/client-route-53', () => ({
   Route53Client: jest.fn(),
@@ -23,6 +29,8 @@ jest.mock('@aws-sdk/client-route-53', () => ({
 const browserPath = require('../lambda/generate-regional-hub-template/gateway-browser-path.js');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const originLookup = require('../lambda/gateway-origin-lookup/index.js');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const vpcCidrPrefixList = require('../lambda/vpc-cidr-prefix-list/index.js');
 
 function synth(props: Partial<DcvInfrastructureStackProps> = {}): Template {
   const app = new cdk.App();
@@ -40,14 +48,14 @@ function gatewaySgIngress(template: Template): any[] {
   const groups = template.findResources('AWS::EC2::SecurityGroup', {
     Properties: { GroupName: 'MediaResourceManager-DCV-ConnectionGateway-SG' },
   });
-  return (Object.values(groups)[0] as any).Properties.SecurityGroupIngress;
+  return (Object.values(groups)[0] as any).Properties.SecurityGroupIngress || [];
 }
 
 function sessionManagerSgIngress(template: Template): any[] {
   const groups = template.findResources('AWS::EC2::SecurityGroup', {
     Properties: { GroupName: 'MediaResourceManager-DCV-SessionManager-SG' },
   });
-  return (Object.values(groups)[0] as any).Properties.SecurityGroupIngress;
+  return (Object.values(groups)[0] as any).Properties.SecurityGroupIngress || [];
 }
 
 function gatewayUserData(template: Template): string {
@@ -74,26 +82,41 @@ describe('primary gateway (default: CloudFront browser path)', () => {
     }));
   });
 
-  it('drops UDP 8443, keeps public TCP 8443 and UDP 8444, and scopes 8989 to the VPC', () => {
+  const vpcCidrsPrefixList = { 'Fn::GetAtt': ['VpcCidrPrefixList', 'PrefixListId'] };
+  const ruleFromVpcCidrs = (groupIdPrefix: string, port: number) => {
+    const rules = template.findResources('AWS::EC2::SecurityGroupIngress', {
+      Properties: { FromPort: port, SourcePrefixListId: vpcCidrsPrefixList },
+    });
+    return Object.values(rules).map((r: any) => r.Properties)
+      .filter(r => r.GroupId['Fn::GetAtt'][0].startsWith(groupIdPrefix));
+  };
+
+  it('drops UDP 8443, keeps public TCP 8443 and UDP 8444, and scopes 8989 to every VPC CIDR block', () => {
     const rules = gatewaySgIngress(template);
     expect(rules.find(r => r.IpProtocol === 'udp' && r.FromPort === 8443)).toBeUndefined();
     expect(rules).toEqual(expect.arrayContaining([
       expect.objectContaining({ IpProtocol: 'tcp', FromPort: 8443, CidrIp: '0.0.0.0/0' }),
       expect.objectContaining({ IpProtocol: 'udp', FromPort: 8444, CidrIp: '0.0.0.0/0' }),
     ]));
-    const health = rules.find(r => r.FromPort === 8989);
-    expect(health.CidrIp).not.toBe('0.0.0.0/0');
-    expect(JSON.stringify(health.CidrIp)).toContain('NetworkVpcCidr');
+    expect(rules.find(r => r.FromPort === 8989)).toBeUndefined();
+    expect(ruleFromVpcCidrs('ConnectionGatewaySG', 8989)).toHaveLength(1);
   });
 
-  it('scopes the Session Manager 8443 and 8445 rules to the VPC', () => {
+  it('scopes the Session Manager 8443 and 8445 rules to every VPC CIDR block', () => {
     const rules = sessionManagerSgIngress(template);
-    for (const port of [8443, 8445]) {
-      const rule = rules.find(r => r.FromPort === port && r.CidrIp);
-      expect(rule.CidrIp).not.toBe('0.0.0.0/0');
-      expect(JSON.stringify(rule.CidrIp)).toContain('NetworkVpcCidr');
-    }
     expect(rules.filter(r => r.CidrIp === '0.0.0.0/0')).toEqual([]);
+    for (const port of [8443, 8445]) {
+      expect(rules.find(r => r.FromPort === port && r.CidrIp)).toBeUndefined();
+      expect(ruleFromVpcCidrs('SessionManagerSG', port)).toHaveLength(1);
+    }
+  });
+
+  it('keeps a prefix list of the VPC CIDR blocks, refreshed on every deploy', () => {
+    template.hasResourceProperties('AWS::CloudFormation::CustomResource', {
+      VpcId: { Ref: Match.stringLikeRegexp('NetworkVpcId') },
+      PrefixListName: 'MediaResourceManager-VpcCidrs',
+      Refresh: Match.anyValue(),
+    });
   });
 
   it('allows TCP 8443 on the gateway from the browser ALB security group', () => {
@@ -276,5 +299,90 @@ describe('gateway-origin-lookup', () => {
       HostedZoneId: 'Z0123',
     }, { ec2, route53 });
     expect(data).toEqual({ SubnetIds: 'subnet-a,subnet-c', PrefixListId: 'pl-0123abcd', HostedZoneName: 'example.com' });
+  });
+});
+
+describe('vpc-cidr-prefix-list', () => {
+  const vpc = {
+    CidrBlock: '10.1.0.0/16',
+    CidrBlockAssociationSet: [
+      { CidrBlock: '10.1.0.0/16', CidrBlockState: { State: 'associated' } },
+      { CidrBlock: '100.64.0.0/16', CidrBlockState: { State: 'associated' } },
+      { CidrBlock: '100.65.0.0/16', CidrBlockState: { State: 'disassociating' } },
+    ],
+  };
+  const props = { VpcId: 'vpc-1', PrefixListName: 'MediaResourceManager-VpcCidrs', TagKey: 'k', TagValue: 'true' };
+
+  function fakeEc2(entries: string[] = [], maxEntries = 5) {
+    const calls: any[] = [];
+    const ec2 = {
+      calls,
+      send: jest.fn(async (cmd: any) => {
+        calls.push(cmd);
+        switch (cmd.name) {
+          case 'DescribeVpcs': return { Vpcs: [vpc] };
+          case 'CreateManagedPrefixList': return { PrefixList: { PrefixListId: 'pl-0abc' } };
+          case 'DescribeManagedPrefixLists':
+            return { PrefixLists: [{ PrefixListId: 'pl-0abc', State: 'modify-complete', Version: 3, MaxEntries: maxEntries }] };
+          case 'GetManagedPrefixListEntries': return { Entries: entries.map(Cidr => ({ Cidr })) };
+          default: return {};
+        }
+      }),
+    };
+    return ec2;
+  }
+  const noSleep = async () => undefined;
+
+  it('lists every associated IPv4 CIDR block, primary first', async () => {
+    expect(await vpcCidrPrefixList.vpcCidrs(fakeEc2(), 'vpc-1')).toEqual(['10.1.0.0/16', '100.64.0.0/16']);
+  });
+
+  it('creates the prefix list with those blocks and returns its ID', async () => {
+    const ec2 = fakeEc2();
+    const result = await vpcCidrPrefixList.handle({ RequestType: 'Create', ResourceProperties: props }, ec2, noSleep);
+    expect(result).toEqual({ PhysicalResourceId: 'pl-0abc', Data: { PrefixListId: 'pl-0abc' } });
+    const create = ec2.calls.find(c => c.name === 'CreateManagedPrefixList').input;
+    expect(create.Entries.map((e: any) => e.Cidr)).toEqual(['10.1.0.0/16', '100.64.0.0/16']);
+    expect(create.MaxEntries).toBe(5);
+  });
+
+  it('adds a block associated after the last deploy, and removes one that is gone', async () => {
+    const ec2 = fakeEc2(['10.1.0.0/16', '172.16.0.0/16']);
+    await vpcCidrPrefixList.handle({
+      RequestType: 'Update', PhysicalResourceId: 'pl-0abc', ResourceProperties: props, OldResourceProperties: props,
+    }, ec2, noSleep);
+    const modify = ec2.calls.find(c => c.name === 'ModifyManagedPrefixList').input;
+    expect(modify).toEqual(expect.objectContaining({
+      PrefixListId: 'pl-0abc', CurrentVersion: 3,
+      AddEntries: [expect.objectContaining({ Cidr: '100.64.0.0/16' })],
+      RemoveEntries: [{ Cidr: '172.16.0.0/16' }],
+    }));
+  });
+
+  it('changes nothing when the blocks match', async () => {
+    const ec2 = fakeEc2(['10.1.0.0/16', '100.64.0.0/16']);
+    await vpcCidrPrefixList.handle({
+      RequestType: 'Update', PhysicalResourceId: 'pl-0abc', ResourceProperties: props, OldResourceProperties: props,
+    }, ec2, noSleep);
+    expect(ec2.calls.find(c => c.name === 'ModifyManagedPrefixList')).toBeUndefined();
+  });
+
+  it('raises MaxEntries before adding more blocks than it allows', async () => {
+    const ec2 = fakeEc2(['10.1.0.0/16'], 1);
+    await vpcCidrPrefixList.handle({
+      RequestType: 'Update', PhysicalResourceId: 'pl-0abc', ResourceProperties: props, OldResourceProperties: props,
+    }, ec2, noSleep);
+    const modifies = ec2.calls.filter(c => c.name === 'ModifyManagedPrefixList').map(c => c.input);
+    expect(modifies[0]).toEqual({ PrefixListId: 'pl-0abc', MaxEntries: 2 });
+    expect(modifies[1].AddEntries).toHaveLength(1);
+  });
+
+  it('deletes the list, and ignores a failed create that left none', async () => {
+    const ec2 = fakeEc2();
+    await vpcCidrPrefixList.handle({ RequestType: 'Delete', PhysicalResourceId: 'pl-0abc', ResourceProperties: props }, ec2, noSleep);
+    expect(ec2.calls.map(c => c.name)).toEqual(['DeleteManagedPrefixList']);
+    const none = fakeEc2();
+    await vpcCidrPrefixList.handle({ RequestType: 'Delete', PhysicalResourceId: 'abc-request', ResourceProperties: props }, none, noSleep);
+    expect(none.calls).toEqual([]);
   });
 });

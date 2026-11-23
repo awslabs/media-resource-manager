@@ -109,12 +109,18 @@ export class RegionalHubStack extends cdk.Stack {
       },
     });
 
-    // Look up CloudFront's origin-facing prefix list in the hub's Region.
-    // Describe calls don't support resource-level permissions.
+    // Look up CloudFront's origin-facing prefix list and, on update, the hub
+    // VPC's CIDR blocks in the hub's Region. Describe calls don't support
+    // resource-level permissions.
     this.generateTemplateFunction.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: ['ec2:DescribeManagedPrefixLists'],
+      actions: ['ec2:DescribeManagedPrefixLists', 'ec2:DescribeVpcs'],
       resources: ['*'],
+    }));
+    this.generateTemplateFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['cloudformation:DescribeStacks'],
+      resources: [`arn:aws:cloudformation:*:${this.account}:stack/${props.acronym}-Regional-Hub-*/*`],
     }));
     if (props.dcvHostedZoneId) {
       this.generateTemplateFunction.addToRolePolicy(new iam.PolicyStatement({
