@@ -96,6 +96,22 @@ describe('ConnectViewer', () => {
 
   const lastViewer = () => viewerProps[viewerProps.length - 1];
 
+  it('gives the SDK an absolute base URL at the site root when the page is on the nested /connect/<id> route', async () => {
+    // The SDK resolves a base URL that doesn't start with http against the
+    // page's directory; on /connect/<id> that loaded index.html as the workers.
+    window.history.pushState({}, '', '/connect/i-0123456789abcdef0');
+    try {
+      fetchMock.mockResolvedValue(sessionResponse('https://d111111abcdef8.cloudfront.net'));
+      await render();
+      const { baseUrl } = lastViewer().dcv;
+      expect(baseUrl).toBe(`${window.location.origin}/dcvsdk/dcvjs`);
+      expect(baseUrl).toMatch(/^https?:\/\//);
+      expect(baseUrl).not.toContain('/connect/');
+    } finally {
+      window.history.pushState({}, '', '/');
+    }
+  });
+
   it('starts the session and hands the token straight to DCVViewer through CloudFront', async () => {
     fetchMock.mockResolvedValue(sessionResponse('https://d111111abcdef8.cloudfront.net'));
     await render();
