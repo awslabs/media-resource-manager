@@ -126,7 +126,7 @@ Both print `404`. The WebSocket endpoint should still upgrade:
 
 ```bash
 curl -s --http1.1 -o /dev/null -w '%{http_code}\n' -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
-  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' --max-time 10 https://<id>.cloudfront.net/ws
+  -H 'Sec-WebSocket-Version: 13' -H "Sec-WebSocket-Key: $(openssl rand -base64 16)" --max-time 10 https://<id>.cloudfront.net/ws
 ```
 
 prints `101` (the gateway closes the socket after a few seconds without a
