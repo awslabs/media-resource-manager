@@ -47,6 +47,12 @@ Add a suppression only with a reason that a reviewer can check against the code.
 A suppression pinned to a line goes stale when the file changes: re-check the
 line when ASH reports the finding again.
 
+- `ssm-documents/linux-phase1-base-install.js`: the public AWS CLI signing key
+  and its fingerprint, from the AWS CLI install guide, which phase 1 uses to
+  verify the AWS CLI installer. Suppressed by file and rule (detect-secrets
+  base64, hex and AWS key detectors, gitleaks `generic-api-key`), not by line;
+  `.gitleaks.toml` allowlists the fingerprint for the history scan.
+
 ### Documented semgrep exclusions
 
 ASH passes each one to semgrep and opengrep as `--exclude-rule`. The legacy
@@ -78,7 +84,7 @@ ASH configures its scanners itself. Most per-tool config files in the tree are
 ASH's secret scanners (detect-secrets, and gitleaks when installed) scan the
 current working tree. `npm run security:gitleaks` runs `gitleaks detect`, which
 scans the **git history** as well. `.gitleaks.toml` (allowlisted paths and
-known false-positive patterns) and `.gitleaksignore` (fingerprints of two
+known false-positive patterns) and `.gitleaksignore` (fingerprints of
 historical findings in old commits) exist for that history scan. Keep them
 until a history scan runs some other way.
 
