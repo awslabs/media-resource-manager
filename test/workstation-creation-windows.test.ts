@@ -118,9 +118,9 @@ describe('WindowsWorkstationCreationStack post-reboot console session check', ()
   });
 });
 
-describe('console-session-ready-windows Lambda', () => {
+describe('console-session-ready Lambda', () => {
   it('passes its Python unit tests', () => {
-    const result = spawnSync('python3', ['-m', 'unittest', path.join(__dirname, 'python', 'test_console_session_ready_windows.py')], {
+    const result = spawnSync('python3', ['-m', 'unittest', path.join(__dirname, 'python', 'test_console_session_ready.py')], {
       encoding: 'utf8',
     });
     if (result.status !== 0) {
