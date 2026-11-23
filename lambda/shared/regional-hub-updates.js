@@ -61,7 +61,13 @@ function decideUpdateOutcome(hub, stack, nowMs) {
   }
 
   if (stackStatus === 'UPDATE_COMPLETE') {
-    return { status: 'available', templateVersion: hub.pendingTemplateVersion };
+    // Hub templates from v1.5.0 output the browser gateway URL.
+    const browserOutput = (stack.Outputs || []).find(output => output.OutputKey === 'BrowserGatewayUrl');
+    return {
+      status: 'available',
+      templateVersion: hub.pendingTemplateVersion,
+      ...(browserOutput && browserOutput.OutputValue ? { browserGatewayUrl: browserOutput.OutputValue } : {}),
+    };
   }
   return {
     status: 'update_failed',
@@ -109,6 +115,10 @@ async function reconcileUpdatingHubs(hubs, { docClient, tableName, UpdateCommand
         set.push('templateVersion = :templateVersion');
         values[':templateVersion'] = outcome.templateVersion;
       }
+      if (outcome.browserGatewayUrl) {
+        set.push('browserGatewayUrl = :browserGatewayUrl');
+        values[':browserGatewayUrl'] = outcome.browserGatewayUrl;
+      }
       if (outcome.lastError) {
         set.push('lastError = :lastError');
         values[':lastError'] = outcome.lastError;
@@ -130,6 +140,7 @@ async function reconcileUpdatingHubs(hubs, { docClient, tableName, UpdateCommand
       delete updated.pendingTemplateVersion;
       delete updated.updateStartedAt;
       if (outcome.templateVersion) updated.templateVersion = outcome.templateVersion;
+      if (outcome.browserGatewayUrl) updated.browserGatewayUrl = outcome.browserGatewayUrl;
       if (outcome.lastError) updated.lastError = outcome.lastError; else delete updated.lastError;
       results.set(hub.region, updated);
       console.log('Regional hub %s update finished: %s', hub.region, outcome.status);

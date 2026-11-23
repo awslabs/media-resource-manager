@@ -228,6 +228,15 @@ const infrastructureStack = new InfrastructureStack(app, `${naming.acronym}-Infr
   adConnectorConfig,
 });
 
+// Gateway browser path and client allowlist (lambda/generate-regional-hub-template/gateway-browser-path.js).
+// The primary gateway and every regional hub use the same settings.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const gatewayBrowserPath = require('../lambda/generate-regional-hub-template/gateway-browser-path');
+const dcvBrowserPath: string = gatewayBrowserPath.parseBrowserPath(getContextOrParameter('dcvBrowserPath'));
+const dcvHostedZoneId = getContextOrParameter('dcvHostedZoneId');
+const dcvAllowedClientCidrs: string[] = gatewayBrowserPath.parseAllowedClientCidrs(getContextOrParameter('dcvAllowedClientCidrs'));
+const dcvAllowedPrefixListIds: string[] = gatewayBrowserPath.parseAllowedPrefixListIds(getContextOrParameter('dcvAllowedPrefixListIds'));
+
 // DCV Infrastructure stack
 const dcvCertificateContent = loadCertificateFile(getContextOrParameter('dcvCertificateFile'));
 const dcvPrivateKeyContent = loadCertificateFile(getContextOrParameter('dcvPrivateKeyFile'));
@@ -243,6 +252,10 @@ const dcvStack = new DcvInfrastructureStack(app, `${naming.acronym}-Dcv-Infrastr
   dcvCertificateContent,
   dcvPrivateKeyContent,
   dataEncryptionKey: infrastructureStack.security.dataEncryptionKey,
+  dcvBrowserPath,
+  dcvHostedZoneId,
+  dcvAllowedClientCidrs,
+  dcvAllowedPrefixListIds,
 });
 dcvStack.addDependency(infrastructureStack);
 
@@ -408,6 +421,9 @@ const regionalHubStack = new RegionalHubStack(app, `${naming.acronym}-Regional-H
   pascalCaseName: naming.pascalCase,
   acronym: naming.acronym,
   dataEncryptionKey: infrastructureStack.security.dataEncryptionKey,
+  dcvBrowserPath,
+  dcvAllowedClientCidrs,
+  dcvHostedZoneId,
 });
 regionalHubStack.addDependency(infrastructureStack);
 
