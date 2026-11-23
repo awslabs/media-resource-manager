@@ -52,6 +52,16 @@ export class NetworkConstruct extends Construct {
         // Use explicit subnet IDs - this handles VPCs with multiple subnets per AZ
         // We use fromVpcAttributes to avoid the lookup which would return all subnets
         this.isImportedWithExplicitSubnets = true;
+
+        // Subnet i is placed in AZ i mod n, so each list must be a multiple of the AZ count.
+        const publicCount = publicSubnetIds?.length ?? 0;
+        if (privateSubnetIds.length % azList.length !== 0 || publicCount % azList.length !== 0) {
+          throw new Error(
+            `NetworkConstruct: PrivateSubnetIds has ${privateSubnetIds.length} and PublicSubnetIds has ${publicCount} ` +
+            `subnet(s), but AvailabilityZones lists ${azList.length} AZ(s) (${azList.join(',')}). ` +
+            'Give one subnet per AZ, in the same order as AvailabilityZones.'
+          );
+        }
         
         this.vpc = ec2.Vpc.fromVpcAttributes(this, 'ImportedVpc', {
           vpcId: params.VpcId!,
@@ -129,6 +139,8 @@ export class NetworkConstruct extends Construct {
       this.publicSubnets = this.vpc.publicSubnets;
     }
 
+    this.assertUsablePrivateSubnets(hasExistingVpc);
+
     // Load private route table IDs from parameters (for imported VPCs)
     // These are captured by analyze-vpc.sh and used for VPC endpoint association
     const routeTableIdsParam = params.PrivateRouteTableIds;
@@ -138,6 +150,33 @@ export class NetworkConstruct extends Construct {
 
     // Store network info in SSM
     this.createSSMParameters(props);
+  }
+
+  /**
+   * Managed AD, AD Connector and the DNS resolver endpoint use the first two
+   * private subnets, so there must be at least two, in different AZs.
+   * Failing here gives a clear message instead of a crash on privateSubnets[0].
+   */
+  private assertUsablePrivateSubnets(isImportedVpc: boolean): void {
+    const help = isImportedVpc
+      ? ' Set PrivateSubnetIds (and PublicSubnetIds) to one subnet per AZ, in at least 2 AZs, in parameters.json ' +
+        'or in the deploy pipeline stack. A VPC lookup counts a subnet as private only when its default route ' +
+        'goes to a NAT gateway or a transit gateway; a subnet that routes through a NAT instance or a network ' +
+        'interface counts as isolated unless it is tagged aws-cdk:subnet-type=Private.'
+      : ' Set AvailabilityZones to at least 2 AZs, or leave it empty.';
+    const subnets = this.privateSubnets;
+    if (subnets.length < 2) {
+      throw new Error(
+        `NetworkConstruct: found ${subnets.length} private subnet(s); at least 2 in different Availability Zones are needed.${help}`
+      );
+    }
+    const [az1, az2] = [subnets[0].availabilityZone, subnets[1].availabilityZone];
+    if (!cdk.Token.isUnresolved(az1) && !cdk.Token.isUnresolved(az2) && az1 === az2) {
+      throw new Error(
+        `NetworkConstruct: the first two private subnets (${subnets[0].subnetId}, ${subnets[1].subnetId}) ` +
+        `are both in ${az1}; they must be in different Availability Zones.${help}`
+      );
+    }
   }
 
   private loadParameters(): NetworkParams {

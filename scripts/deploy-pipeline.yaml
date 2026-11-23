@@ -18,6 +18,8 @@ Metadata:
           default: "Required: Network"
         Parameters:
           - VpcId
+          - PrivateSubnetIds
+          - PublicSubnetIds
           - VpcCidr
           - AvailabilityZones
           - PublicSubnetMask
@@ -74,6 +76,10 @@ Metadata:
         default: "Admin Email Addresses"
       VpcId:
         default: "Existing VPC ID (leave blank to create new)"
+      PrivateSubnetIds:
+        default: "Private Subnet IDs (existing VPC only)"
+      PublicSubnetIds:
+        default: "Public Subnet IDs (existing VPC only)"
       VpcCidr:
         default: "VPC CIDR Block"
       AvailabilityZones:
@@ -173,6 +179,32 @@ Parameters:
     Description: >
       (Optional) Existing VPC ID for deployment. Leave empty to create a
       new VPC. This value is written into parameters.json.
+
+  # String, not CommaDelimitedList or List<AWS::EC2::Subnet::Id>: an empty
+  # default must stay valid for installs where MRM creates the VPC, and a
+  # CommaDelimitedList applies AllowedPattern to each (here empty) item.
+  PrivateSubnetIds:
+    Type: String
+    Default: ''
+    AllowedPattern: '^(subnet-[0-9a-f]{8,17}(,subnet-[0-9a-f]{8,17})*)?$'
+    ConstraintDescription: Empty, or a comma-separated list of subnet IDs with no spaces.
+    Description: >
+      (Optional, existing VPC only) Comma-separated private subnet IDs, one
+      per Availability Zone in at least 2 AZs, in the same order as
+      AvailabilityZones. Required when the VPC has more than one private
+      subnet in an AZ. Each needs outbound internet access (NAT gateway, NAT
+      instance or transit gateway). Leave empty to detect the subnets. Do not
+      change it after the first deploy: that replaces the Managed AD directory.
+
+  PublicSubnetIds:
+    Type: String
+    Default: ''
+    AllowedPattern: '^(subnet-[0-9a-f]{8,17}(,subnet-[0-9a-f]{8,17})*)?$'
+    ConstraintDescription: Empty, or a comma-separated list of subnet IDs with no spaces.
+    Description: >
+      (Optional, existing VPC only) Comma-separated public subnet IDs, one per
+      Availability Zone, in the same AZ order as PrivateSubnetIds. Set it
+      together with PrivateSubnetIds.
 
   VpcCidr:
     Type: String
@@ -305,12 +337,16 @@ Parameters:
   PublicSubnetMask:
     Type: String
     Default: '28'
-    Description: Subnet mask for public subnets (e.g., 28 = /28 = 14 usable IPs)
+    Description: >
+      Subnet mask for public subnets (e.g., 28 = /28 = 14 usable IPs). Only
+      used when MRM creates the VPC.
 
   PrivateSubnetMask:
     Type: String
     Default: '24'
-    Description: Subnet mask for private subnets (e.g., 24 = /24 = 254 usable IPs)
+    Description: >
+      Subnet mask for private subnets (e.g., 24 = /24 = 254 usable IPs). Only
+      used when MRM creates the VPC.
 
   DcvCertificateArn:
     Type: String
@@ -630,6 +666,10 @@ Resources:
               - ''
           - Name: MRM_VPC_ID
             Value: !Ref VpcId
+          - Name: MRM_PRIVATE_SUBNET_IDS
+            Value: !Ref PrivateSubnetIds
+          - Name: MRM_PUBLIC_SUBNET_IDS
+            Value: !Ref PublicSubnetIds
           - Name: MRM_VPC_CIDR
             Value: !Ref VpcCidr
           - Name: MRM_DOMAIN_NAME
@@ -883,6 +923,9 @@ Resources:
                       const fs = require('fs');
                       const params = JSON.parse(fs.readFileSync('parameters.json'));
                       let changed = false;
+                      const valueOf = key => (params.find(p => p.ParameterKey === key) || {}).ParameterValue || '';
+                      const savedPrivateSubnetIds = valueOf('PrivateSubnetIds');
+                      let overrides = {};
 
                       // Method 2 (baseline): Individual env vars from persistent pipeline stack parameters.
                       // Applied FIRST to establish the stack-configured baseline. Only applies
@@ -890,6 +933,8 @@ Resources:
                       // defaults, not intentional overrides.
                       const envMap = {
                         MRM_VPC_ID: 'VpcId',
+                        MRM_PRIVATE_SUBNET_IDS: 'PrivateSubnetIds',
+                        MRM_PUBLIC_SUBNET_IDS: 'PublicSubnetIds',
                         MRM_VPC_CIDR: 'VpcCidr',
                         MRM_AVAILABILITY_ZONES: 'AvailabilityZones',
                         MRM_PUBLIC_SUBNET_MASK: 'PublicSubnetMask',
@@ -943,7 +988,7 @@ Resources:
                       // deliberately supplied per-build input outranks a persistent default.
                       const jsonOverrides = process.env.MRM_PARAM_OVERRIDES || '{}';
                       if (jsonOverrides !== '{}') {
-                        const overrides = JSON.parse(jsonOverrides);
+                        overrides = JSON.parse(jsonOverrides);
                         for (const [paramKey, val] of Object.entries(overrides)) {
                           const p = params.find(p => p.ParameterKey === paramKey);
                           if (p) {
@@ -959,6 +1004,17 @@ Resources:
                             changed = true;
                           }
                         }
+                      }
+
+                      // New PrivateSubnetIds: clear the saved route tables so deploy.sh
+                      // runs scripts/analyze-vpc.sh, which checks the new subnets (and
+                      // stops if they differ from the deployed ones) and looks up theirs.
+                      const routeTables = params.find(p => p.ParameterKey === 'PrivateRouteTableIds');
+                      if (valueOf('PrivateSubnetIds') !== savedPrivateSubnetIds && routeTables && routeTables.ParameterValue
+                          && !Object.prototype.hasOwnProperty.call(overrides, 'PrivateRouteTableIds')) {
+                        console.log('PrivateSubnetIds changed: clearing PrivateRouteTableIds so the VPC analyzer checks the new subnets');
+                        routeTables.ParameterValue = '';
+                        changed = true;
                       }
 
                       if (changed) {
