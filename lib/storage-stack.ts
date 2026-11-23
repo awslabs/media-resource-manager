@@ -22,17 +22,6 @@ interface StorageStackProps extends cdk.StackProps {
   acronym: string;
   dataEncryptionKey?: kms.IKey;
   authenticatedRoleArn?: string;
-  /**
-   * ARN of the AD service-account secret. Populated by `IdentityConstruct`
-   * from `/${pascalCaseName}/Identity/AdServiceAccountSecretArn` — the MRM-
-   * managed ResourceAdmin secret in `AdMode=managed`, the customer-supplied
-   * secret ARN in `AdMode=connector`. The FSx template generator Lambda
-   * needs to read this secret to embed AD credentials into the FSx-Windows
-   * self-managed AD configuration, so its IAM policy must grant access to
-   * this specific ARN (the wildcard `/Identity/*` scope no longer covers
-   * connector mode where the customer's secret can live anywhere).
-   */
-  adServiceAccountSecretArn: string;
 }
 
 export class StorageStack extends cdk.Stack {
@@ -213,22 +202,10 @@ export class StorageStack extends cdk.Stack {
       resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/*`]
     }));
 
-    // Grant Secrets Manager permissions to template generator (for AD
-    // credentials for FSx Windows self-managed AD join).
-    //
-    // The `/Identity/*` wildcard covers the MRM-managed ResourceAdmin secret
-    // in AdMode=managed. The explicit ARN covers the customer-supplied
-    // secret in AdMode=connector, which lives at an arbitrary path outside
-    // the /Identity namespace. Also grants SSM GetParameter so the Lambda
-    // can resolve the mode-agnostic AdServiceAccountSecretArn pointer.
-    this.functions.generateFsxTemplate.addToRolePolicy(new iam.PolicyStatement({
-      effect: iam.Effect.ALLOW,
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [
-        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/${props.pascalCaseName}/Identity/*`,
-        props.adServiceAccountSecretArn,
-      ],
-    }));
+    // The template generator reads the mode-agnostic AdServiceAccountSecretArn
+    // pointer and puts the secret's ARN in the FSx for Windows template. The
+    // stack reads the secret through dynamic references, so the generator
+    // has no access to the secret itself.
     this.functions.generateFsxTemplate.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
       actions: ['ssm:GetParameter'],
@@ -236,11 +213,6 @@ export class StorageStack extends cdk.Stack {
         `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/Identity/AdServiceAccountSecretArn`,
       ],
     }));
-
-    // Grant KMS decrypt permissions to template generator (for decrypting AD credentials secret)
-    if (props.dataEncryptionKey) {
-      props.dataEncryptionKey.grantDecrypt(this.functions.generateFsxTemplate);
-    }
 
     // Grant DynamoDB read permissions to template generator (for regional hub network config)
     props.regionalHubsTable.grantReadData(this.functions.generateFsxTemplate);
@@ -336,6 +308,22 @@ export class StorageStack extends cdk.Stack {
       actions: ['secretsmanager:GetRandomPassword'],
       resources: ['*']
     }));
+
+    // The FSx for Windows template reads the AD service-account secret through
+    // dynamic references, which CloudFormation resolves with this function's
+    // credentials. The Secrets Manager statement above covers GetSecretValue;
+    // the MRM-managed secret (AdMode=managed) is encrypted with the data key,
+    // so allow Decrypt on it through Secrets Manager only.
+    if (props.dataEncryptionKey) {
+      this.functions.storageCfnWorker.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['kms:Decrypt'],
+        resources: [props.dataEncryptionKey.keyArn],
+        conditions: {
+          StringEquals: { 'kms:ViaService': `secretsmanager.${this.region}.amazonaws.com` },
+        },
+      }));
+    }
 
     // Parse Stack Outputs Function
     this.functions.parseStackOutputs = new lambda.Function(this, 'ParseStackOutputsFunction', {
