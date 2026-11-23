@@ -374,8 +374,7 @@ export class ApiStack extends cdk.Stack {
     const userGroupManagerFunction = new lambda.Function(this, 'UserGroupManagerFunction', {
       functionName: `${props.acronym.toLowerCase()}-user-group-manager`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/user-group-manager'),
+      ...lambdaCodeWithShared('user-group-manager'),
       timeout: cdk.Duration.minutes(5),
       reservedConcurrentExecutions: 20,
       environmentEncryption: props.dataEncryptionKey,
@@ -1370,8 +1369,7 @@ export class ApiStack extends cdk.Stack {
     const changePasswordFunction = new lambda.Function(this, 'ChangePasswordFunction', {
       functionName: `${props.acronym.toLowerCase()}-change-password`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/change-password'),
+      ...lambdaCodeWithShared('change-password'),
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
       environmentEncryption: props.dataEncryptionKey,

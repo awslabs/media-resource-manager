@@ -7,7 +7,7 @@ const { SFNClient, StartExecutionCommand } = require('@aws-sdk/client-sfn');
 const { CloudFormationClient, DescribeStacksCommand, DeleteStackCommand } = require('@aws-sdk/client-cloudformation');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { DataSyncClient, DeleteTaskCommand, DeleteLocationCommand } = require('@aws-sdk/client-datasync');
-const { requireAdmin } = require('./authz');
+const { requireAdmin } = require('../shared/authz');
 const { redactForLog } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });

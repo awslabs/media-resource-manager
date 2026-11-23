@@ -8,7 +8,7 @@ const { DirectoryServiceDataClient, CreateUserCommand, UpdateUserCommand, Disabl
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { CognitoIdentityProviderClient, ListUsersCommand, AdminListGroupsForUserCommand } = require('@aws-sdk/client-cognito-identity-provider');
 const crypto = require('crypto');
-const { requireAdmin } = require('./authz');
+const { requireAdmin } = require('../shared/authz');
 
 const dynamoClient = new DynamoDBClient({});
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
