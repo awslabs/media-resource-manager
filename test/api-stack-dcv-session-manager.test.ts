@@ -11,6 +11,7 @@ import { Template } from 'aws-cdk-lib/assertions';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import { ApiStack } from '../lib/api-stack';
 import { StorageStack } from '../lib/storage-stack';
@@ -61,7 +62,7 @@ function buildTemplate(): Template {
     buildSubnetId: 'subnet-00000000',
     buildSecurityGroupId: 'sg-00000000',
     enableBedrockFeatures: false,
-    adServiceAccountSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:unit-test-ad',
+    adServiceAccountSecretArn: new secretsmanager.Secret(deps, 'AdServiceAccount').secretArn,
   } as any);
   return Template.fromStack(api);
 }
