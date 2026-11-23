@@ -61,7 +61,7 @@ function buildTemplate(): Template {
     buildSubnetId: 'subnet-00000000',
     buildSecurityGroupId: 'sg-00000000',
     enableBedrockFeatures: false,
-    adServiceAccountSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:ad-AbCdEf',
+    adServiceAccountSecretArn: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:unit-test-ad',
   } as any);
   return Template.fromStack(api);
 }
