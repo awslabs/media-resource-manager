@@ -20,6 +20,12 @@ interface RegionalHubStackProps extends cdk.StackProps {
   pascalCaseName: string;
   acronym: string;
   dataEncryptionKey?: kms.IKey;
+  /** Gateway browser path for hubs: 'cloudfront' (default) or 'direct'. */
+  dcvBrowserPath?: string;
+  /** Client networks allowed to reach hub gateways (empty: open). */
+  dcvAllowedClientCidrs?: string[];
+  /** Route 53 hosted zone for an HTTPS hop from CloudFront to each hub's origin load balancer. */
+  dcvHostedZoneId?: string;
 }
 
 export class RegionalHubStack extends cdk.Stack {
@@ -95,9 +101,28 @@ export class RegionalHubStack extends cdk.Stack {
         ...(props.dataEncryptionKey && { DYNAMODB_KMS_KEY_ARN: props.dataEncryptionKey.keyArn }),
         // Saved on the hub, so the console can tell when a hub runs older code.
         TEMPLATE_VERSION: regionalHubTemplateVersion(),
+        // Gateway browser path and allowlist, the same as the primary's.
+        DCV_BROWSER_PATH: props.dcvBrowserPath || 'cloudfront',
+        DCV_ALLOWED_CLIENT_CIDRS: (props.dcvAllowedClientCidrs || []).join(','),
+        DCV_HOSTED_ZONE_ID: props.dcvHostedZoneId || '',
         ...lambdaAssetEnvVars,
       },
     });
+
+    // Look up CloudFront's origin-facing prefix list in the hub's Region.
+    // Describe calls don't support resource-level permissions.
+    this.generateTemplateFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ec2:DescribeManagedPrefixLists'],
+      resources: ['*'],
+    }));
+    if (props.dcvHostedZoneId) {
+      this.generateTemplateFunction.addToRolePolicy(new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: ['route53:GetHostedZone'],
+        resources: [`arn:aws:route53:::hostedzone/${props.dcvHostedZoneId}`],
+      }));
+    }
 
     // Grant S3 permissions to template generator
     templateBucket.grantReadWrite(this.generateTemplateFunction);
@@ -452,7 +477,7 @@ export class RegionalHubStack extends cdk.Stack {
             Key: {
               region: { "S.$": "$.region" }
             },
-            UpdateExpression: "SET #status = :status, #updatedAt = :updatedAt, vpcId = :vpcId, connectionGatewayEndpoint = :cgEndpoint, workstationSecurityGroupId = :sgId, sessionManagerEndpoint = :smEndpoint, privateSubnet1Id = :ps1Id, privateSubnet2Id = :ps2Id, subnetIds = :subnetIds, launchTemplateId = :ltId, hostResourceGroupArn = :hrgArn, licenseConfigurationArn = :licArn, instanceProfileName = :ipName, templateVersion = :templateVersion",
+            UpdateExpression: "SET #status = :status, #updatedAt = :updatedAt, vpcId = :vpcId, connectionGatewayEndpoint = :cgEndpoint, workstationSecurityGroupId = :sgId, sessionManagerEndpoint = :smEndpoint, privateSubnet1Id = :ps1Id, privateSubnet2Id = :ps2Id, subnetIds = :subnetIds, launchTemplateId = :ltId, hostResourceGroupArn = :hrgArn, licenseConfigurationArn = :licArn, instanceProfileName = :ipName, templateVersion = :templateVersion, browserGatewayUrl = :browserGatewayUrl",
             ExpressionAttributeNames: {
               "#status": "status",
               "#updatedAt": "updatedAt"
@@ -471,7 +496,8 @@ export class RegionalHubStack extends cdk.Stack {
               ":hrgArn": { "S.$": "$.outputs.HostResourceGroupArn" },
               ":licArn": { "S.$": "$.outputs.LicenseConfigurationArn" },
               ":ipName": { "S.$": "$.outputs.WorkstationInstanceProfileName" },
-              ":templateVersion": { "S.$": "$.templateData.templateVersion" }
+              ":templateVersion": { "S.$": "$.templateData.templateVersion" },
+              ":browserGatewayUrl": { "S.$": "$.outputs.BrowserGatewayUrl" }
             }
           },
           End: true,
@@ -492,7 +518,7 @@ export class RegionalHubStack extends cdk.Stack {
             Key: {
               region: { "S.$": "$.region" }
             },
-            UpdateExpression: "SET #status = :status, #updatedAt = :updatedAt, vpcId = :vpcId, connectionGatewayEndpoint = :cgEndpoint, workstationSecurityGroupId = :sgId, sessionManagerEndpoint = :smEndpoint, privateSubnet1Id = :ps1Id, privateSubnet2Id = :ps2Id, subnetIds = :subnetIds, launchTemplateId = :ltId, instanceProfileName = :ipName, templateVersion = :templateVersion",
+            UpdateExpression: "SET #status = :status, #updatedAt = :updatedAt, vpcId = :vpcId, connectionGatewayEndpoint = :cgEndpoint, workstationSecurityGroupId = :sgId, sessionManagerEndpoint = :smEndpoint, privateSubnet1Id = :ps1Id, privateSubnet2Id = :ps2Id, subnetIds = :subnetIds, launchTemplateId = :ltId, instanceProfileName = :ipName, templateVersion = :templateVersion, browserGatewayUrl = :browserGatewayUrl",
             ExpressionAttributeNames: {
               "#status": "status",
               "#updatedAt": "updatedAt"
@@ -509,7 +535,8 @@ export class RegionalHubStack extends cdk.Stack {
               ":subnetIds": { "S.$": "$.outputs.PrivateSubnetIds" },
               ":ltId": { "S.$": "$.outputs.LaunchTemplateId" },
               ":ipName": { "S.$": "$.outputs.WorkstationInstanceProfileName" },
-              ":templateVersion": { "S.$": "$.templateData.templateVersion" }
+              ":templateVersion": { "S.$": "$.templateData.templateVersion" },
+              ":browserGatewayUrl": { "S.$": "$.outputs.BrowserGatewayUrl" }
             }
           },
           End: true,

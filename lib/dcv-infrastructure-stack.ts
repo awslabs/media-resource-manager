@@ -13,6 +13,8 @@ import * as certificatemanager from 'aws-cdk-lib/aws-certificatemanager';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as fs from 'fs';
 import * as path from 'path';
 import { Construct } from 'constructs';
@@ -29,6 +31,13 @@ export interface DcvInfrastructureStackProps extends cdk.StackProps {
   dcvCertificateContent?: string;  // PEM certificate content for Connection Gateway TLS
   dcvPrivateKeyContent?: string;   // PEM private key content for Connection Gateway TLS
   dataEncryptionKey?: kms.IKey;
+  /** 'cloudfront' (default): browsers reach the gateway through CloudFront. 'direct': through the NLB. */
+  dcvBrowserPath?: string;
+  /** Optional Route 53 hosted zone: HTTPS from CloudFront to the origin load balancer. */
+  dcvHostedZoneId?: string;
+  /** Optional client allowlist for the gateway's public ports (TCP 8443, UDP 8444). */
+  dcvAllowedClientCidrs?: string[];
+  dcvAllowedPrefixListIds?: string[];
 }
 
 const windowsDcvInstallContent = require('../ssm-documents/windows-dcv-install');
@@ -39,6 +48,10 @@ const windowsSetupFsxSchedulerContent = require('../ssm-documents/windows-setup-
 // Load user data scripts from centralized location
 const sessionManagerInstallScript = fs.readFileSync(path.join(__dirname, '../user-data/session-manager-install.sh'), 'utf8');
 const connectionGatewayInstallScript = fs.readFileSync(path.join(__dirname, '../user-data/connection-gateway-install.sh'), 'utf8');
+
+// Shared with the regional hub template generator.
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const gatewayBrowserPath = require('../lambda/generate-regional-hub-template/gateway-browser-path');
 
 export class DcvInfrastructureStack extends cdk.Stack {
   public readonly vpc: ec2.IVpc;
@@ -269,45 +282,68 @@ export class DcvInfrastructureStack extends cdk.Stack {
       'allow Gateway to Broker communication from NLB within VPC'
     );
 
-    // CLI to Broker communication (external access)
+    // The Session Manager sits behind an internal NLB, so its callers
+    // (Lambdas, gateway, workstations) are in the VPC.
+    // CLI to Broker communication
     sessionManagerSg.addIngressRule(
-      ec2.Peer.anyIpv4(),
+      ec2.Peer.ipv4(vpcCidr),
       ec2.Port.tcp(8443),
-      'allow CLI to Broker communication'
+      'allow CLI to Broker communication from within VPC'
     );
 
     // Agent to Broker communication (workstations)
     sessionManagerSg.addIngressRule(
-      ec2.Peer.anyIpv4(),
+      ec2.Peer.ipv4(vpcCidr),
       ec2.Port.tcp(8445),
-      'allow Agent to Broker communication'
+      'allow Agent to Broker communication from within VPC'
     );
 
-    connectionGatewaySg.addIngressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.tcp(8443),
-      'allow TCP DCV access from public internet'
-    );
+    // Gateway client ports: TCP 8443 (native TCP, and browsers in direct mode)
+    // and UDP 8444 (QUIC). The NLB keeps the client IP, so the allowlist
+    // applies here. Empty allowlist: open, as the gateway only accepts
+    // connections with a DCV session token.
+    const browserPath = gatewayBrowserPath.parseBrowserPath(props.dcvBrowserPath);
+    const allowedClientCidrs: string[] = gatewayBrowserPath.parseAllowedClientCidrs(props.dcvAllowedClientCidrs);
+    const allowedPrefixListIds: string[] = gatewayBrowserPath.parseAllowedPrefixListIds(props.dcvAllowedPrefixListIds);
+    const clientAllowlist = allowedClientCidrs.length > 0 || allowedPrefixListIds.length > 0;
+    if (!clientAllowlist) {
+      connectionGatewaySg.addIngressRule(
+        ec2.Peer.anyIpv4(),
+        ec2.Port.tcp(8443),
+        'allow TCP DCV access from public internet'
+      );
 
-    // UDP DCV access for Connection Gateway
-    connectionGatewaySg.addIngressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.udp(8443),
-      'allow UDP DCV access from public internet'
-    );
+      // UDP DCV access on port 8444 for QUIC when TLS is enabled on 8443
+      connectionGatewaySg.addIngressRule(
+        ec2.Peer.anyIpv4(),
+        ec2.Port.udp(8444),
+        'allow UDP DCV/QUIC access from public internet (TLS mode)'
+      );
+    }
+    for (const cidr of allowedClientCidrs) {
+      connectionGatewaySg.addIngressRule(ec2.Peer.ipv4(cidr), ec2.Port.tcp(8443), 'allow TCP DCV access from an allowed client network');
+      connectionGatewaySg.addIngressRule(ec2.Peer.ipv4(cidr), ec2.Port.udp(8444), 'allow UDP DCV/QUIC access from an allowed client network');
+    }
+    // One security group per prefix list and protocol, so each list fits the
+    // rules-per-security-group quota (a prefix list counts as its max entries).
+    const allowlistSecurityGroups: ec2.SecurityGroup[] = [];
+    allowedPrefixListIds.forEach((prefixListId, i) => {
+      for (const [port, label] of [[ec2.Port.tcp(8443), 'Tcp'], [ec2.Port.udp(8444), 'Udp']] as [ec2.Port, string][]) {
+        const sg = new ec2.SecurityGroup(this, `ConnectionGatewayAllowedPrefixList${i + 1}${label}SG`, {
+          vpc: this.vpc,
+          description: `DCV Connection Gateway ${label.toUpperCase()} from allowed prefix list ${i + 1}`,
+          allowAllOutbound: false,
+        });
+        sg.addIngressRule(ec2.Peer.prefixList(prefixListId), port, 'allow DCV access from an allowed prefix list');
+        allowlistSecurityGroups.push(sg);
+      }
+    });
 
-    // UDP DCV access on port 8444 for QUIC when TLS is enabled on 8443
+    // Health check port for Network Load Balancer (NLB nodes are in the VPC)
     connectionGatewaySg.addIngressRule(
-      ec2.Peer.anyIpv4(),
-      ec2.Port.udp(8444),
-      'allow UDP DCV/QUIC access from public internet (TLS mode)'
-    );
-
-    // Health check port for Network Load Balancer
-    connectionGatewaySg.addIngressRule(
-      ec2.Peer.anyIpv4(),
+      ec2.Peer.ipv4(vpcCidr),
       ec2.Port.tcp(8989),
-      'allow health check for NLB targets'
+      'allow health check for NLB targets from within VPC'
     );
 
     workstationSg.addIngressRule(
@@ -652,25 +688,37 @@ ${connectionGatewayInstallScript}`;
     this.networkLoadBalancer.logAccessLogs(nlbAccessLogsBucket, 'dcv-nlb');
 
     // Connection Gateway Auto Scaling Group
+    const connectionGatewayLaunchTemplate = new ec2.LaunchTemplate(this, 'ConnectionGatewayLaunchTemplate', {
+      instanceType: ec2.InstanceType.of(ec2.InstanceClass.C7G, ec2.InstanceSize.LARGE),
+      machineImage: ec2.MachineImage.fromSsmParameter(
+        '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64',
+        { os: ec2.OperatingSystemType.LINUX }
+      ),
+      securityGroup: connectionGatewaySg,
+      role: connectionGatewayRole,
+      userData: connectionGatewayUserData,
+      // CKV_AWS_79: Require IMDSv2 for enhanced security
+      requireImdsv2: true,
+    });
+    allowlistSecurityGroups.forEach(sg => connectionGatewayLaunchTemplate.addSecurityGroup(sg));
+
     this.connectionGatewayAsg = new autoscaling.AutoScalingGroup(this, 'ConnectionGatewayAsg', {
       vpc: this.vpc,
-      launchTemplate: new ec2.LaunchTemplate(this, 'ConnectionGatewayLaunchTemplate', {
-        instanceType: ec2.InstanceType.of(ec2.InstanceClass.C7G, ec2.InstanceSize.LARGE),
-        machineImage: ec2.MachineImage.fromSsmParameter(
-          '/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64',
-          { os: ec2.OperatingSystemType.LINUX }
-        ),
-        securityGroup: connectionGatewaySg,
-        role: connectionGatewayRole,
-        userData: connectionGatewayUserData,
-        // CKV_AWS_79: Require IMDSv2 for enhanced security
-        requireImdsv2: true,
-      }),
+      launchTemplate: connectionGatewayLaunchTemplate,
       minCapacity: 1,
       maxCapacity: 3,
       vpcSubnets: {
         subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
       },
+      // Replace gateways one at a time when the launch template changes, so
+      // a new gateway config reaches running gateways. Gateways have no
+      // cfn-signal, so PauseTime gives a new one time to install and start
+      // before the old one is terminated. Same policy in the hub template.
+      updatePolicy: autoscaling.UpdatePolicy.rollingUpdate({
+        maxBatchSize: 1,
+        minInstancesInService: 1,
+        pauseTime: cdk.Duration.minutes(5),
+      }),
     });
 
     // SSL/TLS Certificate configuration for DCV Connection Gateway
@@ -740,6 +788,20 @@ ${connectionGatewayInstallScript}`;
       protocol: elbv2.Protocol.UDP,
       defaultTargetGroups: [udpTargetGroup],
     });
+
+    // Browser path through CloudFront (default): distribution -> VPC origin ->
+    // internal ALB -> gateway TCP 8443. Same shape as the hub template
+    // (lambda/generate-regional-hub-template/gateway-browser-path.js).
+    let browserDistribution: cloudfront.CfnDistribution | undefined;
+    if (browserPath === 'cloudfront') {
+      browserDistribution = this.createCloudFrontBrowserPath({
+        acronym: props.acronym,
+        pascalCaseName: props.pascalCaseName,
+        privateSubnetIds,
+        connectionGatewaySg,
+        hostedZoneId: props.dcvHostedZoneId,
+      });
+    }
 
     // SSM Document for DCV and SMAgent installation
     const dcvInstallDocument = new ssm.CfnDocument(this, 'DCVInstallDocument', {
@@ -938,6 +1000,21 @@ ${connectionGatewayInstallScript}`;
       description: 'DCV Connection Gateway Endpoint'
     });
 
+    // URL the browser viewer connects to (serverUrl): the gateway's CloudFront
+    // distribution, or the gateway itself in direct mode.
+    const browserGatewayUrl = browserDistribution
+      ? `https://${browserDistribution.attrDomainName}`
+      : `https://${connectionGatewayEndpoint}:8443`;
+    new ssm.StringParameter(this, 'BrowserGatewayUrlParameter', {
+      parameterName: `/${props.pascalCaseName}/DCV/BrowserGatewayUrl`,
+      stringValue: browserGatewayUrl,
+      description: 'DCV Connection Gateway URL for browser sessions',
+    });
+    new cdk.CfnOutput(this, 'BrowserGatewayUrl', {
+      value: browserGatewayUrl,
+      description: 'DCV Connection Gateway URL for browser sessions',
+    });
+
     // Outputs
     new cdk.CfnOutput(this, 'VpcId', {
       value: this.vpc.vpcId,
@@ -1011,6 +1088,203 @@ ${connectionGatewayInstallScript}`;
         dataEncryptionKey: props.dataEncryptionKey,
       });
     }
+  }
+
+  /**
+   * CloudFront distribution for browser sessions: a VPC origin on an internal
+   * ALB that forwards to the gateway on TCP 8443. Browsers get a publicly
+   * trusted *.cloudfront.net certificate. The ALB doesn't validate the
+   * gateway's (often self-signed) certificate.
+   *
+   * CloudFront creates a service-managed security group
+   * (CloudFront-VPCOrigins-Service-SG) and network interfaces in the VPC for
+   * the VPC origin. They aren't part of this stack (docs/GATEWAY_BROWSER_PATH.md).
+   */
+  private createCloudFrontBrowserPath(o: {
+    acronym: string;
+    pascalCaseName: string;
+    privateSubnetIds: string[];
+    connectionGatewaySg: ec2.SecurityGroup;
+    hostedZoneId?: string;
+  }): cloudfront.CfnDistribution {
+    const acronymLower = o.acronym.toLowerCase();
+    const https = Boolean(o.hostedZoneId);
+    const listenerPort = https ? 443 : 80;
+
+    // Account-specific values: subnets outside the AZ IDs VPC origins don't
+    // support, CloudFront's origin-facing prefix list, the hosted zone's name.
+    const lookupFunction = new lambda.Function(this, 'GatewayOriginLookupFunction', {
+      functionName: `${acronymLower}-gateway-origin-lookup`,
+      runtime: lambda.Runtime.NODEJS_22_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/gateway-origin-lookup')),
+      timeout: cdk.Duration.minutes(1),
+    });
+    // Describe calls don't support resource-level permissions.
+    lookupFunction.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:DescribeSubnets', 'ec2:DescribeManagedPrefixLists'],
+      resources: ['*'],
+    }));
+    if (o.hostedZoneId) {
+      lookupFunction.addToRolePolicy(new iam.PolicyStatement({
+        actions: ['route53:GetHostedZone'],
+        resources: [`arn:aws:route53:::hostedzone/${o.hostedZoneId}`],
+      }));
+    }
+    const lookupProvider = new cr.Provider(this, 'GatewayOriginLookupProvider', {
+      onEventHandler: lookupFunction,
+    });
+    const lookup = new cdk.CustomResource(this, 'GatewayOriginLookup', {
+      serviceToken: lookupProvider.serviceToken,
+      properties: {
+        SubnetIds: o.privateSubnetIds,
+        ExcludedAzIds: gatewayBrowserPath.VPC_ORIGIN_EXCLUDED_AZ_IDS,
+        PrefixListName: gatewayBrowserPath.CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST,
+        HostedZoneId: o.hostedZoneId || '',
+      },
+    });
+
+    const albSg = new ec2.SecurityGroup(this, 'GatewayBrowserAlbSG', {
+      vpc: this.vpc,
+      securityGroupName: `${o.pascalCaseName}-DCV-Gateway-Browser-ALB-SG`,
+      description: 'Gateway browser-path load balancer, reachable only from CloudFront',
+      allowAllOutbound: false,
+    });
+    albSg.addIngressRule(
+      ec2.Peer.prefixList(lookup.getAttString('PrefixListId')),
+      ec2.Port.tcp(listenerPort),
+      'CloudFront origin-facing (VPC origin)'
+    );
+    albSg.addEgressRule(o.connectionGatewaySg, ec2.Port.tcp(8443), 'Gateway web port');
+    o.connectionGatewaySg.addIngressRule(
+      albSg,
+      ec2.Port.tcp(8443),
+      'allow DCV browser sessions from the CloudFront origin load balancer'
+    );
+
+    const alb = new elbv2.CfnLoadBalancer(this, 'GatewayBrowserAlb', {
+      name: `${acronymLower}-gateway-browser-alb`,
+      type: 'application',
+      scheme: 'internal',
+      ipAddressType: 'ipv4',
+      subnets: cdk.Fn.split(',', lookup.getAttString('SubnetIds')),
+      securityGroups: [albSg.securityGroupId],
+      // No access logs by default: the first browser request carries the DCV
+      // session token in its query string.
+      loadBalancerAttributes: [
+        { key: 'idle_timeout.timeout_seconds', value: '60' },
+        { key: 'routing.http.drop_invalid_header_fields.enabled', value: 'true' },
+      ],
+    });
+
+    const targetGroup = new elbv2.ApplicationTargetGroup(this, 'GatewayBrowserTargetGroup', {
+      vpc: this.vpc,
+      targetType: elbv2.TargetType.INSTANCE,
+      protocol: elbv2.ApplicationProtocol.HTTPS,
+      port: 8443,
+      protocolVersion: elbv2.ApplicationProtocolVersion.HTTP1,
+      deregistrationDelay: cdk.Duration.seconds(30),
+      // The gateway's health port (8989) accepts TCP and sends nothing, and ALB
+      // health checks are HTTP(S) only, so check the web port. A token-only
+      // gateway answers GET / with 404.
+      healthCheck: {
+        protocol: elbv2.Protocol.HTTPS,
+        port: 'traffic-port',
+        path: '/',
+        interval: cdk.Duration.seconds(10),
+        healthyThresholdCount: 2,
+        unhealthyThresholdCount: 2,
+        healthyHttpCodes: '200-499',
+      },
+    });
+    this.connectionGatewayAsg.attachToApplicationTargetGroup(targetGroup);
+
+    let originName: string | undefined;
+    let certificate: certificatemanager.CfnCertificate | undefined;
+    let originRecord: route53.CfnRecordSet | undefined;
+    if (o.hostedZoneId) {
+      originName = gatewayBrowserPath.originDomainName(this.region, lookup.getAttString('HostedZoneName')) as string;
+      certificate = new certificatemanager.CfnCertificate(this, 'GatewayBrowserOriginCertificate', {
+        domainName: originName,
+        validationMethod: 'DNS',
+        domainValidationOptions: [{ domainName: originName, hostedZoneId: o.hostedZoneId }],
+      });
+      originRecord = new route53.CfnRecordSet(this, 'GatewayBrowserOriginRecord', {
+        hostedZoneId: o.hostedZoneId,
+        name: originName,
+        type: 'A',
+        aliasTarget: {
+          dnsName: alb.attrDnsName,
+          hostedZoneId: alb.attrCanonicalHostedZoneId,
+          evaluateTargetHealth: false,
+        },
+      });
+    }
+
+    const listener = new elbv2.CfnListener(this, 'GatewayBrowserListener', {
+      loadBalancerArn: alb.ref,
+      port: listenerPort,
+      protocol: https ? 'HTTPS' : 'HTTP',
+      certificates: certificate ? [{ certificateArn: certificate.ref }] : undefined,
+      sslPolicy: https ? 'ELBSecurityPolicy-TLS13-1-2-2021-06' : undefined,
+      defaultActions: [{ type: 'forward', targetGroupArn: targetGroup.targetGroupArn }],
+    });
+
+    const vpcOrigin = new cloudfront.CfnVpcOrigin(this, 'GatewayBrowserVpcOrigin', {
+      vpcOriginEndpointConfig: {
+        name: `${acronymLower}-gateway-${this.region}`,
+        arn: alb.ref,
+        httpPort: 80,
+        httpsPort: 443,
+        originProtocolPolicy: https ? 'https-only' : 'http-only',
+        originSslProtocols: ['TLSv1.2'],
+      },
+    });
+    vpcOrigin.addResourceDependency(listener);
+    if (originRecord) vpcOrigin.addResourceDependency(originRecord);
+
+    const corsFunction = new cloudfront.CfnFunction(this, 'GatewayBrowserCorsFunction', {
+      name: `${acronymLower}-gateway-cors-${this.region.replace(/-/g, '')}`,
+      autoPublish: true,
+      functionConfig: { comment: 'Answers CORS preflights for the DCV gateway', runtime: 'cloudfront-js-2.0' },
+      functionCode: gatewayBrowserPath.CORS_PREFLIGHT_FUNCTION_CODE,
+    });
+
+    return new cloudfront.CfnDistribution(this, 'GatewayBrowserDistribution', {
+      distributionConfig: {
+        comment: `${o.pascalCaseName} DCV gateway browser path (${this.region})`,
+        enabled: true,
+        httpVersion: 'http2',
+        ipv6Enabled: false,
+        priceClass: 'PriceClass_All',
+        viewerCertificate: { cloudFrontDefaultCertificate: true },
+        // No standard logging: the first browser request carries the DCV
+        // session token in its query string.
+        origins: [{
+          id: 'gateway-alb',
+          domainName: originName || alb.attrDnsName,
+          vpcOriginConfig: {
+            vpcOriginId: vpcOrigin.attrId,
+            originReadTimeout: 30,
+            originKeepaliveTimeout: 5,
+          },
+        }],
+        defaultCacheBehavior: {
+          targetOriginId: 'gateway-alb',
+          viewerProtocolPolicy: 'https-only',
+          allowedMethods: ['GET', 'HEAD', 'OPTIONS', 'PUT', 'PATCH', 'POST', 'DELETE'],
+          cachedMethods: ['GET', 'HEAD'],
+          compress: false,
+          cachePolicyId: gatewayBrowserPath.MANAGED_CACHE_POLICY_CACHING_DISABLED,
+          originRequestPolicyId: gatewayBrowserPath.MANAGED_ORIGIN_REQUEST_POLICY_ALL_VIEWER,
+          responseHeadersPolicyId: gatewayBrowserPath.MANAGED_RESPONSE_HEADERS_POLICY_SIMPLE_CORS,
+          functionAssociations: [{
+            eventType: 'viewer-request',
+            functionArn: corsFunction.attrFunctionArn,
+          }],
+        },
+      },
+    });
   }
 
   /**

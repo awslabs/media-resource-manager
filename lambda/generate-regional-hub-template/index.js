@@ -8,6 +8,7 @@ const { CloudFormationClient, GetTemplateCommand } = require('@aws-sdk/client-cl
 const fs = require('fs');
 const path = require('path');
 const { keepDeployedIamNames } = require('./deployed-names');
+const browserPath = require('./gateway-browser-path');
 
 // Import SSM document content for regional deployment
 // These are symlinked from ssm-documents/ folder
@@ -24,6 +25,18 @@ const macosPhase2AutoLoginContent = require('./ssm-documents/macos-phase2-auto-l
 // Load user data scripts from files (symlinked from user-data/ folder)
 const sessionManagerInstallScript = fs.readFileSync(path.join(__dirname, 'user-data/session-manager-install.sh'), 'utf8');
 const connectionGatewayInstallScript = fs.readFileSync(path.join(__dirname, 'user-data/connection-gateway-install.sh'), 'utf8');
+
+// Gateway ASG update policy, the same as the primary stack's. Gateways have no
+// cfn-signal, so PauseTime gives a new gateway time to install and start
+// before the old one is terminated.
+const GATEWAY_ROLLING_UPDATE_POLICY = {
+  AutoScalingRollingUpdate: {
+    MaxBatchSize: 1,
+    MinInstancesInService: 1,
+    PauseTime: 'PT5M',
+    SuspendProcesses: ['HealthCheck', 'ReplaceUnhealthy', 'AZRebalance', 'AlarmNotification', 'ScheduledActions', 'InstanceRefresh']
+  }
+};
 
 const s3 = new S3Client({});
 const ssm = new SSMClient({});
@@ -116,6 +129,29 @@ async function getAccountId() {
     cachedAccountId = identity.Account;
   }
   return cachedAccountId;
+}
+
+// ID of CloudFront's origin-facing prefix list in the hub's Region.
+async function lookupOriginFacingPrefixListId(region) {
+  // Provided by the Lambda runtime; loaded only when needed.
+  // eslint-disable-next-line global-require
+  const { EC2Client, DescribeManagedPrefixListsCommand } = require('@aws-sdk/client-ec2');
+  const ec2 = new EC2Client({ region });
+  const result = await ec2.send(new DescribeManagedPrefixListsCommand({
+    Filters: [{ Name: 'prefix-list-name', Values: [browserPath.CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST] }]
+  }));
+  const id = result.PrefixLists && result.PrefixLists[0] && result.PrefixLists[0].PrefixListId;
+  if (!id) throw new Error(`Prefix list ${browserPath.CLOUDFRONT_ORIGIN_FACING_PREFIX_LIST} not found in ${region}`);
+  return id;
+}
+
+// Domain name of the Route 53 hosted zone for the HTTPS origin hop.
+async function lookupHostedZoneName(hostedZoneId) {
+  // eslint-disable-next-line global-require
+  const { Route53Client, GetHostedZoneCommand } = require('@aws-sdk/client-route-53');
+  const route53 = new Route53Client({});
+  const result = await route53.send(new GetHostedZoneCommand({ Id: hostedZoneId }));
+  return result.HostedZone.Name.replace(/\.$/, '');
 }
 
 // Copy Lambda assets from source bucket (us-east-1) to target region bucket
@@ -255,9 +291,17 @@ exports.handler = async (event) => {
     enableWindows = true,
     enableLinux = true,
     enableMacOS = false,
+    // Optional per-hub client allowlist (prefix list IDs are per Region).
+    dcvAllowedPrefixListIds,
     // Set by update-regional-hub. The hub's stack already exists.
     isUpdate = false
   } = event;
+
+  // Browser path settings come from the primary deployment (set by CDK).
+  const gatewayBrowserPath = browserPath.parseBrowserPath(process.env.DCV_BROWSER_PATH);
+  const allowedClientCidrs = browserPath.parseAllowedClientCidrs(process.env.DCV_ALLOWED_CLIENT_CIDRS);
+  const allowedPrefixListIds = browserPath.parseAllowedPrefixListIds(dcvAllowedPrefixListIds);
+  const hostedZoneId = (process.env.DCV_HOSTED_ZONE_ID || '').trim();
   
   const productName = process.env.PRODUCT_NAME;
   const acronym = process.env.ACRONYM;
@@ -278,6 +322,13 @@ exports.handler = async (event) => {
   // Generate stack name
   const regionCode = region.replace(/-/g, '');
   const stackName = `${acronym}-Regional-Hub-${regionCode}`;
+
+  let originFacingPrefixListId;
+  let hostedZone = null;
+  if (gatewayBrowserPath === 'cloudfront') {
+    originFacingPrefixListId = await lookupOriginFacingPrefixListId(region);
+    if (hostedZoneId) hostedZone = { id: hostedZoneId, name: await lookupHostedZoneName(hostedZoneId) };
+  }
   
   // Generate CloudFormation template
   const template = generateCloudFormationTemplate({
@@ -294,7 +345,12 @@ exports.handler = async (event) => {
     enableLinux,
     enableMacOS,
     primaryRegion,
-    lambdaAssets
+    lambdaAssets,
+    gatewayBrowserPath,
+    originFacingPrefixListId,
+    hostedZone,
+    allowedClientCidrs,
+    allowedPrefixListIds
   });
 
   // An update keeps the IAM names the stack already uses (see deployed-names.js).
@@ -365,7 +421,12 @@ function generateCloudFormationTemplate(config) {
     enableWindows,
     enableLinux,
     enableMacOS,
-    lambdaAssets
+    lambdaAssets,
+    gatewayBrowserPath = browserPath.DEFAULT_BROWSER_PATH,
+    originFacingPrefixListId,
+    hostedZone = null,
+    allowedClientCidrs = [],
+    allowedPrefixListIds = []
   } = config;
   
   // Lowercase acronym for S3 bucket names (S3 doesn't allow uppercase)
@@ -391,6 +452,42 @@ function generateCloudFormationTemplate(config) {
   // Generate subnet reference arrays for NLBs, ASGs, Lambdas, etc.
   const publicSubnetRefs = getSubnetRefs('Public', azCount);
   const privateSubnetRefs = getSubnetRefs('Private', azCount);
+
+  // Gateway client ingress (TCP 8443, UDP 8444): open, or the allowlist.
+  const gatewayClients = browserPath.gatewayClientIngressTemplate({
+    allowedClientCidrs,
+    allowedPrefixListIds,
+    vpcRef: { Ref: 'VPC' }
+  });
+
+  // Browser path: CloudFront distribution with a VPC origin on an internal ALB.
+  let browser = null;
+  if (gatewayBrowserPath === 'cloudfront') {
+    if (!originFacingPrefixListId) {
+      throw new Error('originFacingPrefixListId is required for the CloudFront browser path');
+    }
+    // Hub subnets are created by AZ ID, in the order of availabilityZones.
+    const albSubnets = browserPath.selectVpcOriginSubnets(
+      privateSubnetRefs.map((ref, i) => ({ ref, azId: availabilityZones[i] }))
+    );
+    browser = browserPath.cloudFrontBrowserPathTemplate({
+      acronymLower,
+      region,
+      regionCode,
+      albSubnetRefs: albSubnets.map(subnet => subnet.ref),
+      originFacingPrefixListId,
+      hostedZone,
+      albName: purpose => sanitizeResourceName(`${acronymLower}-reg-${purpose}-alb`, 32, '-alb'),
+      targetGroupName: purpose => generateTargetGroupName(acronymLower, purpose)
+    });
+  }
+  const browserGatewayUrl = browser
+    ? { 'Fn::Join': ['', ['https://', browser.distributionDomain]] }
+    : {
+      'Fn::Join': ['', ['https://', {
+        'Fn::If': ['HasCustomDomain', { Ref: 'DcvDomainName' }, { 'Fn::GetAtt': ['ConnectionGatewayNLB', 'DNSName'] }]
+      }, ':8443']]
+    };
   
   const template = {
     AWSTemplateFormatVersion: '2010-09-09',
@@ -543,8 +640,9 @@ function generateCloudFormationTemplate(config) {
           GroupDescription: 'Security group for DCV Session Manager',
           VpcId: { Ref: 'VPC' },
           SecurityGroupIngress: [
-            { IpProtocol: 'tcp', FromPort: 8443, ToPort: 8443, CidrIp: '0.0.0.0/0', Description: 'CLI to Broker API' },
-            { IpProtocol: 'tcp', FromPort: 8445, ToPort: 8445, CidrIp: '0.0.0.0/0', Description: 'Agent to Broker' },
+            // The Session Manager sits behind an internal NLB; its callers are in the VPC.
+            { IpProtocol: 'tcp', FromPort: 8443, ToPort: 8443, CidrIp: { Ref: 'VpcCidr' }, Description: 'CLI to Broker API' },
+            { IpProtocol: 'tcp', FromPort: 8445, ToPort: 8445, CidrIp: { Ref: 'VpcCidr' }, Description: 'Agent to Broker' },
             { IpProtocol: 'tcp', FromPort: 8447, ToPort: 8447, CidrIp: { Ref: 'VpcCidr' }, Description: 'Gateway to Broker resolver' }
           ],
           Tags: [{ Key: 'Name', Value: { 'Fn::Sub': '${ProductName}-Regional-SessionManager-SG' } }]
@@ -580,10 +678,11 @@ function generateCloudFormationTemplate(config) {
           GroupDescription: 'Security group for DCV Connection Gateway',
           VpcId: { Ref: 'VPC' },
           SecurityGroupIngress: [
-            { IpProtocol: 'tcp', FromPort: 8443, ToPort: 8443, CidrIp: '0.0.0.0/0', Description: 'DCV TCP from internet' },
-            { IpProtocol: 'udp', FromPort: 8443, ToPort: 8443, CidrIp: '0.0.0.0/0', Description: 'DCV UDP from internet' },
-            { IpProtocol: 'udp', FromPort: 8444, ToPort: 8444, CidrIp: '0.0.0.0/0', Description: 'DCV QUIC from internet' },
-            { IpProtocol: 'tcp', FromPort: 8989, ToPort: 8989, CidrIp: '0.0.0.0/0', Description: 'Health check' }
+            // Clients: TCP 8443 (native TCP, and browsers in direct mode) and
+            // UDP 8444 (QUIC). The NLB keeps the client IP.
+            ...gatewayClients.ingress,
+            // NLB health checks come from the NLB's addresses in the VPC.
+            { IpProtocol: 'tcp', FromPort: 8989, ToPort: 8989, CidrIp: { Ref: 'VpcCidr' }, Description: 'Health check' }
           ],
           Tags: [{ Key: 'Name', Value: { 'Fn::Sub': '${ProductName}-Regional-ConnectionGateway-SG' } }]
         }
@@ -1273,7 +1372,7 @@ function generateCloudFormationTemplate(config) {
             InstanceType: 'c7g.large',
             ImageId: { 'Fn::Sub': '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}' },
             IamInstanceProfile: { Arn: { 'Fn::GetAtt': ['ConnectionGatewayInstanceProfile', 'Arn'] } },
-            SecurityGroupIds: [{ Ref: 'ConnectionGatewaySecurityGroup' }],
+            SecurityGroupIds: [{ Ref: 'ConnectionGatewaySecurityGroup' }, ...gatewayClients.extraSecurityGroupRefs],
             MetadataOptions: { HttpTokens: 'required', HttpPutResponseHopLimit: 2 },
             UserData: { 'Fn::Base64': generateConnectionGatewayUserData(productName, tlsSecretName) },
             TagSpecifications: [{
@@ -1290,6 +1389,9 @@ function generateCloudFormationTemplate(config) {
       ConnectionGatewayASG: {
         Type: 'AWS::AutoScaling::AutoScalingGroup',
         DependsOn: ['SessionManagerASG', 'NatGateway', 'PrivateRoute'],
+        // Replace gateways one at a time when the launch template changes, so
+        // a new gateway config reaches running gateways.
+        UpdatePolicy: GATEWAY_ROLLING_UPDATE_POLICY,
         Properties: {
           AutoScalingGroupName: { 'Fn::Sub': '${ProductName}-Regional-ConnectionGateway-ASG' },
           LaunchTemplate: {
@@ -1302,7 +1404,8 @@ function generateCloudFormationTemplate(config) {
           VPCZoneIdentifier: privateSubnetRefs,
           TargetGroupARNs: [
             { Ref: 'ConnectionGatewayTcpTargetGroup' },
-            { Ref: 'ConnectionGatewayUdpTargetGroup' }
+            { Ref: 'ConnectionGatewayUdpTargetGroup' },
+            ...(browser ? [browser.targetGroupRef] : [])
           ],
           HealthCheckType: 'EC2',
           HealthCheckGracePeriod: 300,
@@ -1407,6 +1510,22 @@ function generateCloudFormationTemplate(config) {
           Description: 'DCV Connection Gateway endpoint for client connections'
         }
       },
+
+      // URL the browser viewer connects to (serverUrl): the gateway's
+      // CloudFront distribution, or the gateway itself in direct mode.
+      BrowserGatewayUrlParameter: {
+        Type: 'AWS::SSM::Parameter',
+        Properties: {
+          Name: { 'Fn::Sub': '/${ProductName}/DCV/BrowserGatewayUrl' },
+          Type: 'String',
+          Value: browserGatewayUrl,
+          Description: 'DCV Connection Gateway URL for browser sessions'
+        }
+      },
+
+      // ==================== GATEWAY BROWSER PATH AND CLIENT ALLOWLIST ====================
+      ...gatewayClients.resources,
+      ...(browser ? browser.resources : {}),
 
       // ==================== REGIONAL CLEANUP INFRASTRUCTURE ====================
       // Lambda execution role for cleanup functions
@@ -2122,6 +2241,11 @@ function generateCloudFormationTemplate(config) {
             { 'Fn::GetAtt': ['ConnectionGatewayNLB', 'DNSName'] }
           ]
         }
+      },
+      // Saved on the hub record as browserGatewayUrl.
+      BrowserGatewayUrl: {
+        Description: 'DCV Connection Gateway URL for browser sessions',
+        Value: browserGatewayUrl
       },
       SessionManagerASGName: {
         Description: 'Session Manager ASG Name',
