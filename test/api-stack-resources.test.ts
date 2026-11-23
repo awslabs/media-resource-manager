@@ -123,3 +123,38 @@ describe('API stack resource count (#59)', () => {
     }
   });
 });
+
+describe('FSx SMB mount manager permissions', () => {
+  let statements: any[];
+  let environment: Record<string, unknown>;
+  beforeAll(() => {
+    const template = synth();
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const [fnId, fn] = Object.entries(resources).find(([id, r]) =>
+      r.Type === 'AWS::Lambda::Function' && id.startsWith('FsxMountManagerFunction'))!;
+    environment = fn.Properties.Environment.Variables;
+    const roleRef = JSON.stringify(fn.Properties.Role['Fn::GetAtt'][0]);
+    statements = Object.values(resources)
+      .filter(r => r.Type === 'AWS::IAM::Policy' && JSON.stringify(r.Properties.Roles).includes(roleRef))
+      .flatMap(r => r.Properties.PolicyDocument.Statement);
+    expect(fnId).toBeDefined();
+  }, 120000);
+
+  test('can write, but not read, the per-workstation SMB mount secrets', () => {
+    const smb = statements.filter(s => JSON.stringify(s.Resource).includes('SmbMount'));
+    expect(smb).toHaveLength(1);
+    expect([...smb[0].Action].sort()).toEqual([
+      'secretsmanager:CreateSecret',
+      'secretsmanager:DeleteSecret',
+      'secretsmanager:DescribeSecret',
+      'secretsmanager:PutResourcePolicy',
+      'secretsmanager:PutSecretValue',
+    ]);
+    expect(flat(smb[0].Resource)).toContain('/MediaResourceManager/Workstation/*/SmbMount');
+    expect(flat(smb[0].Resource)).not.toContain('secret:*');
+  });
+
+  test('gets the acronym for the regional workstation role names', () => {
+    expect(environment.ACRONYM).toBe('MRM');
+  });
+});
