@@ -1047,7 +1047,6 @@ The application uses a **multi-stack architecture** with 19 specialized stacks:
 
 ### Authentication
 - `POST /auth/ldap` - LDAP auth (returns JWT)
-- `GET /auth/validate` - Validate token
 
 ---
 

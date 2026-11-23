@@ -36,6 +36,7 @@ import Navigation from '../components/Navigation';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
 import { nativeClientUrl, openBrowserViewer, parseNativeClientTransport, DEFAULT_NATIVE_CLIENT_TRANSPORT } from '../utils/dcvClient';
+import { postCreateSession, sessionNameFor, STARTING_SESSION_MESSAGE } from '../utils/dcvViewer';
 import { INSTANCE_TYPE_CATALOG } from './Settings';
 
 interface WorkstationManagementProps {
@@ -803,24 +804,9 @@ const WorkstationManagement: React.FC<WorkstationManagementProps> = ({ user, isA
     setConnectingInstances(prev => new Set(prev).add(instanceId));
     
     try {
-      const token = getAuthToken();
-      if (!token) {
-        throw new Error('No current user');
-      }
-      
-      const response = await apiCall('/dcv', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({
-          action: 'create-session',
-          serverId: instanceId,
-          sessionName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.email?.split('@')[0] || 'User',
-          sessionType: 'console'
-          // Note: owner is determined by the Lambda based on the workstation's OS platform
-        })
+      // The Lambda picks the session owner from the workstation's OS platform.
+      const response = await postCreateSession(instanceId, sessionNameFor(user), {
+        onStarting: () => setConnectionAlert({ type: 'info', message: STARTING_SESSION_MESSAGE }),
       });
 
       if (!response.ok) {
