@@ -52,7 +52,7 @@ import type { MenuProps } from 'antd';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
-import { toDcvClientUrl } from '../utils/dcvClient';
+import { nativeClientUrl, openBrowserViewer, parseNativeClientTransport, DEFAULT_NATIVE_CLIENT_TRANSPORT } from '../utils/dcvClient';
 import { useDcvClientPrompt } from '../components/DcvClientPrompt';
 import { useInstanceTypeCatalog } from '../hooks/useInstanceTypeCatalog';
 
@@ -134,6 +134,7 @@ const WorkstationManagementAntd: React.FC<WorkstationManagementAntdProps> = ({
   const [groups, setGroups] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [browserSessionsEnabled, setBrowserSessionsEnabled] = useState(true);
+  const [nativeClientTransport, setNativeClientTransport] = useState(DEFAULT_NATIVE_CLIENT_TRANSPORT);
   const { connectWithClient, promptModal: dcvClientPromptModal } = useDcvClientPrompt(browserSessionsEnabled);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -339,6 +340,7 @@ const WorkstationManagementAntd: React.FC<WorkstationManagementAntdProps> = ({
       if (response.ok) {
         const data = await response.json();
         setBrowserSessionsEnabled(data.browserSessionsEnabled !== false);
+        setNativeClientTransport(parseNativeClientTransport(data.nativeClientTransport));
         setKeepAliveEnabled(data.keepAliveEnabled === true);
         setKeepAliveMaxHours(data.keepAliveMaxHours || 24);
       }
@@ -627,6 +629,10 @@ const WorkstationManagementAntd: React.FC<WorkstationManagementAntdProps> = ({
 
   // Action handlers
   const handleConnect = async (instanceId: string, connectionType: 'client' | 'browser') => {
+    if (connectionType === 'browser') {
+      openBrowserViewer(instanceId);
+      return;
+    }
     setConnectingInstances((prev) => new Set(prev).add(instanceId));
     try {
       const token = getAuthToken();
@@ -654,14 +660,7 @@ const WorkstationManagementAntd: React.FC<WorkstationManagementAntdProps> = ({
       const sessionData = await response.json();
       if (sessionData.error) throw new Error(sessionData.error);
 
-      if (sessionData.connectionUrl) {
-        if (connectionType === 'client') {
-          const baseUrl = sessionData.quicConnectionUrl || sessionData.connectionUrl;
-          await connectWithClient(toDcvClientUrl(baseUrl), sessionData.connectionUrl);
-        } else {
-          window.open(sessionData.connectionUrl, '_blank');
-        }
-      }
+      await connectWithClient(nativeClientUrl(sessionData, nativeClientTransport), instanceId);
     } catch (error) {
       console.error('Error connecting to workstation:', error);
       setAlert({ type: 'error', message: `Failed to connect: ${(error as Error).message}` });

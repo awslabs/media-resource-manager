@@ -12,6 +12,10 @@ import {
   defaultLaunchMethod,
   launchDcvClient,
   toDcvClientUrl,
+  nativeClientUrl,
+  parseNativeClientTransport,
+  browserViewerPath,
+  openBrowserViewer,
 } from './dcvClient';
 
 const LINK = 'dcv://workstation.example.com:8444/?authToken=test#session';
@@ -190,5 +194,68 @@ describe('defaultLaunchMethod', () => {
 describe('toDcvClientUrl', () => {
   it('swaps only the leading https:// for dcv://', () => {
     expect(toDcvClientUrl('https://ws.example.com:8444/?q=https://x#s')).toBe('dcv://ws.example.com:8444/?q=https://x#s');
+  });
+});
+
+describe('nativeClientUrl', () => {
+  const session = {
+    connectionUrl: 'https://gw.example.com:8443/?authToken=t#s',
+    quicConnectionUrl: 'https://gw.example.com:8444/?authToken=t#s',
+  };
+
+  it('uses the QUIC URL by default, with webPort so Auto can fall back to TCP (#47)', () => {
+    expect(nativeClientUrl(session)).toBe('dcv://gw.example.com:8444/?authToken=t&webPort=8443#s');
+    expect(nativeClientUrl(session, 'quic')).toBe('dcv://gw.example.com:8444/?authToken=t&webPort=8443#s');
+  });
+
+  it('uses the TCP URL with transport=websocket for websocket, even when a QUIC URL exists (#47)', () => {
+    expect(nativeClientUrl(session, 'websocket')).toBe('dcv://gw.example.com:8443/?authToken=t&transport=websocket#s');
+  });
+
+  it('leaves the token exactly as the session manager wrote it', () => {
+    const raw = 'abc-_.~XYZ019/+=';
+    expect(nativeClientUrl({
+      connectionUrl: `https://gw.example.com:8443/?authToken=${raw}#s`,
+      quicConnectionUrl: `https://gw.example.com:8444/?authToken=${raw}#s`,
+    })).toBe(`dcv://gw.example.com:8444/?authToken=${raw}&webPort=8443#s`);
+  });
+
+  it('adds a query when the URL has none', () => {
+    expect(nativeClientUrl({ connectionUrl: 'https://gw.example.com:8443/#s' }, 'websocket'))
+      .toBe('dcv://gw.example.com:8443/?transport=websocket#s');
+  });
+
+  it('falls back to connectionUrl when there is no QUIC URL', () => {
+    expect(nativeClientUrl({ connectionUrl: session.connectionUrl }, 'quic')).toBe('dcv://gw.example.com:8443/?authToken=t#s');
+  });
+
+  it('throws when the response has no usable URL', () => {
+    expect(() => nativeClientUrl({})).toThrow(/no connection URL/);
+    expect(() => nativeClientUrl({ quicConnectionUrl: session.quicConnectionUrl }, 'websocket')).toThrow(/no connection URL/);
+  });
+});
+
+describe('parseNativeClientTransport', () => {
+  it('accepts websocket and maps anything else to quic', () => {
+    expect(parseNativeClientTransport('websocket')).toBe('websocket');
+    expect(parseNativeClientTransport('quic')).toBe('quic');
+    expect(parseNativeClientTransport(undefined)).toBe('quic');
+    expect(parseNativeClientTransport('tcp')).toBe('quic');
+  });
+});
+
+describe('browser viewer', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('builds an encoded /connect path', () => {
+    expect(browserViewerPath('i-0123456789abcdef0')).toBe('/connect/i-0123456789abcdef0');
+    expect(browserViewerPath('a/b?c')).toBe('/connect/a%2Fb%3Fc');
+  });
+
+  it('opens the viewer in a new tab without noopener, so the sign-in in sessionStorage is copied', () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    openBrowserViewer('i-0123456789abcdef0');
+    expect(open).toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledWith('/connect/i-0123456789abcdef0', '_blank');
   });
 });

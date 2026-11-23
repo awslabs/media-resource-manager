@@ -4,8 +4,8 @@
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, GetCommand, DeleteCommand, QueryCommand } = require('@aws-sdk/lib-dynamodb');
 const { DataSyncClient, DeleteLocationCommand } = require('@aws-sdk/client-datasync');
-const { requireAdmin } = require('./authz');
-const { redactForLog } = require('../shared/log-redact');
+const { requireAdmin } = require('../shared/authz');
+const { requestSummary } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -18,7 +18,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-  console.log('DeleteDataSyncLocation event:', JSON.stringify(redactForLog(event), null, 2));
+  console.log('DeleteDataSyncLocation event:', JSON.stringify(requestSummary(event)));
 
   // SECURITY: deleting a DataSync location removes state used by tasks
   // that any admin may have configured. Admin only.

@@ -37,7 +37,7 @@ import type { ColumnsType } from 'antd/es/table';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
-import { toDcvClientUrl } from '../utils/dcvClient';
+import { nativeClientUrl, parseNativeClientTransport, DEFAULT_NATIVE_CLIENT_TRANSPORT } from '../utils/dcvClient';
 import { useDcvClientPrompt } from '../components/DcvClientPrompt';
 
 const { Title, Text, Link } = Typography;
@@ -84,6 +84,7 @@ const WorkstationDetailsAntd: React.FC<WorkstationDetailsAntdProps> = ({
   const [volumeActionLoading, setVolumeActionLoading] = useState(false);
 
   const [browserSessionsEnabled, setBrowserSessionsEnabled] = useState(true);
+  const [nativeClientTransport, setNativeClientTransport] = useState(DEFAULT_NATIVE_CLIENT_TRANSPORT);
   const { connectWithClient, promptModal: dcvClientPromptModal } = useDcvClientPrompt(browserSessionsEnabled);
 
   useEffect(() => {
@@ -104,6 +105,7 @@ const WorkstationDetailsAntd: React.FC<WorkstationDetailsAntdProps> = ({
         if (response.ok) {
           const data = await response.json();
           setBrowserSessionsEnabled(data.browserSessionsEnabled !== false);
+          setNativeClientTransport(parseNativeClientTransport(data.nativeClientTransport));
         }
       } catch (error) {
         console.log('Could not fetch settings:', error);
@@ -287,10 +289,7 @@ const WorkstationDetailsAntd: React.FC<WorkstationDetailsAntdProps> = ({
       const sessionData = await response.json();
       if (sessionData.error) throw new Error(sessionData.error);
 
-      if (sessionData.connectionUrl) {
-        const baseUrl = sessionData.quicConnectionUrl || sessionData.connectionUrl;
-        await connectWithClient(toDcvClientUrl(baseUrl), sessionData.connectionUrl);
-      }
+      await connectWithClient(nativeClientUrl(sessionData, nativeClientTransport), instanceId);
     } catch (error) {
       console.error('Error connecting to workstation:', error);
       setAlert({ type: 'error', message: `Failed to connect: ${(error as Error).message}` });

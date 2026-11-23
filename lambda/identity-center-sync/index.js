@@ -13,8 +13,8 @@ const { SSOAdminClient, ListInstancesCommand } = require('@aws-sdk/client-sso-ad
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
-const { requireAdmin } = require('./authz');
-const { redactForLog } = require('../shared/log-redact');
+const { requireAdmin } = require('../shared/authz');
+const { requestSummary } = require('../shared/log-redact');
 
 const identitystore = new IdentitystoreClient({});
 const ssoAdmin = new SSOAdminClient({});
@@ -62,7 +62,7 @@ async function getSyncGroupsFromSSM() {
 }
 
 exports.handler = async (event) => {
-  console.log('Identity Center Sync triggered:', JSON.stringify(redactForLog(event), null, 2));
+  console.log('Identity Center Sync triggered:', JSON.stringify(requestSummary(event)));
   
   const { httpMethod, body } = event;
   

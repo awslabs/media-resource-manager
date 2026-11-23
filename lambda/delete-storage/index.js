@@ -7,8 +7,8 @@ const { SFNClient, StartExecutionCommand } = require('@aws-sdk/client-sfn');
 const { CloudFormationClient, DescribeStacksCommand, DeleteStackCommand } = require('@aws-sdk/client-cloudformation');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { DataSyncClient, DeleteTaskCommand, DeleteLocationCommand } = require('@aws-sdk/client-datasync');
-const { requireAdmin } = require('./authz');
-const { redactForLog } = require('../shared/log-redact');
+const { requireAdmin } = require('../shared/authz');
+const { requestSummary } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -220,7 +220,7 @@ async function deleteDataSyncTasksAndLocations(storageId) {
 }
 
 exports.handler = async (event) => {
-  console.log('DeleteStorage event:', JSON.stringify(redactForLog(event), null, 2));
+  console.log('DeleteStorage event:', JSON.stringify(requestSummary(event)));
   
   // SECURITY: deleting storage tears down S3 buckets / FSx volumes and
   // cascades through DataSync tasks + locations. Admin only.

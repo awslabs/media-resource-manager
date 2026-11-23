@@ -374,8 +374,7 @@ export class ApiStack extends cdk.Stack {
     const userGroupManagerFunction = new lambda.Function(this, 'UserGroupManagerFunction', {
       functionName: `${props.acronym.toLowerCase()}-user-group-manager`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/user-group-manager'),
+      ...lambdaCodeWithShared('user-group-manager'),
       timeout: cdk.Duration.minutes(5),
       reservedConcurrentExecutions: 20,
       environmentEncryption: props.dataEncryptionKey,
@@ -986,6 +985,8 @@ export class ApiStack extends cdk.Stack {
       resources: [
         `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/DCV/SessionManager/*`,
         `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/DCV/ConnectionGateway/*`,
+        // Browser viewer origin, written by the gateway stack (browserGatewayUrl in create-session).
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/DCV/BrowserGatewayUrl`,
       ],
     }));
 
@@ -1194,6 +1195,13 @@ export class ApiStack extends cdk.Stack {
 
     progressTable.grantReadData(sseProgressFunction);
 
+    // Every Lambda integration goes through this helper. With
+    // scopePermissionToMethod: false, CDK adds one invoke permission per
+    // function for this API (source ARN <api>/*/*/*) instead of two per
+    // method, which keeps this stack under CloudFormation's 500-resource limit.
+    const integrate = (fn: lambda.IFunction) =>
+      new apigateway.LambdaIntegration(fn, { scopePermissionToMethod: false });
+
     // API Resources
     const workstationsResource = this.api.root.addResource('workstations');
     const usersResource = this.api.root.addResource('users');
@@ -1207,7 +1215,7 @@ export class ApiStack extends cdk.Stack {
     const storageIdResource = storageResource.addResource('{storageId}');
 
     // SSE Progress endpoint
-    const sseIntegration = new apigateway.LambdaIntegration(sseProgressFunction);
+    const sseIntegration = integrate(sseProgressFunction);
     progressResource.addMethod('GET', sseIntegration, { 
       authorizer
     });
@@ -1250,25 +1258,25 @@ export class ApiStack extends cdk.Stack {
     //
     // Storage, DataSync, Regions — each have dedicated Lambdas (see below)
     // ─────────────────────────────────────────────────────────────────────────
-    const lambdaIntegration = new apigateway.LambdaIntegration(mainLambdaFunction);
-    const userGroupIntegration = new apigateway.LambdaIntegration(userGroupManagerFunction);
-    const userDetailsIntegration = new apigateway.LambdaIntegration(userDetailsManagerFunction);
-    const imageIntegration = new apigateway.LambdaIntegration(imageManagerFunction);
-    const softwareLibraryIntegration = new apigateway.LambdaIntegration(softwareLibraryFunction);
-    const workstationIntegration = new apigateway.LambdaIntegration(workstationManagerFunction);
-    const identityCenterSyncIntegration = new apigateway.LambdaIntegration(identityCenterSyncFunction);
-    const volumeManagerIntegration = new apigateway.LambdaIntegration(volumeManagerAlias);
+    const lambdaIntegration = integrate(mainLambdaFunction);
+    const userGroupIntegration = integrate(userGroupManagerFunction);
+    const userDetailsIntegration = integrate(userDetailsManagerFunction);
+    const imageIntegration = integrate(imageManagerFunction);
+    const softwareLibraryIntegration = integrate(softwareLibraryFunction);
+    const workstationIntegration = integrate(workstationManagerFunction);
+    const identityCenterSyncIntegration = integrate(identityCenterSyncFunction);
+    const volumeManagerIntegration = integrate(volumeManagerAlias);
 
     // Storage integrations
-    const listStorageIntegration = new apigateway.LambdaIntegration(props.storageStack.functions.listStorage);
-    const getStorageIntegration = new apigateway.LambdaIntegration(props.storageStack.functions.getStorage);
-    const createStorageIntegration = new apigateway.LambdaIntegration(props.storageStack.functions.createStorage);
-    const updateStorageIntegration = new apigateway.LambdaIntegration(props.storageStack.functions.updateStorage);
-    const deleteStorageIntegration = new apigateway.LambdaIntegration(props.storageStack.functions.deleteStorage);
-    const s3MountIntegration = new apigateway.LambdaIntegration(props.storageStack.functions.s3MountManager);
-    const nfsMountIntegration = new apigateway.LambdaIntegration(props.storageStack.functions.nfsMountManager);
-    const listS3BucketsIntegration = new apigateway.LambdaIntegration(props.storageStack.functions.listS3Buckets);
-    const getStoragePricingIntegration = new apigateway.LambdaIntegration(props.storageStack.functions.getStoragePricing);
+    const listStorageIntegration = integrate(props.storageStack.functions.listStorage);
+    const getStorageIntegration = integrate(props.storageStack.functions.getStorage);
+    const createStorageIntegration = integrate(props.storageStack.functions.createStorage);
+    const updateStorageIntegration = integrate(props.storageStack.functions.updateStorage);
+    const deleteStorageIntegration = integrate(props.storageStack.functions.deleteStorage);
+    const s3MountIntegration = integrate(props.storageStack.functions.s3MountManager);
+    const nfsMountIntegration = integrate(props.storageStack.functions.nfsMountManager);
+    const listS3BucketsIntegration = integrate(props.storageStack.functions.listS3Buckets);
+    const getStoragePricingIntegration = integrate(props.storageStack.functions.getStoragePricing);
 
     // API Methods - now using dedicated functions
     workstationsResource.addMethod('GET', workstationIntegration, { authorizer });
@@ -1363,8 +1371,7 @@ export class ApiStack extends cdk.Stack {
     const changePasswordFunction = new lambda.Function(this, 'ChangePasswordFunction', {
       functionName: `${props.acronym.toLowerCase()}-change-password`,
       runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset('lambda/change-password'),
+      ...lambdaCodeWithShared('change-password'),
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 5,
       environmentEncryption: props.dataEncryptionKey,
@@ -1387,7 +1394,7 @@ export class ApiStack extends cdk.Stack {
     }));
 
     // Change password endpoint
-    const changePasswordIntegration = new apigateway.LambdaIntegration(changePasswordFunction);
+    const changePasswordIntegration = integrate(changePasswordFunction);
     changePasswordResource.addMethod('POST', changePasswordIntegration, { authorizer });
 
     // Images endpoints - now using dedicated function
@@ -1435,9 +1442,9 @@ export class ApiStack extends cdk.Stack {
 
     // Install Script Agent endpoints (only if agent functions are available)
     if (invokeInstallScriptAgentFunction && installScriptProgressFunction && cancelInstallScriptFunction) {
-      const invokeAgentIntegration = new apigateway.LambdaIntegration(invokeInstallScriptAgentFunction);
-      const progressIntegration = new apigateway.LambdaIntegration(installScriptProgressFunction);
-      const cancelIntegration = new apigateway.LambdaIntegration(cancelInstallScriptFunction);
+      const invokeAgentIntegration = integrate(invokeInstallScriptAgentFunction);
+      const progressIntegration = integrate(installScriptProgressFunction);
+      const cancelIntegration = integrate(cancelInstallScriptFunction);
 
       // POST /images/software/{softwareId}/generate-script
       const generateScriptResource = softwareIdResource.addResource('generate-script');
@@ -1467,7 +1474,7 @@ export class ApiStack extends cdk.Stack {
 
     // Chat Requirements endpoint (only when Bedrock features are enabled)
     if (chatRequirementsFunction) {
-      const chatRequirementsIntegration = new apigateway.LambdaIntegration(chatRequirementsFunction);
+      const chatRequirementsIntegration = integrate(chatRequirementsFunction);
       const chatResource = softwareResource.addResource('chat');
       chatResource.addMethod('POST', chatRequirementsIntegration, { authorizer });
     }
@@ -1513,9 +1520,9 @@ export class ApiStack extends cdk.Stack {
       const locationsResource = datasyncResource.addResource('locations');
       const locationIdResource = locationsResource.addResource('{locationId}');
       
-      const listLocationsIntegration = new apigateway.LambdaIntegration(props.dataSyncStack.functions.listLocations);
-      const createLocationIntegration = new apigateway.LambdaIntegration(props.dataSyncStack.functions.createLocation);
-      const deleteLocationIntegration = new apigateway.LambdaIntegration(props.dataSyncStack.functions.deleteLocation);
+      const listLocationsIntegration = integrate(props.dataSyncStack.functions.listLocations);
+      const createLocationIntegration = integrate(props.dataSyncStack.functions.createLocation);
+      const deleteLocationIntegration = integrate(props.dataSyncStack.functions.deleteLocation);
       
       locationsResource.addMethod('GET', listLocationsIntegration, { authorizer });
       locationsResource.addMethod('POST', createLocationIntegration, { authorizer });
@@ -1525,10 +1532,10 @@ export class ApiStack extends cdk.Stack {
       const tasksResource = datasyncResource.addResource('tasks');
       const taskIdResource = tasksResource.addResource('{taskId}');
       
-      const listTasksIntegration = new apigateway.LambdaIntegration(props.dataSyncStack.functions.listTasks);
-      const createTaskIntegration = new apigateway.LambdaIntegration(props.dataSyncStack.functions.createTask);
-      const updateTaskIntegration = new apigateway.LambdaIntegration(props.dataSyncStack.functions.updateTask);
-      const deleteTaskIntegration = new apigateway.LambdaIntegration(props.dataSyncStack.functions.deleteTask);
+      const listTasksIntegration = integrate(props.dataSyncStack.functions.listTasks);
+      const createTaskIntegration = integrate(props.dataSyncStack.functions.createTask);
+      const updateTaskIntegration = integrate(props.dataSyncStack.functions.updateTask);
+      const deleteTaskIntegration = integrate(props.dataSyncStack.functions.deleteTask);
       
       tasksResource.addMethod('GET', listTasksIntegration, { authorizer });
       tasksResource.addMethod('POST', createTaskIntegration, { authorizer });
@@ -1539,15 +1546,15 @@ export class ApiStack extends cdk.Stack {
       const executeResource = taskIdResource.addResource('execute');
       const executionsResource = taskIdResource.addResource('executions');
       
-      const startExecutionIntegration = new apigateway.LambdaIntegration(props.dataSyncStack.functions.startExecution);
-      const getExecutionsIntegration = new apigateway.LambdaIntegration(props.dataSyncStack.functions.getExecutions);
+      const startExecutionIntegration = integrate(props.dataSyncStack.functions.startExecution);
+      const getExecutionsIntegration = integrate(props.dataSyncStack.functions.getExecutions);
       
       executeResource.addMethod('POST', startExecutionIntegration, { authorizer });
       executionsResource.addMethod('GET', getExecutionsIntegration, { authorizer });
       
       // S3 buckets endpoint for location creation dropdown
       const s3BucketsResource = datasyncResource.addResource('s3-buckets');
-      const listS3BucketsIntegration = new apigateway.LambdaIntegration(props.dataSyncStack.functions.listS3Buckets);
+      const listS3BucketsIntegration = integrate(props.dataSyncStack.functions.listS3Buckets);
       s3BucketsResource.addMethod('GET', listS3BucketsIntegration, { authorizer });
 
       // Config endpoint for cross-account bucket policy generation (reuses listS3Buckets Lambda)
@@ -1740,11 +1747,11 @@ export class ApiStack extends cdk.Stack {
     const regionsResource = this.api.root.addResource('regions');
     const regionIdResource = regionsResource.addResource('{region}');
 
-    const listRegionalHubsIntegration = new apigateway.LambdaIntegration(listRegionalHubsFunction);
-    const getRegionalHubIntegration = new apigateway.LambdaIntegration(getRegionalHubFunction);
-    const createRegionalHubIntegration = new apigateway.LambdaIntegration(createRegionalHubFunction);
-    const deleteRegionalHubIntegration = new apigateway.LambdaIntegration(deleteRegionalHubFunction);
-    const updateRegionalHubIntegration = new apigateway.LambdaIntegration(updateRegionalHubFunction);
+    const listRegionalHubsIntegration = integrate(listRegionalHubsFunction);
+    const getRegionalHubIntegration = integrate(getRegionalHubFunction);
+    const createRegionalHubIntegration = integrate(createRegionalHubFunction);
+    const deleteRegionalHubIntegration = integrate(deleteRegionalHubFunction);
+    const updateRegionalHubIntegration = integrate(updateRegionalHubFunction);
 
     regionsResource.addMethod('GET', listRegionalHubsIntegration, { authorizer });
     regionsResource.addMethod('POST', createRegionalHubIntegration, { authorizer });
@@ -1778,7 +1785,7 @@ export class ApiStack extends cdk.Stack {
     }
 
     const availabilityZonesResource = regionIdResource.addResource('availability-zones');
-    const getAvailabilityZonesIntegration = new apigateway.LambdaIntegration(getAvailabilityZonesFunction);
+    const getAvailabilityZonesIntegration = integrate(getAvailabilityZonesFunction);
     availabilityZonesResource.addMethod('GET', getAvailabilityZonesIntegration, { authorizer });
 
     // Direct LDAP Authentication endpoint with JWT tokens
@@ -1850,7 +1857,7 @@ export class ApiStack extends cdk.Stack {
 
     const authResource = this.api.root.addResource('auth');
     const directAuthResource = authResource.addResource('ldap');
-    const directAuthIntegration = new apigateway.LambdaIntegration(directLdapAuthFunction);
+    const directAuthIntegration = integrate(directLdapAuthFunction);
     
     // Login endpoint
     directAuthResource.addMethod('POST', directAuthIntegration);
@@ -1873,12 +1880,12 @@ export class ApiStack extends cdk.Stack {
     // Grant permission to read the JWT secret
     jwtSecret.grantRead(validateFunction);
     
-    const validateIntegration = new apigateway.LambdaIntegration(validateFunction);
+    const validateIntegration = integrate(validateFunction);
     validateResource.addMethod('GET', validateIntegration);
 
     // DCV Session Manager endpoints
     const dcvResource = this.api.root.addResource('dcv');
-    const dcvIntegration = new apigateway.LambdaIntegration(dcvSessionManagerAlias);
+    const dcvIntegration = integrate(dcvSessionManagerAlias);
     dcvResource.addMethod('POST', dcvIntegration, { authorizer });
 
     // Store API endpoint in SSM Parameter Store for MCS module integration

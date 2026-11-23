@@ -35,6 +35,7 @@ import WorkstationStartModal from '../components/WorkstationStartModal';
 import Navigation from '../components/Navigation';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
+import { nativeClientUrl, openBrowserViewer, parseNativeClientTransport, DEFAULT_NATIVE_CLIENT_TRANSPORT } from '../utils/dcvClient';
 import { INSTANCE_TYPE_CATALOG } from './Settings';
 
 interface WorkstationManagementProps {
@@ -60,6 +61,7 @@ const WorkstationManagement: React.FC<WorkstationManagementProps> = ({ user, isA
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [browserSessionsEnabled, setBrowserSessionsEnabled] = useState(true);
+  const [nativeClientTransport, setNativeClientTransport] = useState(DEFAULT_NATIVE_CLIENT_TRANSPORT);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [showAddStorageModal, setShowAddStorageModal] = useState(false);
@@ -359,6 +361,7 @@ const WorkstationManagement: React.FC<WorkstationManagementProps> = ({ user, isA
       if (response.ok) {
         const data = await response.json();
         setBrowserSessionsEnabled(data.browserSessionsEnabled !== false); // Default to true
+        setNativeClientTransport(parseNativeClientTransport(data.nativeClientTransport));
       }
     } catch (error) {
       console.log('Could not fetch browser sessions config:', error);
@@ -793,6 +796,10 @@ const WorkstationManagement: React.FC<WorkstationManagementProps> = ({ user, isA
   };
 
   const handleConnect = async (instanceId: string, connectionType: 'client' | 'browser') => {
+    if (connectionType === 'browser') {
+      openBrowserViewer(instanceId);
+      return;
+    }
     setConnectingInstances(prev => new Set(prev).add(instanceId));
     
     try {
@@ -831,47 +838,39 @@ const WorkstationManagement: React.FC<WorkstationManagementProps> = ({ user, isA
       }
       
       if (sessionData.connectionUrl) {
-        if (connectionType === 'client') {
-          // Use QUIC URL (port 8444) for native client - better streaming performance
-          // Falls back to standard URL if quicConnectionUrl not available
-          const baseUrl = sessionData.quicConnectionUrl || sessionData.connectionUrl;
-          const dcvUrl = baseUrl.replace('https://', 'dcv://');
-          
-          // Store the URL in case we need to show the install prompt
-          setPendingDcvUrl(dcvUrl);
-          
-          // Try to launch the DCV client
-          // We use a hidden iframe to attempt the protocol launch
-          // This prevents the browser from navigating away if the protocol isn't registered
-          const iframe = document.createElement('iframe');
-          iframe.style.display = 'none';
-          document.body.appendChild(iframe);
-          
-          // Set a timeout to show the install modal if the client doesn't launch
-          const timeoutId = setTimeout(() => {
-            setShowDcvInstallModal(true);
-            document.body.removeChild(iframe);
-          }, 3500);
-          
-          // Listen for blur event which indicates the client launched
-          const handleBlur = () => {
-            clearTimeout(timeoutId);
-            window.removeEventListener('blur', handleBlur);
-            setTimeout(() => {
-              if (document.body.contains(iframe)) {
-                document.body.removeChild(iframe);
-              }
-            }, 100);
-          };
-          window.addEventListener('blur', handleBlur);
-          
-          // Attempt to launch via iframe
-          if (iframe.contentWindow) {
-            iframe.contentWindow.location.href = dcvUrl;
-          }
-        } else {
-          // Open in web browser (uses TCP port 8443)
-          window.open(sessionData.connectionUrl, '_blank');
+        const dcvUrl = nativeClientUrl(sessionData, nativeClientTransport);
+        
+        // Store the URL in case we need to show the install prompt
+        setPendingDcvUrl(dcvUrl);
+        
+        // Try to launch the DCV client
+        // We use a hidden iframe to attempt the protocol launch
+        // This prevents the browser from navigating away if the protocol isn't registered
+        const iframe = document.createElement('iframe');
+        iframe.style.display = 'none';
+        document.body.appendChild(iframe);
+        
+        // Set a timeout to show the install modal if the client doesn't launch
+        const timeoutId = setTimeout(() => {
+          setShowDcvInstallModal(true);
+          document.body.removeChild(iframe);
+        }, 3500);
+        
+        // Listen for blur event which indicates the client launched
+        const handleBlur = () => {
+          clearTimeout(timeoutId);
+          window.removeEventListener('blur', handleBlur);
+          setTimeout(() => {
+            if (document.body.contains(iframe)) {
+              document.body.removeChild(iframe);
+            }
+          }, 100);
+        };
+        window.addEventListener('blur', handleBlur);
+        
+        // Attempt to launch via iframe
+        if (iframe.contentWindow) {
+          iframe.contentWindow.location.href = dcvUrl;
         }
       }
     } catch (error) {

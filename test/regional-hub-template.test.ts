@@ -20,14 +20,14 @@ const IAM_NAME_PROPERTIES: Record<string, string> = {
   'AWS::IAM::InstanceProfile': 'InstanceProfileName',
 };
 
-function generate() {
+function generate(overrides: Record<string, unknown> = {}) {
   return generateCloudFormationTemplate({
     productName: 'MediaResourceManager',
     acronym: 'MRM',
     region: 'us-west-2',
     displayName: 'US West (Oregon)',
     vpcCidr: '10.1.0.0/16',
-    availabilityZones: ['us-west-2a', 'us-west-2b'],
+    availabilityZones: ['usw2-az1', 'usw2-az2'],
     primaryRegion: 'us-east-1',
     enableWindows: true,
     enableLinux: true,
@@ -36,6 +36,8 @@ function generate() {
       dcvSessionManager: { bucket: 'assets', key: 'dcv-session-manager.zip' },
       configureOntapCifs: { bucket: 'assets', key: 'configure-ontap-cifs.zip' },
     },
+    originFacingPrefixListId: 'pl-0123456789abcdef0',
+    ...overrides,
   });
 }
 

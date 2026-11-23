@@ -6,7 +6,7 @@
 const { DirectoryServiceClient, ResetUserPasswordCommand } = require('@aws-sdk/client-directory-service');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
-const { getCallerIdentity, unauthorized } = require('./authz');
+const { getCallerIdentity, unauthorized } = require('../shared/authz');
 
 const directoryService = new DirectoryServiceClient({});
 const ssm = new SSMClient({});

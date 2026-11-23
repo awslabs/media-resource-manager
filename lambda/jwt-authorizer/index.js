@@ -183,7 +183,7 @@ exports.handler = async (event) => {
         let userData;
         if (tokenType === 'cognito') {
             userData = await validateCognitoToken(token);
-            console.log('Cognito token validated for user:', userData.email);
+            console.log('Cognito token validated');
         } else {
             userData = await parseJWT(token);
             console.log('LDAP token validated for user:', userData.username);
