@@ -305,9 +305,12 @@ cd media-resource-manager
 
 aws cloudformation deploy \
   --template-file scripts/deploy-pipeline.yaml \
+  --s3-bucket <your-bucket> \
   --stack-name MRM-DeployPipeline \
   --capabilities CAPABILITY_NAMED_IAM
 ```
+
+The template is larger than the 51,200 bytes CloudFormation accepts inline, so `--s3-bucket` is required: the CLI uploads the template to that bucket first. Use any bucket you own in the same Region, or create one with `aws s3 mb s3://<your-bucket>`.
 
 The stack name you choose (e.g., `MRM-DeployPipeline`) is used to auto-generate AWS resource names (S3 bucket, IAM role, CodeBuild project). Use different stack names for multiple deployments in the same account.
 
@@ -357,6 +360,7 @@ The pipeline buildspec derives the same naming conventions as CDK:
 ```bash
 aws cloudformation deploy \
   --template-file scripts/deploy-pipeline.yaml \
+  --s3-bucket <your-bucket> \
   --stack-name MRM-DeployPipeline \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
@@ -369,6 +373,7 @@ aws cloudformation deploy \
 ```bash
 aws cloudformation deploy \
   --template-file scripts/deploy-pipeline.yaml \
+  --s3-bucket <your-bucket> \
   --stack-name CE-DeployPipeline \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
@@ -404,6 +409,7 @@ Pipeline parameters seed the initial config. After the first build, config is st
 > ```bash
 > aws cloudformation deploy \
 >   --template-file scripts/deploy-pipeline.yaml \
+>   --s3-bucket <your-bucket> \
 >   --stack-name MRM-DeployPipeline \
 >   --capabilities CAPABILITY_NAMED_IAM
 > ```
@@ -416,6 +422,7 @@ Update the CloudFormation stack with new parameter values. This updates the Code
 ```bash
 aws cloudformation deploy \
   --template-file scripts/deploy-pipeline.yaml \
+  --s3-bucket <your-bucket> \
   --stack-name MRM-DeployPipeline \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameter-overrides \
