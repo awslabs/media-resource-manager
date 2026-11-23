@@ -14,7 +14,7 @@ import { DCV_CLIENT_DOWNLOAD_URL, DCV_LAUNCH_TIMEOUT_MS } from '../utils/dcvClie
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-let connect: (dcvUrl: string, browserUrl?: string) => Promise<void>;
+let connect: (dcvUrl: string, instanceId?: string) => Promise<void>;
 let modalOpen = false;
 let browserSessionsEnabled = true;
 
@@ -43,7 +43,7 @@ function footerButtons(): HTMLButtonElement[] {
 async function connectAndTimeOut(duringLaunch?: () => void) {
   let done!: Promise<void>;
   await act(async () => {
-    done = connect('dcv://ws.example.com:8444/?authToken=t#s', 'https://ws.example.com:8443/?authToken=t#s');
+    done = connect('dcv://ws.example.com:8444/?authToken=t#s', 'i-0123456789abcdef0');
     duringLaunch?.();
   });
   await act(async () => {
@@ -143,6 +143,16 @@ describe('useDcvClientPrompt', () => {
     expect(buttons.map((b) => b.textContent?.trim())).toEqual(['Cancel', 'Connect in browser', 'Try again']);
     expect(buttons[2].classList.contains('ant-btn-primary')).toBe(true);
     expect(buttons[0].classList.contains('ant-btn-primary')).toBe(false);
+  });
+
+  it('Connect in browser opens the console viewer in a new tab, keeping the opener, and closes the dialog', async () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    await connectAndTimeOut();
+    await act(async () => {
+      button('Connect in browser').click();
+    });
+    expect(open).toHaveBeenCalledWith('/connect/i-0123456789abcdef0', '_blank');
+    expect(promptVisible()).toBe(false);
   });
 
   it('hides Connect in browser when browser sessions are off', async () => {

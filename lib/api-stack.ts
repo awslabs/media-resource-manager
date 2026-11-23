@@ -985,6 +985,8 @@ export class ApiStack extends cdk.Stack {
       resources: [
         `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/DCV/SessionManager/*`,
         `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/DCV/ConnectionGateway/*`,
+        // Browser viewer origin, written by the gateway stack (browserGatewayUrl in create-session).
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/DCV/BrowserGatewayUrl`,
       ],
     }));
 

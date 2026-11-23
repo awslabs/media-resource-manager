@@ -1,7 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-import React, { useEffect, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useState } from 'react';
 import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { AppLayout, TopNavigation, Toggle, Modal, Form, FormField, Input, Button, SpaceBetween, Alert, ContentLayout, Header, Box, Grid, BreadcrumbGroup } from '@cloudscape-design/components';
 import { applyMode, Mode } from '@cloudscape-design/global-styles';
@@ -69,6 +69,9 @@ import Navigation from './components/Navigation';
 import { setApiUrl } from './utils/api';
 import { apiCall } from './utils/api';
 import { signOut as cognitoSignOut } from './utils/auth';
+
+// Loaded on demand: it carries the Amazon DCV Web UI and Web Client SDKs.
+const ConnectViewer = lazy(() => import('./pages/ConnectViewer'));
 
 function App() {
   const [user, setUser] = useState<any>(null);
@@ -315,6 +318,22 @@ function App() {
   }
 
   const userIsAdmin = isAdmin();
+
+  // In-browser DCV viewer: full window, no console layout. It sits after the
+  // sign-in check above, so it needs a signed-in user like every other page.
+  if (window.location.pathname.startsWith('/connect/')) {
+    return (
+      <Router>
+        <Routes>
+          <Route path="/connect/:instanceId" element={
+            <Suspense fallback={<div>Loading...</div>}>
+              <ConnectViewer user={user} />
+            </Suspense>
+          } />
+        </Routes>
+      </Router>
+    );
+  }
 
   // Check if current path should use Ant Design layout
   const isAntdRoute = (USE_ANTD_DASHBOARD && (window.location.pathname === '/' || window.location.pathname === '/dashboard')) ||

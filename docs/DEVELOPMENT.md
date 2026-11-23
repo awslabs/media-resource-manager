@@ -60,12 +60,22 @@ explicit steps above.
 ### Frontend
 
 ```bash
+./scripts/fetch-dcv-web-sdk.sh   # Amazon DCV Web Client SDK for /connect (needs curl, gpg, unzip)
 cd frontend
 npm ci
 npx tsc --noEmit -p .   # type check
 npx vite build          # production build
 npx vitest run          # unit tests
+npm run test:e2e:local  # /connect against a mocked API on 127.0.0.1 (after the build)
 ```
+
+The in-browser viewer (`/connect/:instanceId`) uses the Amazon DCV Web Client
+SDK and Web UI SDK. They are licensed under the Amazon DCV EULA, so they are
+not in this repository: `scripts/fetch-dcv-web-sdk.sh` downloads a pinned
+version, checks its GPG signature against the pinned NICE key fingerprint and
+its SHA-256, and unpacks it into `frontend/public/dcvsdk/` (gitignored).
+`deploy.sh` and `deploy.ps1` run it before the frontend build. A production
+build without the SDK fails; dev and test builds use a stub.
 
 The frontend has existing type errors. `tsc --noEmit` must not report any
 **new** ones: count the errors on `main` and on your branch and compare, for

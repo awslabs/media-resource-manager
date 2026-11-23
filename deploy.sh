@@ -236,6 +236,12 @@ if ! npm install 2>/dev/null; then
 fi
 print_success "Frontend dependencies installed successfully"
 
+print_status "📦 Fetching the Amazon DCV Web Client SDK (browser sessions)..."
+if ! bash ../scripts/fetch-dcv-web-sdk.sh; then
+    print_error "Could not fetch and verify the Amazon DCV Web Client SDK!"
+    exit 1
+fi
+
 print_status "🔨 Building frontend..."
 if ! npm run build; then
     print_error "Frontend build failed!"

@@ -22,6 +22,7 @@ import {
 import WorkstationStartModal from '../components/WorkstationStartModal';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
+import { nativeClientUrl, openBrowserViewer, parseNativeClientTransport, DEFAULT_NATIVE_CLIENT_TRANSPORT } from '../utils/dcvClient';
 
 interface DashboardProps {
   user: any;
@@ -31,6 +32,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user }) => {
   const [workstations, setWorkstations] = useState([]);
   const [loading, setLoading] = useState(true);
   const [browserSessionsEnabled, setBrowserSessionsEnabled] = useState(true);
+  const [nativeClientTransport, setNativeClientTransport] = useState(DEFAULT_NATIVE_CLIENT_TRANSPORT);
   const [connectingInstances, setConnectingInstances] = useState(new Set());
   const [startingInstances, setStartingInstances] = useState(new Set());
   const [stoppingInstances, setStoppingInstances] = useState(new Set());
@@ -76,6 +78,7 @@ const Dashboard: React.FC<DashboardProps> = ({ user }) => {
       if (response.ok) {
         const data = await response.json();
         setBrowserSessionsEnabled(data.browserSessionsEnabled !== false); // Default to true
+        setNativeClientTransport(parseNativeClientTransport(data.nativeClientTransport));
       }
     } catch (error) {
       console.log('Could not fetch browser sessions config:', error);
@@ -290,6 +293,10 @@ const Dashboard: React.FC<DashboardProps> = ({ user }) => {
   };
 
   const handleConnect = async (instanceId: string, connectionType: 'client' | 'browser') => {
+    if (connectionType === 'browser') {
+      openBrowserViewer(instanceId);
+      return;
+    }
     setConnectingInstances(prev => new Set(prev).add(instanceId));
     
     try {
@@ -316,23 +323,13 @@ const Dashboard: React.FC<DashboardProps> = ({ user }) => {
       if (response.ok) {
         const data = await response.json();
         
-        if (connectionType === 'client') {
-          // Use QUIC URL (port 8444) for native client - better streaming performance
-          const baseUrl = data.quicConnectionUrl || data.connectionUrl;
-          window.location.href = baseUrl.replace('https://', 'dcv://');
-        } else {
-          // Open in browser (uses TCP port 8443)
-          window.open(data.connectionUrl, '_blank');
-        }
+        window.location.href = nativeClientUrl(data, nativeClientTransport);
       } else {
         throw new Error('Failed to create DCV session');
       }
     } catch (error) {
       console.error('Error connecting to workstation:', error);
-      if (!handleAuthError(error)) {
-        // Fallback: open DCV endpoint directly
-        window.open('https://dcv-nlb-4102d2ead4b978c5.elb.us-east-1.amazonaws.com:8443', '_blank');
-      }
+      handleAuthError(error);
     } finally {
       setConnectingInstances(prev => {
         const newSet = new Set(prev);
