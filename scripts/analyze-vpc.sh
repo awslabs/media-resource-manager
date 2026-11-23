@@ -390,7 +390,8 @@ update_parameters() {
     local private_route_tables=""
     for subnet_id in $(echo "$private_ids" | tr ',' ' '); do
         local rt_id=$(aws ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$subnet_id" --query "RouteTables[0].RouteTableId" --output text 2>/dev/null)
-        if [ -n "$rt_id" ] && [ "$rt_id" != "None" ]; then
+        # Private subnets often share a route table; list each one once.
+        if [ -n "$rt_id" ] && [ "$rt_id" != "None" ] && [[ ",$private_route_tables," != *",$rt_id,"* ]]; then
             if [ -n "$private_route_tables" ]; then
                 private_route_tables="$private_route_tables,$rt_id"
             else

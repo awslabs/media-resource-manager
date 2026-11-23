@@ -157,6 +157,12 @@ describe('analyze-vpc.sh', () => {
     expect(r.calls).toMatch(/ssm get-parameter --name \/MediaResourceManager\/Network\/PublicSubnetIds/);
   });
 
+  test('lists a route table shared by both private subnets once', () => {
+    const r = run({ params: { VpcId: VPC_ID, PrivateSubnetIds: 'subnet-0a03,subnet-0b03' } });
+    expect(r.status).toBe(0);
+    expect(r.params.PrivateRouteTableIds).toBe('rtb-0mgmt');
+  });
+
   test('rejects a subnet in the wrong AZ position and leaves parameters.json alone', () => {
     const params = { VpcId: VPC_ID, AvailabilityZones: 'us-east-1b,us-east-1a', PrivateSubnetIds: 'subnet-0a02,subnet-0b02' };
     const r = run({ params });
