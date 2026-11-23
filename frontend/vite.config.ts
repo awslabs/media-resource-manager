@@ -4,17 +4,42 @@
 /// <reference types="vitest" />
 import { defineConfig, loadEnv } from 'vite'
 import react from '@vitejs/plugin-react'
+import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import packageJson from './package.json'
+
+// Amazon DCV Web Client SDK and Web UI SDK, unpacked by
+// scripts/fetch-dcv-web-sdk.sh (deploy.sh runs it). The Web UI SDK imports
+// the Web Client SDK as the bare module `dcv`, so both get an alias. Without
+// the SDK, dev and test builds use a stub and a production build fails.
+const dcvSdkDir = fileURLToPath(new URL('./public/dcvsdk', import.meta.url))
+const dcvSdkPresent = existsSync(`${dcvSdkDir}/dcv-ui/dcv-ui.js`) && existsSync(`${dcvSdkDir}/dcvjs/dcv.js`)
+const dcvAliases = dcvSdkPresent
+  ? { 'dcv-ui': `${dcvSdkDir}/dcv-ui/dcv-ui.js`, dcv: `${dcvSdkDir}/dcvjs/dcv.js` }
+  : {
+      'dcv-ui': fileURLToPath(new URL('./src/dcv/sdkMissing.tsx', import.meta.url)),
+      dcv: fileURLToPath(new URL('./src/dcv/dcvMissing.ts', import.meta.url)),
+    }
 
 // `defineConfig` is invoked with `{ mode }` so we can call `loadEnv` and
 // pick up variables from `frontend/.env.local` (gitignored) or `.env`.
 // `process.env` is NOT automatically populated from these files when
 // vite.config.ts is evaluated — this is a well-known Vite gotcha. Calling
 // `loadEnv` explicitly makes VITE_* variables available inside the config.
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ command, mode }) => {
   const env = loadEnv(mode, process.cwd(), 'VITE_');
 
+  if (command === 'build' && mode === 'production' && !dcvSdkPresent) {
+    throw new Error(
+      'The Amazon DCV Web Client SDK is missing from frontend/public/dcvsdk. ' +
+      'Run scripts/fetch-dcv-web-sdk.sh (deploy.sh runs it), then build again.'
+    );
+  }
+
   return {
+  resolve: {
+    alias: dcvAliases,
+  },
   // Vitest configuration for unit tests. Runs against src/**/*.test.ts.
   // See frontend/src/utils/*.test.ts for examples.
   test: {
@@ -67,9 +92,11 @@ export default defineConfig(({ mode }) => {
     }
   },
   server: {
-    host: '0.0.0.0',
+    // Loopback only. To reach the dev server from another machine, use an SSH
+    // tunnel (ssh -L 3000:127.0.0.1:3000 ...) rather than a wider bind. Vite's
+    // default CORS policy (local origins only) applies.
+    host: '127.0.0.1',
     port: 3000,
-    cors: true,
     hmr: {
       port: 3001,
       host: 'localhost'

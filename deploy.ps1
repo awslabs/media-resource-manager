@@ -151,6 +151,16 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Ok "Frontend dependencies installed successfully"
 
+# The Amazon DCV Web Client SDK for browser sessions is fetched and verified by
+# a bash script (it needs curl, gpg and unzip), e.g. from Git Bash or WSL.
+Write-Status "Fetching the Amazon DCV Web Client SDK (browser sessions)..."
+if (-not (Get-Command bash -ErrorAction SilentlyContinue)) {
+    Write-Err "bash is required to run scripts/fetch-dcv-web-sdk.sh (install Git for Windows or WSL, or deploy with the CodeBuild pipeline)"
+    Pop-Location; exit 1
+}
+bash ../scripts/fetch-dcv-web-sdk.sh
+if ($LASTEXITCODE -ne 0) { Write-Err "Could not fetch and verify the Amazon DCV Web Client SDK!"; Pop-Location; exit 1 }
+
 Write-Status "Building frontend..."
 npm run build
 if ($LASTEXITCODE -ne 0) { Write-Err "Frontend build failed!"; Pop-Location; exit 1 }

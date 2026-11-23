@@ -21,6 +21,7 @@ import { HomeOutlined } from '@ant-design/icons';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken } from '../utils/auth';
 import { apiCall } from '../utils/api';
+import { parseNativeClientTransport, DEFAULT_NATIVE_CLIENT_TRANSPORT, type NativeClientTransport } from '../utils/dcvClient';
 
 const { Title, Text } = Typography;
 
@@ -79,6 +80,7 @@ const SettingsAntd: React.FC<SettingsAntdProps> = ({
 }) => {
   const [disconnectedDuration, setDisconnectedDuration] = useState('');
   const [browserSessionsEnabled, setBrowserSessionsEnabled] = useState(true);
+  const [nativeClientTransport, setNativeClientTransport] = useState<NativeClientTransport>(DEFAULT_NATIVE_CLIENT_TRANSPORT);
   const [keepAliveEnabled, setKeepAliveEnabled] = useState(false);
   const [keepAliveMaxHours, setKeepAliveMaxHours] = useState('24');
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
@@ -96,6 +98,7 @@ const SettingsAntd: React.FC<SettingsAntdProps> = ({
   const [originalSettings, setOriginalSettings] = useState({
     disconnectedDuration: '',
     browserSessionsEnabled: true,
+    nativeClientTransport: DEFAULT_NATIVE_CLIENT_TRANSPORT as NativeClientTransport,
     keepAliveEnabled: false,
     keepAliveMaxHours: '24',
     autoStartEnabled: false,
@@ -161,12 +164,14 @@ const SettingsAntd: React.FC<SettingsAntdProps> = ({
         const settings = await response.json();
         const duration = settings.disconnectedDuration?.toString() || '';
         const browserEnabled = settings.browserSessionsEnabled !== false;
+        const transport = parseNativeClientTransport(settings.nativeClientTransport);
         const keepAlive = settings.keepAliveEnabled === true;
         const keepAliveMax = settings.keepAliveMaxHours?.toString() || '24';
         const autoStart = settings.autoStartEnabled === true;
         const autoStartLead = settings.autoStartLeadTimeMinutes?.toString() || '15';
         setDisconnectedDuration(duration);
         setBrowserSessionsEnabled(browserEnabled);
+        setNativeClientTransport(transport);
         setKeepAliveEnabled(keepAlive);
         setKeepAliveMaxHours(keepAliveMax);
         setAutoStartEnabled(autoStart);
@@ -174,6 +179,7 @@ const SettingsAntd: React.FC<SettingsAntdProps> = ({
         setOriginalSettings({ 
           disconnectedDuration: duration, 
           browserSessionsEnabled: browserEnabled,
+          nativeClientTransport: transport,
           keepAliveEnabled: keepAlive,
           keepAliveMaxHours: keepAliveMax,
           autoStartEnabled: autoStart,
@@ -212,6 +218,7 @@ const SettingsAntd: React.FC<SettingsAntdProps> = ({
     const settingsChanged =
       disconnectedDuration !== originalSettings.disconnectedDuration ||
       browserSessionsEnabled !== originalSettings.browserSessionsEnabled ||
+      nativeClientTransport !== originalSettings.nativeClientTransport ||
       keepAliveEnabled !== originalSettings.keepAliveEnabled ||
       keepAliveMaxHours !== originalSettings.keepAliveMaxHours ||
       autoStartEnabled !== originalSettings.autoStartEnabled ||
@@ -226,6 +233,7 @@ const SettingsAntd: React.FC<SettingsAntdProps> = ({
   const handleCancel = () => {
     setDisconnectedDuration(originalSettings.disconnectedDuration);
     setBrowserSessionsEnabled(originalSettings.browserSessionsEnabled);
+    setNativeClientTransport(originalSettings.nativeClientTransport);
     setKeepAliveEnabled(originalSettings.keepAliveEnabled);
     setKeepAliveMaxHours(originalSettings.keepAliveMaxHours);
     setAutoStartEnabled(originalSettings.autoStartEnabled);
@@ -268,6 +276,7 @@ const SettingsAntd: React.FC<SettingsAntdProps> = ({
         body: JSON.stringify({
           disconnectedDuration: parseInt(disconnectedDuration) || 0,
           browserSessionsEnabled,
+          nativeClientTransport,
           keepAliveEnabled,
           keepAliveMaxHours: parseInt(keepAliveMaxHours) || 24,
           autoStartEnabled,
@@ -302,6 +311,7 @@ const SettingsAntd: React.FC<SettingsAntdProps> = ({
       setOriginalSettings({ 
         disconnectedDuration, 
         browserSessionsEnabled,
+        nativeClientTransport,
         keepAliveEnabled,
         keepAliveMaxHours,
         autoStartEnabled,
@@ -567,6 +577,22 @@ const SettingsAntd: React.FC<SettingsAntdProps> = ({
                   Allow users to connect via web browser in addition to DCV client
                 </Text>
               </div>
+            </div>
+            <div style={{ marginTop: 16 }}>
+              <Text strong style={{ display: 'block', marginBottom: 6 }}>Native client protocol</Text>
+              <Select
+                value={nativeClientTransport}
+                onChange={(value: NativeClientTransport) => setNativeClientTransport(value)}
+                style={{ width: 220 }}
+                aria-label="Native client protocol"
+                options={[
+                  { value: 'quic', label: 'QUIC (UDP)' },
+                  { value: 'websocket', label: 'TCP (WebSocket)' },
+                ]}
+              />
+              <Text type="secondary" style={{ fontSize: 13, display: 'block', marginTop: 6 }}>
+                How the Amazon DCV client connects. Use TCP when a firewall or security agent blocks UDP.
+              </Text>
             </div>
           </Card>
 

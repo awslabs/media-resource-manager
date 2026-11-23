@@ -4,13 +4,14 @@
 import React, { useRef, useState } from 'react';
 import { Button, Modal, Typography } from 'antd';
 import { DownloadOutlined } from '@ant-design/icons';
-import { DCV_CLIENT_DOWNLOAD_URL, launchDcvClient } from '../utils/dcvClient';
+import { DCV_CLIENT_DOWNLOAD_URL, launchDcvClient, openBrowserViewer } from '../utils/dcvClient';
 
 const { Paragraph, Link } = Typography;
 
 interface PendingLaunch {
   dcvUrl: string;
-  browserUrl?: string;
+  /** Workstation to open in the in-browser viewer instead. */
+  instanceId?: string;
 }
 
 /**
@@ -27,9 +28,9 @@ export function useDcvClientPrompt(browserSessionsEnabled: boolean) {
   // The Try again launch still running, so closing the dialog can stop it.
   const retryLaunch = useRef<AbortController | null>(null);
 
-  const connectWithClient = async (dcvUrl: string, browserUrl?: string) => {
+  const connectWithClient = async (dcvUrl: string, instanceId?: string) => {
     const result = await launchDcvClient(dcvUrl);
-    if (result === 'not-detected') setPending({ dcvUrl, browserUrl });
+    if (result === 'not-detected') setPending({ dcvUrl, instanceId });
   };
 
   const close = () => {
@@ -55,11 +56,11 @@ export function useDcvClientPrompt(browserSessionsEnabled: boolean) {
   };
 
   const connectInBrowser = () => {
-    if (pending?.browserUrl) window.open(pending.browserUrl, '_blank', 'noopener');
+    if (pending?.instanceId) openBrowserViewer(pending.instanceId);
     close();
   };
 
-  const showBrowserOption = browserSessionsEnabled && !!pending?.browserUrl;
+  const showBrowserOption = browserSessionsEnabled && !!pending?.instanceId;
 
   const promptModal = (
     <Modal
