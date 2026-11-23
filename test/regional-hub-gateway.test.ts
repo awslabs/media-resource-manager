@@ -215,6 +215,77 @@ describe('hub CloudFront browser path', () => {
   });
 });
 
+describe('hub delete: wait for CloudFront network interfaces', () => {
+  const r = generate().Resources;
+
+  it('is deleted after the VPC origin and before the origin subnets', () => {
+    // Delete runs in reverse dependency order.
+    expect(r.GatewayBrowserVpcOrigin.DependsOn).toContain('GatewayBrowserEniWait');
+    expect(r.GatewayBrowserEniWait.DependsOn).toEqual(['PrivateSubnet1', 'PrivateSubnet3']);
+    expect(r.GatewayBrowserEniWait.Properties.VpcId).toEqual({ Ref: 'VPC' });
+    expect(r.GatewayBrowserEniWaitFunction.Properties.Role).toEqual({ 'Fn::GetAtt': ['CleanupLambdaRole', 'Arn'] });
+  });
+
+  function loadHandler(pages: string[][]) {
+    const calls: any[] = [];
+    const responses: string[] = [];
+    const fakeRequire = (name: string) => {
+      if (name === '@aws-sdk/client-ec2') {
+        return {
+          EC2Client: function EC2Client() {
+            return { send: async (cmd: any) => {
+              calls.push(cmd.input);
+              const ids = pages.length > 1 ? pages.shift()! : pages[0];
+              return { NetworkInterfaces: [
+                ...ids.map(id => ({ NetworkInterfaceId: id, InterfaceType: 'cloudfront_managed' })),
+                { NetworkInterfaceId: 'eni-lambda', InterfaceType: 'lambda' },
+              ] };
+            } };
+          },
+          DescribeNetworkInterfacesCommand: function Cmd(this: any, input: any) { this.input = input; },
+        };
+      }
+      if (name === 'https') {
+        return { request: (_opts: any, cb: any) => ({
+          on: () => undefined,
+          end: (body: string) => { responses.push(body); cb({ resume: () => undefined, on: (_e: string, done: () => void) => done() }); },
+        }) };
+      }
+      throw new Error(name);
+    };
+    const module = { exports: {} as any };
+    // eslint-disable-next-line no-new-func
+    new Function('require', 'exports', 'module', browserPath.ENI_WAIT_FUNCTION_CODE)(fakeRequire, module.exports, module);
+    return { handler: module.exports.handler, calls, responses };
+  }
+  const event = (RequestType: string) => ({
+    RequestType, ResponseURL: 'https://example.com/response?x=1', StackId: 's', RequestId: 'r', LogicalResourceId: 'l',
+    ResourceProperties: { VpcId: 'vpc-1' },
+  });
+
+  it('waits on delete until no CloudFront network interface is left, then reports success', async () => {
+    jest.useFakeTimers();
+    try {
+      const { handler, calls, responses } = loadHandler([['eni-a', 'eni-b'], []]);
+      const done = handler(event('Delete'), { logStreamName: 'log' });
+      await jest.advanceTimersByTimeAsync(15000);
+      await done;
+      expect(calls).toHaveLength(2);
+      expect(calls[0].Filters).toEqual([{ Name: 'vpc-id', Values: ['vpc-1'] }]);
+      expect(JSON.parse(responses[0]).Status).toBe('SUCCESS');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('does nothing on create', async () => {
+    const { handler, calls, responses } = loadHandler([['eni-a']]);
+    await handler(event('Create'), { logStreamName: 'log' });
+    expect(calls).toHaveLength(0);
+    expect(JSON.parse(responses[0]).Status).toBe('SUCCESS');
+  });
+});
+
 describe('hub with a hosted zone', () => {
   const r = generate({ hostedZone: { id: 'Z0123456789ABCDEFGHIJ', name: 'example.com' } }).Resources;
   const name = 'dcv-gateway-origin.us-east-1.example.com';

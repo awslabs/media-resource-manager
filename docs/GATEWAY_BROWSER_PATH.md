@@ -72,28 +72,23 @@ plus LCU charges in us-east-1). VPC origins have no extra charge. CloudFront dat
 transfer replaces data transfer out from the Network Load Balancer, at a similar
 rate per GB.
 
-### Removing it: what stays in the VPC
+### Removing it
 
 For a VPC origin, CloudFront creates a security group named
 `CloudFront-VPCOrigins-Service-SG` and one network interface per load balancer
-subnet in your VPC. They are owned by CloudFront, not by the MRM stacks, and an
-account-wide service-linked role `AWSServiceRoleForCloudFrontVPCOrigin` is
-created with the first VPC origin.
+subnet in the VPC. CloudFront owns them, not the MRM stacks, and removes them
+itself about two minutes after the VPC origin is deleted. No manual cleanup is
+needed.
 
-They can outlive the VPC origin for a while after it is deleted. If the
-security group or an interface is still there when the VPC is deleted (for
-example when you uninstall MRM or delete a regional hub), the VPC or subnet
-delete fails with a dependency error. Then:
-
-```bash
-aws ec2 describe-network-interfaces --region <region> \
-  --filters Name=vpc-id,Values=<vpc-id> Name=interface-type,Values=cloudfront_managed
-aws ec2 describe-security-groups --region <region> \
-  --filters Name=vpc-id,Values=<vpc-id> Name=group-name,Values=CloudFront-VPCOrigins-Service-SG
-```
-
-Wait until no `cloudfront_managed` interfaces are listed, delete the security
-group if it remains, and retry the delete. The service-linked role can stay.
+- **Regional hub delete:** the hub stack owns its VPC, so it waits for those
+  network interfaces to go (up to 10 minutes) after deleting the VPC origin
+  and before deleting the subnets. In a test, deleting the distribution, the
+  VPC origin and the load balancer took about 12 minutes.
+- **Uninstalling MRM:** the VPC is deleted by a later stack than the browser
+  path, so the interfaces are gone by then.
+- **Left by design:** the first VPC origin in an account creates the
+  account-wide service-linked role `AWSServiceRoleForCloudFrontVPCOrigin`. It
+  stays after uninstall and grants nothing on its own.
 
 ## Client allowlist (optional)
 
@@ -127,4 +122,13 @@ curl -sk -o /dev/null -w '%{http_code}\n' https://<gateway>:8443/
 curl -s  -o /dev/null -w '%{http_code}\n' https://<id>.cloudfront.net/
 ```
 
-Both print `404`. Use `GET`, not `HEAD`, for health probes.
+Both print `404`. The WebSocket endpoint should still upgrade:
+
+```bash
+curl -s --http1.1 -o /dev/null -w '%{http_code}\n' -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+  -H 'Sec-WebSocket-Version: 13' -H 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' --max-time 10 https://<id>.cloudfront.net/ws
+```
+
+prints `101` (the gateway closes the socket after a few seconds without a
+session token). Use `GET`, not `HEAD`, for health probes: the gateway answers
+every `HEAD` with 404, which CloudFront reports as `Error from cloudfront`.

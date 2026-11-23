@@ -497,7 +497,9 @@ function generateCloudFormationTemplate(config) {
       originFacingPrefixListId,
       hostedZone,
       albName: purpose => sanitizeResourceName(`${acronymLower}-reg-${purpose}-alb`, 32, '-alb'),
-      targetGroupName: purpose => generateTargetGroupName(acronymLower, purpose)
+      targetGroupName: purpose => generateTargetGroupName(acronymLower, purpose),
+      // AWSLambdaVPCAccessExecutionRole on this role allows DescribeNetworkInterfaces.
+      eniWaitRoleArn: { 'Fn::GetAtt': ['CleanupLambdaRole', 'Arn'] }
     });
   }
   const browserGatewayUrl = browser

@@ -190,6 +190,77 @@ function gatewayClientIngressTemplate({ allowedClientCidrs, allowedPrefixListIds
 }
 
 /**
+ * Inline Lambda for the hub's GatewayBrowserEniWait custom resource. On stack
+ * delete it runs after the VPC origin is deleted and before the subnets are:
+ * CloudFront removes the VPC origin's network interfaces (interface type
+ * cloudfront_managed) 1.5-2 minutes after the VPC origin is reported deleted,
+ * and a subnet that still has one can't be deleted. It waits until none is
+ * left in the VPC, up to WAIT_SECONDS, and always reports success so it never
+ * blocks the delete itself.
+ */
+const ENI_WAIT_SECONDS = 600;
+const ENI_WAIT_FUNCTION_CODE = `
+const { EC2Client, DescribeNetworkInterfacesCommand } = require('@aws-sdk/client-ec2');
+const https = require('https');
+const ec2 = new EC2Client({});
+const WAIT_SECONDS = ${ENI_WAIT_SECONDS};
+
+async function cloudFrontEnis(vpcId) {
+  let token;
+  const found = [];
+  do {
+    const page = await ec2.send(new DescribeNetworkInterfacesCommand({
+      Filters: [{ Name: 'vpc-id', Values: [vpcId] }], NextToken: token
+    }));
+    for (const eni of page.NetworkInterfaces || []) {
+      if (eni.InterfaceType === 'cloudfront_managed') found.push(eni.NetworkInterfaceId);
+    }
+    token = page.NextToken;
+  } while (token);
+  return found;
+}
+
+exports.handler = async (event, context) => {
+  console.log('Request:', event.RequestType, JSON.stringify(event.ResourceProperties));
+  if (event.RequestType === 'Delete') {
+    const deadline = Date.now() + WAIT_SECONDS * 1000;
+    try {
+      for (;;) {
+        const enis = await cloudFrontEnis(event.ResourceProperties.VpcId);
+        console.log('CloudFront-managed network interfaces left:', enis.length);
+        if (!enis.length || Date.now() > deadline) break;
+        await new Promise(resolve => setTimeout(resolve, 15000));
+      }
+    } catch (error) {
+      console.error('Could not check network interfaces:', error.message);
+    }
+  }
+  await respond(event, context);
+};
+
+function respond(event, context) {
+  const body = JSON.stringify({
+    Status: 'SUCCESS',
+    Reason: 'See CloudWatch Log Stream: ' + context.logStreamName,
+    PhysicalResourceId: event.PhysicalResourceId || 'gateway-browser-eni-wait',
+    StackId: event.StackId,
+    RequestId: event.RequestId,
+    LogicalResourceId: event.LogicalResourceId,
+    Data: {}
+  });
+  const target = new URL(event.ResponseURL);
+  return new Promise((resolve, reject) => {
+    const request = https.request({
+      hostname: target.hostname, path: target.pathname + target.search, method: 'PUT',
+      headers: { 'content-type': '', 'content-length': Buffer.byteLength(body) }
+    }, response => { response.resume(); response.on('end', resolve); });
+    request.on('error', reject);
+    request.end(body);
+  });
+}
+`;
+
+/**
  * Hub template resources for the CloudFront browser path.
  *
  * @param {object} o
@@ -201,6 +272,7 @@ function gatewayClientIngressTemplate({ allowedClientCidrs, allowedPrefixListIds
  * @param {{ id: string, name: string } | null} o.hostedZone
  * @param {(purpose: string) => string} o.albName
  * @param {(purpose: string) => string} o.targetGroupName
+ * @param {object} o.eniWaitRoleArn        role for the ENI wait function (needs ec2:DescribeNetworkInterfaces)
  * @returns {{ resources: object, targetGroupRef: object, distributionDomain: object }}
  */
 function cloudFrontBrowserPathTemplate(o) {
@@ -299,9 +371,29 @@ function cloudFrontBrowserPathTemplate(o) {
         DefaultActions: [{ Type: 'forward', TargetGroupArn: { Ref: 'GatewayBrowserTargetGroup' } }],
       },
     },
+    // Deleted after the VPC origin and before the subnets (see ENI_WAIT_FUNCTION_CODE).
+    GatewayBrowserEniWaitFunction: {
+      Type: 'AWS::Lambda::Function',
+      Properties: {
+        FunctionName: `${o.acronymLower}-regional-gateway-eni-wait`,
+        Runtime: 'nodejs22.x',
+        Handler: 'index.handler',
+        Role: o.eniWaitRoleArn,
+        Timeout: ENI_WAIT_SECONDS + 60,
+        Code: { ZipFile: ENI_WAIT_FUNCTION_CODE },
+      },
+    },
+    GatewayBrowserEniWait: {
+      Type: 'Custom::GatewayBrowserEniWait',
+      DependsOn: o.albSubnetRefs.map(ref => ref.Ref),
+      Properties: {
+        ServiceToken: { 'Fn::GetAtt': ['GatewayBrowserEniWaitFunction', 'Arn'] },
+        VpcId: { Ref: 'VPC' },
+      },
+    },
     GatewayBrowserVpcOrigin: {
       Type: 'AWS::CloudFront::VpcOrigin',
-      DependsOn: 'GatewayBrowserListener',
+      DependsOn: ['GatewayBrowserListener', 'GatewayBrowserEniWait'],
       Properties: {
         VpcOriginEndpointConfig: {
           Name: `${o.acronymLower}-gateway-${o.region}`,
@@ -387,7 +479,7 @@ function cloudFrontBrowserPathTemplate(o) {
         },
       },
     };
-    resources.GatewayBrowserVpcOrigin.DependsOn = ['GatewayBrowserListener', 'GatewayBrowserOriginRecord'];
+    resources.GatewayBrowserVpcOrigin.DependsOn.push('GatewayBrowserOriginRecord');
   }
 
   return {
@@ -407,6 +499,7 @@ module.exports = {
   MANAGED_RESPONSE_HEADERS_POLICY_SIMPLE_CORS,
   MAX_ALLOWED_PREFIX_LISTS,
   CORS_PREFLIGHT_FUNCTION_CODE,
+  ENI_WAIT_FUNCTION_CODE,
   parseList,
   parseBrowserPath,
   parseAllowedClientCidrs,
