@@ -263,7 +263,12 @@ The identity team configures group mapping in their pool. The only requirement i
    ```bash
    aws logs tail /aws/lambda/<acronym>-pre-token-generation --follow
    ```
-2. Verify `custom:groups` contains the expected group name/GUID
+   Each sign-in logs the user type and group counts (not group names). A federated user with `"samlGroupCount":0` received no groups from Entra ID.
+2. Verify `custom:groups` contains the expected group name/GUID:
+   ```bash
+   aws cognito-idp admin-get-user --user-pool-id <USER_POOL_ID> --username <username> \
+     --query "UserAttributes[?Name=='custom:groups'].Value" --output text
+   ```
 3. Verify `AdminGroupName` in SSM matches what's in the token
 4. Invalidate CloudFront cache for `/config.json`
 

@@ -11,7 +11,7 @@ const { DirectoryServiceDataClient, ListGroupMembersCommand } = require('@aws-sd
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { CognitoIdentityProviderClient, ListUsersCommand } = require('@aws-sdk/client-cognito-identity-provider');
 const { requireAdmin, requireSelfOrAdmin } = require('../shared/authz');
-const { redactForLog } = require('../shared/log-redact');
+const { requestSummary } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -240,7 +240,7 @@ async function getCognitoUsersForDisplay() {
 }
 
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify(redactForLog(event), null, 2));
+  console.log('Event:', JSON.stringify(requestSummary(event)));
 
   const { httpMethod: method, path, body } = event;
 
@@ -373,7 +373,6 @@ async function getWorkstations(event) {
   const currentUserId = authorizerContext.username;
   const tokenType = authorizerContext.tokenType || 'ldap';
   
-  console.log('User:', currentUserId);
   console.log('Is admin:', isAdmin);
   console.log('Token type:', tokenType);
   
@@ -385,7 +384,7 @@ async function getWorkstations(event) {
     };
   }
   
-  console.log('Querying workstations for user:', currentUserId);
+  console.log('Querying workstations:', JSON.stringify({ isAdmin, hasUser: true }));
   
   let result;
   
@@ -407,8 +406,6 @@ async function getWorkstations(event) {
       const userIdForQuery = tokenType === 'cognito' 
         ? currentUserId 
         : (currentUserId.includes('@') ? currentUserId.split('@')[0] : currentUserId);
-      console.log('Querying workstations for user:', userIdForQuery);
-      
       // Get user's groups
       let userGroups = [];
       try {
@@ -418,7 +415,7 @@ async function getWorkstations(event) {
             TableName: process.env.GROUPS_TABLE_NAME
           }));
           
-          console.log(`Checking DynamoDB group memberships for user: ${userIdForQuery}`);
+          console.log(`Checking DynamoDB group memberships in ${(groupsResult.Items || []).length} groups`);
           
           // Build variants for group membership check (with and without IdP prefix)
           const memberVariants = [userIdForQuery];
@@ -430,7 +427,7 @@ async function getWorkstations(event) {
           for (const group of groupsResult.Items || []) {
             const members = group.members || [];
             if (memberVariants.some(v => members.includes(v))) {
-              console.log(`User ${userIdForQuery} is member of group ${group.groupName}`);
+              console.log(`User is a member of group ${group.groupName}`);
               userGroups.push(group.groupId);
             }
           }
@@ -443,7 +440,7 @@ async function getWorkstations(event) {
             TableName: process.env.GROUPS_TABLE_NAME
           }));
           
-          console.log(`Checking Directory Services group memberships for user: ${userIdForQuery}`);
+          console.log(`Checking Directory Services group memberships in ${(groupsResult.Items || []).length} groups`);
           
           // For each group, check if user is a member via Directory Services
           for (const group of groupsResult.Items || []) {
@@ -457,10 +454,10 @@ async function getWorkstations(event) {
               }));
               
               const members = membersResult.Members?.map(member => member.SAMAccountName) || [];
-              console.log('Group', sanitizedGroupName, 'members:', members);
+              console.log(`Group ${sanitizedGroupName} has ${members.length} members`);
               
               if (members.includes(userIdForQuery)) {
-                console.log(`User ${userIdForQuery} is member of group ${sanitizedGroupName}`);
+                console.log(`User is a member of group ${sanitizedGroupName}`);
                 userGroups.push(group.groupId);
               }
             } catch (error) {
@@ -486,7 +483,7 @@ async function getWorkstations(event) {
           userIdVariants.push(strippedId);
         }
       }
-      console.log('Querying GSI with userId variants:', userIdVariants);
+      console.log(`Querying GSI with ${userIdVariants.length} user ID variants`);
       
       const directQueries = userIdVariants.map(uid =>
         dynamodb.send(new QueryCommand({
@@ -906,7 +903,7 @@ async function createWorkstation(data) {
   // Default joinDomain to true for backward compatibility (only applies to Windows)
   const shouldJoinDomain = joinDomain !== false;
   
-  console.log('Starting workstation creation via Step Functions:', { amiId, instanceType, assignedUserId, domainId, rootVolumeSize, pipelineId, acronym, joinDomain: shouldJoinDomain, platform, region });
+  console.log('Starting workstation creation via Step Functions:', { amiId, instanceType, assigned: !!assignedUserId, domainId, rootVolumeSize, pipelineId, acronym, joinDomain: shouldJoinDomain, platform, region });
   
   try {
     // If a satellite region is specified, look up regional configuration

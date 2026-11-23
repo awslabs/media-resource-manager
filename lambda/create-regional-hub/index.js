@@ -7,7 +7,7 @@ const { SFNClient, StartExecutionCommand } = require('@aws-sdk/client-sfn');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { EC2Client, DescribeAvailabilityZonesCommand } = require('@aws-sdk/client-ec2');
 const { requireAdmin } = require('../shared/authz');
-const { redactForLog } = require('../shared/log-redact');
+const { requestSummary } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -22,7 +22,7 @@ const PASCAL_CASE_NAME = process.env.PASCAL_CASE_NAME;
  * Validates input, creates DynamoDB record, and starts the state machine
  */
 exports.handler = async (event) => {
-  console.log('CreateRegionalHub API event:', JSON.stringify(redactForLog(event), null, 2));
+  console.log('CreateRegionalHub API event:', JSON.stringify(requestSummary(event)));
 
   // SECURITY: creating a regional hub kicks off a Step Functions workflow
   // that deploys IAM, VPC, NLB, DCV Session Manager, and instance profiles

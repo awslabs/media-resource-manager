@@ -33,7 +33,7 @@ function getCfnClient(region) {
 }
 
 exports.handler = async (event) => {
-  console.log('StorageCfnWorker event:', JSON.stringify(event, null, 2));
+  console.log('StorageCfnWorker event:', JSON.stringify({ action: event.action, region: event.region, stackName: event.stackName }));
   
   const { action, region, stackName, templateBody, parameters } = event;
   

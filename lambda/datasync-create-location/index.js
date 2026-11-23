@@ -9,7 +9,7 @@ const { EC2Client, DescribeNetworkInterfacesCommand } = require('@aws-sdk/client
 const crypto = require('crypto');
 const { generateBucketPolicy } = require('./policy-generator');
 const { requireAdmin } = require('../shared/authz');
-const { redactForLog } = require('../shared/log-redact');
+const { requestSummary } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -46,7 +46,7 @@ const getBucketNameFromArn = (arn) => {
 };
 
 exports.handler = async (event) => {
-  console.log('CreateDataSyncLocation event:', JSON.stringify(redactForLog(event), null, 2));
+  console.log('CreateDataSyncLocation event:', JSON.stringify(requestSummary(event)));
 
   // SECURITY: creating a DataSync location provisions AWS resources and
   // grants DataSync IAM access to the referenced S3 bucket or FSx volume.
