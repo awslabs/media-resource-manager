@@ -293,6 +293,9 @@ function cfnCalls(template: any, v: typeof VARIANTS[number]): Record<string, (id
       const ctx = { 'iam:PermissionsBoundary': resolve(r.Properties.PermissionsBoundary) };
       return [
         ...on(arn(id), ['iam:CreateRole', 'iam:PutRolePolicy', 'iam:PutRolePermissionsBoundary'], ctx),
+        // Seen in CloudTrail when CloudFormation plans a role change.
+        ['iam:GetPolicy', resolve(r.Properties.PermissionsBoundary)],
+        ...resolve(r.Properties.ManagedPolicyArns || []).map((p: string): Call => ['iam:GetPolicy', p]),
         ...resolve(r.Properties.ManagedPolicyArns || []).map((p: string): Call =>
           ['iam:AttachRolePolicy', arn(id), { ...ctx, 'iam:PolicyARN': p }]),
         ...on(arn(id), ['iam:GetRole', 'iam:GetRolePolicy', 'iam:ListRolePolicies', 'iam:ListAttachedRolePolicies',
