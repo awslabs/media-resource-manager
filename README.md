@@ -390,7 +390,9 @@ aws cloudformation deploy \
     AdminGroupName=CE-Admins
 ```
 
-**3. Trigger deployment:**
+**3. Follow the first deployment:**
+
+Creating the pipeline stack starts the first build automatically. Don't start another build while it runs: two builds deploying at once fail with errors such as `... is in CREATE_IN_PROGRESS state`.
 
 Get the CodeBuild project name from the stack outputs:
 ```bash
@@ -398,12 +400,19 @@ aws cloudformation describe-stacks --stack-name MRM-DeployPipeline \
   --query "Stacks[0].Outputs[?OutputKey=='CodeBuildProjectName'].OutputValue" --output text
 ```
 
-Then start a build:
+Check the build's status:
+```bash
+aws codebuild batch-get-builds \
+  --ids "$(aws codebuild list-builds-for-project --project-name <project-name> --query 'ids[0]' --output text)" \
+  --query 'builds[0].buildStatus' --output text
+```
+
+Or from the AWS Console: CodeBuild → find the project → Build history.
+
+Start a build yourself only for later updates (step 4), once the previous build has finished:
 ```bash
 aws codebuild start-build --project-name <project-name>
 ```
-
-Or from the AWS Console: CodeBuild → find the project → Start build.
 
 **4. Update configuration after initial deploy:**
 
