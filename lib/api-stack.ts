@@ -1084,6 +1084,18 @@ export class ApiStack extends cdk.Stack {
     this.api = new apigateway.RestApi(this, 'WorkstationApi', {
       restApiName: `${props.pascalCaseName}-Workstation-API`,
       description: 'API for managing workstations',
+      deployOptions: {
+        // POST /auth/ldap is the one sign-in route reachable without a token.
+        // Throttle it at the stage so excess requests get a 429 before they
+        // reach the Lambda or the directory. This is a stage-wide cap, not
+        // per client IP.
+        methodOptions: {
+          '/auth/ldap/POST': {
+            throttlingRateLimit: 10,
+            throttlingBurstLimit: 20,
+          },
+        },
+      },
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS,
         allowMethods: apigateway.Cors.ALL_METHODS,
@@ -1859,29 +1871,9 @@ export class ApiStack extends cdk.Stack {
     const directAuthResource = authResource.addResource('ldap');
     const directAuthIntegration = integrate(directLdapAuthFunction);
     
-    // Login endpoint
+    // Login endpoint. Reachable before sign-in by design (it issues the
+    // token); the stage throttles it (see deployOptions.methodOptions).
     directAuthResource.addMethod('POST', directAuthIntegration);
-    
-    // JWT validation endpoint
-    const validateResource = authResource.addResource('validate');
-    const validateFunction = new lambda.Function(this, 'ValidateJwtFunction', {
-      functionName: `${props.acronym.toLowerCase()}-validate-jwt`,
-      runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/validate-jwt')),
-      environmentEncryption: props.dataEncryptionKey,
-      environment: {
-        JWT_SECRET_ARN: jwtSecret.secretArn
-      },
-      timeout: cdk.Duration.seconds(10),
-      reservedConcurrentExecutions: 25,
-    });
-
-    // Grant permission to read the JWT secret
-    jwtSecret.grantRead(validateFunction);
-    
-    const validateIntegration = integrate(validateFunction);
-    validateResource.addMethod('GET', validateIntegration);
 
     // DCV Session Manager endpoints
     const dcvResource = this.api.root.addResource('dcv');
