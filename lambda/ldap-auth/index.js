@@ -359,7 +359,8 @@ async function authenticateWithLDAP(username, password) {
           }
           if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
           const { username: rawUsername, password } = body;
-          if (typeof rawUsername !== 'string' || typeof password !== 'string') return null;
+          const isString = (value) => typeof value === 'string';
+          if (!isString(rawUsername) || !isString(password)) return null;
           if (rawUsername.length > MAX_RAW_USERNAME_LENGTH) return null;
           const username = rawUsername.trim().replace(/^[^\\]+\\/, '').replace(/@.+$/, '');
           if (!username || username.length > MAX_USERNAME_LENGTH || INVALID_USERNAME_CHARS.test(username)) return null;

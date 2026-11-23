@@ -17,7 +17,7 @@ jest.mock('ldapjs', () => ({
   createClient: () => ({
     bind: (dn: string, password: unknown, cb: (err: Error | null) => void) => {
       binds.push({ dn, password });
-      if (typeof password !== 'string') throw new TypeError('credentials (string) required');
+      if (typeof password !== 'string') throw new TypeError('credentials (string) required'); // pragma: allowlist secret
       cb(password === PASSWORD ? null : new Error('InvalidCredentialsError'));
     },
     search: (_base: string, _opts: unknown, cb: (err: Error | null, res: unknown) => void) => {
