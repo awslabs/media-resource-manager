@@ -96,7 +96,7 @@ jest.mock('@aws-sdk/client-secrets-manager', () => {
         mockCalls.push(cmd);
         switch (cmd.kind) {
           case 'GetSecretValue':
-            if (cmd.input.SecretId === 'ad-secret') {
+            if (cmd.input.SecretId === 'ad-secret') { // pragma: allowlist secret
               return { SecretString: JSON.stringify({ username: 'svc-mrm', password: AD_PASSWORD }) };
             }
             return {
