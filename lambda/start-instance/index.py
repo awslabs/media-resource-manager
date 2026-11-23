@@ -6,6 +6,26 @@ import os
 import boto3
 from datetime import datetime
 
+
+def resolve_join_domain(workstation, platform):
+    """Whether the start flow treats the workstation as domain-joined.
+
+    Only Windows workstations join the domain. New records store joinDomain;
+    a record without it but with a domainId is domain-joined. Records with
+    neither predate the field: use the Join Domain default the console uses
+    for this deployment (DEFAULT_WINDOWS_JOIN_DOMAIN: 'false' with Cognito
+    sign-in, 'true' with AD sign-in).
+    """
+    if str(platform).lower() != 'windows':
+        return False
+    join_domain = workstation.get('joinDomain')
+    if isinstance(join_domain, bool):
+        return join_domain
+    if workstation.get('domainId'):
+        return True
+    return os.environ.get('DEFAULT_WINDOWS_JOIN_DOMAIN', 'false') == 'true'
+
+
 def handler(event, context):
     instance_id = event['instanceId']
     
@@ -17,7 +37,7 @@ def handler(event, context):
         # Get workstation details from DynamoDB to determine platform and region
         workstation = table.get_item(Key={'instanceId': instance_id}).get('Item', {})
         platform = workstation.get('platform', 'windows')  # Default to windows for backward compatibility
-        join_domain = workstation.get('joinDomain', False)
+        join_domain = resolve_join_domain(workstation, platform)
         workstation_region = workstation.get('region', os.environ.get('AWS_REGION'))
         
         print(f"Starting instance {instance_id}, platform: {platform}, joinDomain: {join_domain}, region: {workstation_region}")
