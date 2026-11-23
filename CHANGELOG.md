@@ -37,7 +37,7 @@ and the deployment pipeline get several fixes. Regional hubs need an update.
   gateway browser path
   ([#103](https://github.com/awslabs/media-resource-manager/pull/103)) and the
   hub session manager fix
-  ([#115](https://github.com/awslabs/media-resource-manager/pull/115)). <!-- pending merge: #115 -->
+  ([#115](https://github.com/awslabs/media-resource-manager/pull/115)).
 - Connection gateways are replaced one at a time: the primary Region's
   gateways during the deploy, and each hub's gateway during its **Update**.
   DCV sessions on a gateway that is being replaced disconnect, and users
@@ -158,7 +158,7 @@ and the deployment pipeline get several fixes. Regional hubs need an update.
   primary Region. Linux and macOS hub workstations get the right default
   session owner, and assigned users can connect to hub workstations. Needs a
   hub **Update**.
-  ([#115](https://github.com/awslabs/media-resource-manager/pull/115)) <!-- pending merge -->
+  ([#115](https://github.com/awslabs/media-resource-manager/pull/115))
 - `npm run build` compiles the tests again after a `StorageStack` prop was
   removed.
   ([#110](https://github.com/awslabs/media-resource-manager/pull/110))
