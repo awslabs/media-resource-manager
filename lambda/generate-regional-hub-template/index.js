@@ -2343,8 +2343,24 @@ function generateCloudFormationTemplate(config) {
       } : {})
     }
   };
-  
+
+  addPermissionsBoundary(template);
   return template;
+}
+
+/**
+ * Sets the hub permissions boundary on every IAM role in the template.
+ * The primary region's MRM-Regional-Hub stack creates the boundary policy,
+ * and the CloudFormation service role may only create or change a hub role
+ * that has it, so a role without it fails to deploy.
+ */
+function addPermissionsBoundary(template) {
+  for (const resource of Object.values(template.Resources)) {
+    if (resource.Type !== 'AWS::IAM::Role') continue;
+    resource.Properties.PermissionsBoundary = {
+      'Fn::Sub': 'arn:aws:iam::${AWS::AccountId}:policy/${ProductName}-RegionalHub-Boundary'
+    };
+  }
 }
 
 // Generate Session Manager user data script from external file

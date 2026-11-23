@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+const crypto = require('crypto');
 const { Client } = require('ssh2');
 const https = require('https');
 const { SecretsManagerClient, GetSecretValueCommand, UpdateSecretCommand } = require('@aws-sdk/client-secrets-manager');
@@ -91,6 +92,7 @@ async function invokeRegionalLambda(region, event) {
  * Must meet ONTAP password requirements:
  * - At least 6 characters
  * - Characters from 3 of 4 categories: uppercase, lowercase, digits, special
+ * Uses crypto.randomInt, which is cryptographically secure and unbiased.
  */
 function generatePassword() {
     const length = 16;
@@ -98,22 +100,23 @@ function generatePassword() {
     const uppercase = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
     const digits = '0123456789';
     const special = '!@#$%^&*';
-    
-    let password = '';
-    // Ensure at least one from each required category
-    password += lowercase[Math.floor(Math.random() * lowercase.length)];
-    password += uppercase[Math.floor(Math.random() * uppercase.length)];
-    password += digits[Math.floor(Math.random() * digits.length)];
-    password += special[Math.floor(Math.random() * special.length)];
-    
-    // Fill the rest with mixed characters
     const allChars = lowercase + uppercase + digits + special;
-    for (let i = password.length; i < length; i++) {
-        password += allChars[Math.floor(Math.random() * allChars.length)];
+    const pick = (chars) => chars[crypto.randomInt(chars.length)];
+
+    // Ensure at least one from each required category
+    const password = [pick(lowercase), pick(uppercase), pick(digits), pick(special)];
+
+    // Fill the rest with mixed characters
+    while (password.length < length) {
+        password.push(pick(allChars));
     }
-    
-    // Shuffle the password
-    return password.split('').sort(() => Math.random() - 0.5).join('');
+
+    // Fisher-Yates shuffle so the required characters can be anywhere
+    for (let i = password.length - 1; i > 0; i--) {
+        const j = crypto.randomInt(i + 1);
+        [password[i], password[j]] = [password[j], password[i]];
+    }
+    return password.join('');
 }
 
 /**
@@ -756,3 +759,6 @@ async function configureNfsExportPolicy(managementEndpoint, vsadminPassword, svm
     console.log('NFS export policy configuration completed');
     return true;
 }
+
+// Exported for unit tests.
+exports.generatePassword = generatePassword;

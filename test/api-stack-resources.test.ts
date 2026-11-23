@@ -36,7 +36,7 @@ function synth(): Template {
   const regionalHubsTable = table('RegionalHubs');
 
   const storageStack = new StorageStack(app, 'Storage', {
-    env, ...names, storageTable, workstationTable, regionalHubsTable, dataEncryptionKey, adServiceAccountSecretArn,
+    env, ...names, storageTable, workstationTable, regionalHubsTable, dataEncryptionKey,
   });
   const dataSyncStack = new DataSyncStack(app, 'DataSync', {
     env, ...names, storageTable, dataEncryptionKey, adServiceAccountSecretArn,

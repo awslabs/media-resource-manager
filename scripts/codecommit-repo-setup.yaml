@@ -90,7 +90,11 @@ Resources:
               - codecommit:UpdatePullRequestTitle
             Resource: !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}
 
-          # Deny push to protected branches (main, deploy/*)
+          # Deny push to protected branches (main, deploy/*).
+          # The branch patterns share one StringLikeIfExists key, so IAM
+          # matches a ref against any of them. The Null check limits the deny
+          # to requests that carry refs, as in the AWS CodeCommit
+          # branch-protection example (git-receive-pack needs it for GitPush).
           - Sid: DenyProtectedBranchPush
             Effect: Deny
             Action:
@@ -102,12 +106,12 @@ Resources:
               - codecommit:MergeBranchesByThreeWay
             Resource: !Sub arn:aws:codecommit:${AWS::Region}:${AWS::AccountId}:${RepositoryName}
             Condition:
-              StringEqualsIfExists:
-                codecommit:References:
-                  - refs/heads/main
               StringLikeIfExists:
                 codecommit:References:
+                  - refs/heads/main
                   - refs/heads/deploy/*
+              'Null':
+                codecommit:References: 'false'
     Metadata:
       cdk_nag:
         rules_to_suppress:
