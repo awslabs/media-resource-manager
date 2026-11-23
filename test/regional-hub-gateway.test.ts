@@ -99,6 +99,16 @@ describe('hub security groups', () => {
     expect(rules.filter(r => r.CidrIp === '0.0.0.0/0')).toEqual([]);
   });
 
+  it('gives the browser ALB only the gateway web port (no health-port rule)', () => {
+    const r = generate().Resources;
+    const fromAlb = Object.values(r).filter((x: any) => x.Type === 'AWS::EC2::SecurityGroupIngress'
+      && JSON.stringify(x.Properties.SourceSecurityGroupId) === JSON.stringify({ Ref: 'GatewayBrowserAlbSecurityGroup' }));
+    expect(fromAlb.map((x: any) => x.Properties.FromPort)).toEqual([8443]);
+    const egress = Object.values(r).filter((x: any) => x.Type === 'AWS::EC2::SecurityGroupEgress'
+      && JSON.stringify(x.Properties.GroupId) === JSON.stringify({ Ref: 'GatewayBrowserAlbSecurityGroup' }));
+    expect(egress.map((x: any) => x.Properties.FromPort)).toEqual([8443]);
+  });
+
   it('allows the gateway web port from the browser ALB security group', () => {
     const rule = generate().Resources.ConnectionGatewaySGFromBrowserAlb.Properties;
     expect(rule).toEqual(expect.objectContaining({
@@ -226,14 +236,20 @@ describe('hub delete: wait for CloudFront network interfaces', () => {
     expect(r.GatewayBrowserEniWaitFunction.Properties.Role).toEqual({ 'Fn::GetAtt': ['CleanupLambdaRole', 'Arn'] });
   });
 
-  function loadHandler(pages: string[][]) {
+  function loadHandler(pages: string[][], groupPages: string[][] = [[]]) {
     const calls: any[] = [];
+    const groupCalls: any[] = [];
     const responses: string[] = [];
     const fakeRequire = (name: string) => {
       if (name === '@aws-sdk/client-ec2') {
         return {
           EC2Client: function EC2Client() {
             return { send: async (cmd: any) => {
+              if (cmd.kind === 'groups') {
+                groupCalls.push(cmd.input);
+                const ids = groupPages.length > 1 ? groupPages.shift()! : groupPages[0];
+                return { SecurityGroups: ids.map(GroupId => ({ GroupId })) };
+              }
               calls.push(cmd.input);
               const ids = pages.length > 1 ? pages.shift()! : pages[0];
               return { NetworkInterfaces: [
@@ -243,6 +259,7 @@ describe('hub delete: wait for CloudFront network interfaces', () => {
             } };
           },
           DescribeNetworkInterfacesCommand: function Cmd(this: any, input: any) { this.input = input; },
+          DescribeSecurityGroupsCommand: function Cmd(this: any, input: any) { this.input = input; this.kind = 'groups'; },
         };
       }
       if (name === 'https') {
@@ -256,7 +273,7 @@ describe('hub delete: wait for CloudFront network interfaces', () => {
     const module = { exports: {} as any };
     // eslint-disable-next-line no-new-func
     new Function('require', 'exports', 'module', browserPath.ENI_WAIT_FUNCTION_CODE)(fakeRequire, module.exports, module);
-    return { handler: module.exports.handler, calls, responses };
+    return { handler: module.exports.handler, calls, groupCalls, responses };
   }
   const event = (RequestType: string) => ({
     RequestType, ResponseURL: 'https://example.com/response?x=1', StackId: 's', RequestId: 'r', LogicalResourceId: 'l',
@@ -276,6 +293,28 @@ describe('hub delete: wait for CloudFront network interfaces', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  it('also waits for the CloudFront service security group to go', async () => {
+    jest.useFakeTimers();
+    try {
+      const { handler, calls, groupCalls, responses } = loadHandler([[]], [['sg-cf'], ['sg-cf'], []]);
+      const done = handler(event('Delete'), { logStreamName: 'log' });
+      await jest.advanceTimersByTimeAsync(30000);
+      await done;
+      expect(calls).toHaveLength(3);
+      expect(groupCalls[0].Filters).toContainEqual({ Name: 'group-name', Values: ['CloudFront-VPCOrigins-Service-SG'] });
+      expect(JSON.parse(responses[0]).Status).toBe('SUCCESS');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('lets the cleanup role it uses read security groups', () => {
+    const statements = r.CleanupLambdaRole.Properties.Policies[0].PolicyDocument.Statement;
+    expect(statements.flatMap((st: any) => st.Action)).toContain('ec2:DescribeSecurityGroups');
+    expect(r.CleanupLambdaRole.Properties.ManagedPolicyArns)
+      .toContain('arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole');
   });
 
   it('does nothing on create', async () => {

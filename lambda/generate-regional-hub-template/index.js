@@ -498,7 +498,8 @@ function generateCloudFormationTemplate(config) {
       hostedZone,
       albName: purpose => sanitizeResourceName(`${acronymLower}-reg-${purpose}-alb`, 32, '-alb'),
       targetGroupName: purpose => generateTargetGroupName(acronymLower, purpose),
-      // AWSLambdaVPCAccessExecutionRole on this role allows DescribeNetworkInterfaces.
+      // This role allows DescribeNetworkInterfaces (AWSLambdaVPCAccessExecutionRole)
+      // and DescribeSecurityGroups (CleanupPermissions).
       eniWaitRoleArn: { 'Fn::GetAtt': ['CleanupLambdaRole', 'Arn'] }
     });
   }
@@ -1581,7 +1582,8 @@ function generateCloudFormationTemplate(config) {
                   },
                   {
                     Effect: 'Allow',
-                    Action: ['ec2:DescribeInstances'],
+                    // DescribeSecurityGroups: the gateway browser path's ENI wait on delete.
+                    Action: ['ec2:DescribeInstances', 'ec2:DescribeSecurityGroups'],
                     Resource: '*'
                   },
                   {

@@ -191,16 +191,17 @@ function gatewayClientIngressTemplate({ allowedClientCidrs, allowedPrefixListIds
 
 /**
  * Inline Lambda for the hub's GatewayBrowserEniWait custom resource. On stack
- * delete it runs after the VPC origin is deleted and before the subnets are:
- * CloudFront removes the VPC origin's network interfaces (interface type
- * cloudfront_managed) 1.5-2 minutes after the VPC origin is reported deleted,
- * and a subnet that still has one can't be deleted. It waits until none is
- * left in the VPC, up to WAIT_SECONDS, and always reports success so it never
- * blocks the delete itself.
+ * delete it runs after the VPC origin is deleted and before the subnets (and
+ * so the VPC) are: CloudFront removes the VPC origin's network interfaces
+ * (interface type cloudfront_managed) and its CloudFront-VPCOrigins-Service-SG
+ * 1.5-2 minutes after the VPC origin is reported deleted, and a subnet or VPC
+ * that still has them can't be deleted. It waits until neither is left in the
+ * VPC, up to WAIT_SECONDS, and always reports success so it never blocks the
+ * delete itself.
  */
 const ENI_WAIT_SECONDS = 600;
 const ENI_WAIT_FUNCTION_CODE = `
-const { EC2Client, DescribeNetworkInterfacesCommand } = require('@aws-sdk/client-ec2');
+const { EC2Client, DescribeNetworkInterfacesCommand, DescribeSecurityGroupsCommand } = require('@aws-sdk/client-ec2');
 const https = require('https');
 const ec2 = new EC2Client({});
 const WAIT_SECONDS = ${ENI_WAIT_SECONDS};
@@ -220,15 +221,24 @@ async function cloudFrontEnis(vpcId) {
   return found;
 }
 
+async function serviceSecurityGroups(vpcId) {
+  const result = await ec2.send(new DescribeSecurityGroupsCommand({
+    Filters: [{ Name: 'vpc-id', Values: [vpcId] }, { Name: 'group-name', Values: ['CloudFront-VPCOrigins-Service-SG'] }]
+  }));
+  return (result.SecurityGroups || []).map(group => group.GroupId);
+}
+
 exports.handler = async (event, context) => {
   console.log('Request:', event.RequestType, JSON.stringify(event.ResourceProperties));
   if (event.RequestType === 'Delete') {
     const deadline = Date.now() + WAIT_SECONDS * 1000;
     try {
       for (;;) {
-        const enis = await cloudFrontEnis(event.ResourceProperties.VpcId);
-        console.log('CloudFront-managed network interfaces left:', enis.length);
-        if (!enis.length || Date.now() > deadline) break;
+        const vpcId = event.ResourceProperties.VpcId;
+        const enis = await cloudFrontEnis(vpcId);
+        const groups = await serviceSecurityGroups(vpcId);
+        console.log('CloudFront-managed network interfaces left:', enis.length, 'service security groups left:', groups.length);
+        if ((!enis.length && !groups.length) || Date.now() > deadline) break;
         await new Promise(resolve => setTimeout(resolve, 15000));
       }
     } catch (error) {

@@ -119,6 +119,13 @@ describe('primary gateway (default: CloudFront browser path)', () => {
     });
   });
 
+  it('gives the browser ALB only the gateway web port (no health-port rule)', () => {
+    const fromAlb = template.findResources('AWS::EC2::SecurityGroupIngress', {
+      Properties: { SourceSecurityGroupId: { 'Fn::GetAtt': [Match.stringLikeRegexp('^GatewayBrowserAlbSG'), 'GroupId'] } },
+    });
+    expect(Object.values(fromAlb).map((r: any) => r.Properties.FromPort)).toEqual([8443]);
+  });
+
   it('allows TCP 8443 on the gateway from the browser ALB security group', () => {
     template.hasResourceProperties('AWS::EC2::SecurityGroupIngress', {
       IpProtocol: 'tcp', FromPort: 8443, ToPort: 8443,

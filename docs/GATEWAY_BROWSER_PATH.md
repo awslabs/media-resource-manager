@@ -77,12 +77,13 @@ rate per GB.
 For a VPC origin, CloudFront creates a security group named
 `CloudFront-VPCOrigins-Service-SG` and one network interface per load balancer
 subnet in the VPC. CloudFront owns them, not the MRM stacks, and removes them
-itself about two minutes after the VPC origin is deleted. No manual cleanup is
-needed.
+itself shortly after the VPC origin is deleted. No manual cleanup is needed.
 
-- **Regional hub delete:** the hub stack owns its VPC, so it waits for those
-  network interfaces to go (up to 10 minutes) after deleting the VPC origin
-  and before deleting the subnets. In a test, deleting the distribution, the
+- **Regional hub delete:** the hub stack owns its VPC. CloudFront removes the
+  interfaces and the security group 1.5 to 2 minutes after CloudFormation
+  reports the VPC origin deleted, and a subnet or VPC that still has them
+  can't be deleted. So after deleting the VPC origin, the stack waits until
+  both are gone (up to 10 minutes) before it deletes the subnets and the VPC. In a test, deleting the distribution, the
   VPC origin and the load balancer took about 12 minutes.
 - **Uninstalling MRM:** the VPC is deleted by a later stack than the browser
   path, so the interfaces are gone by then.

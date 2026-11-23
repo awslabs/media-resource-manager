@@ -35,8 +35,8 @@ global_settings:
     # Secrets Manager ARN reference (not a secret value, just a pointer to where secrets are stored)
     - rule_id: 'SECRET-SECRET-KEYWORD'
       path: 'lambda/generate-regional-hub-template/index.js'
-      line_start: 3966
-      line_end: 3966
+      line_start: 3968
+      line_end: 3968
       reason: 'SecretArn property with value "none" — CloudFormation response placeholder when no secret exists'
 
     # Base64 hash used as CDK CustomResource cache key (deterministic, not a secret)
