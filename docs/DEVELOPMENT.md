@@ -197,26 +197,32 @@ every release has:
 
 ## Architecture Rules
 
-- **The API stack is at the CloudFormation resource limit.** The `<ACRONYM>-Api`
-  stack is close to CloudFormation's limit of 500 resources per stack, so a
-  change that adds API routes fails to deploy until
-  [#59](https://github.com/awslabs/media-resource-manager/issues/59) is fixed.
-  Check the resource count in the synthesized template before you add routes.
+- **API Lambda integrations use one invoke permission per function.** In
+  `lib/api-stack.ts`, create every Lambda integration with the local
+  `integrate(fn)` helper, which sets `scopePermissionToMethod: false`. CDK then
+  adds one invoke permission per function for the API, instead of two per
+  method. The `<ACRONYM>-Api` stack has about 356 of CloudFormation's 500
+  resources per stack, and `test/api-stack-resources.test.ts` fails if a
+  function gets more than one permission or the stack reaches 400. Check the
+  resource count in the synthesized template before you add routes.
 - **Shared Lambda code lives in `lambda/shared/`.** A Lambda that requires a
   shared module (for example `require('../shared/log-redact')`) must be
   defined with `lambdaCodeWithShared('<dir>')` from `lib/lambda-code.ts` in
   place of `code` and `handler`. That packages the Lambda's folder together
-  with `shared/`, so each shared module exists once in the repo.
+  with `shared/`, so each shared module exists once in the repo. The regional
+  hub Lambdas (`REGIONAL_HUB_LAMBDAS`) and the hub template generator must not
+  use `lambda/shared/`: a hub runs each hub Lambda from its own folder with
+  the handler `index.handler`, and the hub `templateVersion` fingerprints only
+  those folders.
 - **Never log raw events, request bodies, tokens or presigned URLs.** This
   includes a custom resource's `ResponseURL`. Log
   `redactForLog(event)` from `lambda/shared/log-redact.js`, which replaces
   sensitive keys, JWTs and URL credentials with `[REDACTED]`.
 - **Write and admin API routes call `requireAdmin`.** Each Lambda behind such a
-  route checks the caller with `requireAdmin(event)` from its own `authz.js`
-  and returns the denial if there is one. The `authz.js` copies are to move to
-  `lambda/shared/` in
-  [#58](https://github.com/awslabs/media-resource-manager/issues/58); until
-  then, a new Lambda copies an existing one.
+  route checks the caller with `requireAdmin(event)` from
+  `require('../shared/authz')` and returns the denial if there is one. Define
+  the Lambda with `lambdaCodeWithShared('<dir>')`, and don't add an `authz.js`
+  copy to its folder; `test/authz-shared.test.ts` fails if you do.
 - **The Log-Retention stack deploys last.** `<ACRONYM>-Log-Retention` sets the
   retention of every Lambda log group, so `bin/media-resource-manager.ts`
   makes it depend on every other stack. The `lambdaLogRetentionDays` context

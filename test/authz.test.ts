@@ -2,17 +2,15 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Unit tests for the shared authz helper module. The helper is copied
- * byte-identical into every affected Lambda handler directory; we exercise
- * one canonical copy here (lambda/user-group-manager/authz.js) and rely on
- * the md5 invariant enforced in commit history to ensure every other copy
- * behaves the same way.
+ * Unit tests for the shared authz helper module (lambda/shared/authz.js),
+ * which every API Lambda that checks the caller loads with
+ * require('../shared/authz').
  *
  * See H1-3966572 / GHSA-58q4-fcw9-2778 / SIM P498186948.
  */
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const authz = require('../lambda/user-group-manager/authz.js');
+const authz = require('../lambda/shared/authz.js');
 const { getCallerIdentity, requireAdmin, requireSelfOrAdmin, forbidden, unauthorized } = authz;
 
 // Minimal event shape helpers. API Gateway serialises the authorizer

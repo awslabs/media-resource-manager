@@ -7,7 +7,7 @@ const { SSMClient, SendCommandCommand, GetParameterCommand } = require('@aws-sdk
 const { EC2Client, DescribeInstancesCommand } = require('@aws-sdk/client-ec2');
 const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
 const { FSxClient, DescribeStorageVirtualMachinesCommand } = require('@aws-sdk/client-fsx');
-const { requireAdmin } = require('./authz');
+const { requireAdmin } = require('../shared/authz');
 const { redactForLog } = require('../shared/log-redact');
 
 // DynamoDB client for primary region (workstation table is in primary region)
