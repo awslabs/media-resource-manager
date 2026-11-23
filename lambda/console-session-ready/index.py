@@ -25,8 +25,11 @@ Each invocation is one poll step of a Step Functions loop:
 The READY session is left in place on purpose: dcv-session-manager reuses an
 existing READY session, so the first Connect returns at once.
 
-Workstations in a satellite region are skipped: this function runs in the main
-region and cannot reach a satellite region's Session Manager.
+This function runs in the primary Region. For a workstation in a regional hub
+it makes each Session Manager call through the hub's copy of
+dcv-session-manager (REGIONAL_SESSION_MANAGER_FUNCTION), the same Lambda that
+Connect uses there. A hub whose copy predates these calls is skipped, as
+before, until its next Update.
 """
 
 import base64
@@ -77,7 +80,9 @@ def _session_owner(event):
     item = table.get_item(Key={'instanceId': event['instanceId']}).get('Item', {})
     image = None
     if not item.get('linuxDistro') and item.get('amiId'):
-        images = boto3.client('ec2').describe_images(ImageIds=[item['amiId']]).get('Images', [])
+        # The AMI is in the workstation's Region, which may be a hub Region.
+        ec2 = boto3.client('ec2', region_name=event.get('region') or None)
+        images = ec2.describe_images(ImageIds=[item['amiId']]).get('Images', [])
         image = images[0] if images else None
     return linux_session_owner(item, image)
 
@@ -170,6 +175,36 @@ def _broker():
     return call
 
 
+class HubCheckUnavailable(Exception):
+    """The hub's dcv-session-manager can't run the check (missing, or not updated yet)."""
+
+
+def _hub_broker(region):
+    """Like _broker, but each call runs in the hub's dcv-session-manager."""
+    import boto3
+    client = boto3.client('lambda', region_name=region)
+    function_name = os.environ['REGIONAL_SESSION_MANAGER_FUNCTION']
+
+    def call(api, body):
+        try:
+            response = client.invoke(
+                FunctionName=function_name,
+                Payload=json.dumps({'consoleSessionBrokerCall': {'api': api, 'body': body}}),
+            )
+        except client.exceptions.ResourceNotFoundException as error:
+            raise HubCheckUnavailable(f'{function_name} not found in {region}') from error
+        payload = json.loads(response['Payload'].read() or b'{}')
+        status = payload.get('statusCode') if isinstance(payload, dict) else None
+        if status == 200 and not response.get('FunctionError'):
+            return json.loads(payload.get('body') or '{}')
+        # A copy from before these calls answers like an API request without a sign-in.
+        if status == 401:
+            raise HubCheckUnavailable(f'{function_name} in {region} predates the console session check')
+        raise RuntimeError(f'{function_name} in {region} returned {status or response.get("FunctionError")}')
+
+    return call
+
+
 def _list(call, api, key):
     items, body = [], {}
     while True:
@@ -186,14 +221,12 @@ def lambda_handler(event, context):
     result = {**event, 'consoleSessionChecks': checks, 'consoleSessionReady': False}
 
     region = event.get('region')
-    if region and region != os.environ.get('AWS_REGION'):
-        print(f'{instance_id} is in satellite region {region}; console session check skipped')
-        return {**result, 'consoleSessionReady': True, 'consoleSessionCheckSkipped': True}
+    in_hub = bool(region) and region != os.environ.get('AWS_REGION')
 
     try:
         owner = _session_owner(event)
         result['consoleSessionOwner'] = owner
-        call = _broker()
+        call = _hub_broker(region) if in_hub else _broker()
         servers = _list(call, 'describeServers', 'Servers')
         sessions = _list(call, 'describeSessions', 'Sessions')
         action, session_id = evaluate(servers, sessions, instance_id, event.get('consoleSessionId'), owner)
@@ -217,6 +250,9 @@ def lambda_handler(event, context):
         if session_id:
             result['consoleSessionId'] = session_id
         result['consoleSessionReady'] = action == 'ready'
+    except HubCheckUnavailable as error:
+        print(f'{instance_id} is in hub region {region}; console session check skipped: {error}')
+        return {**result, 'consoleSessionReady': True, 'consoleSessionCheckSkipped': True}
     except Exception as error:  # the state machine retries on the next check
         print(f'Console session check failed for {instance_id}: {type(error).__name__}: {error}')
 

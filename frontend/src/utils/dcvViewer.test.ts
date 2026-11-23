@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { createViewerSession, sessionNameFor, viewerSessionFromResponse } from './dcvViewer';
+import {
+  createViewerSession, postCreateSession, SESSION_START_RETRIES, sessionNameFor, viewerSessionFromResponse,
+} from './dcvViewer';
 import { setApiUrl } from './api';
 
 /** A sign-in credential shaped like the console's (header.payload.signature, unexpired). */
@@ -126,5 +128,63 @@ describe('createViewerSession', () => {
   it('fails without a signed-in user', async () => {
     sessionStorage.clear();
     await expect(createViewerSession('i-1', 'x')).rejects.toThrow('No current user');
+  });
+});
+
+describe('postCreateSession', () => {
+  const starting = () => new Response(JSON.stringify({
+    status: 'session-starting', sessionId: 's1', retryAfterSeconds: 5, error: 'The workstation session is still starting.',
+  }), { status: 409 });
+  const ready = () => new Response(JSON.stringify({
+    sessionId: 's1', connectionToken: 'tok', connectionUrl: 'https://dcv.example.com:8443/?authToken=tok#s1',
+  }), { status: 200 });
+
+  beforeEach(() => {
+    setApiUrl('https://api.example.com/prod');
+    sessionStorage.setItem('auth-token', SIGN_IN_JWT);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    sessionStorage.clear();
+  });
+
+  it('retries while the session is starting, then returns the session', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(starting())
+      .mockResolvedValueOnce(starting())
+      .mockResolvedValueOnce(ready());
+    const onStarting = vi.fn();
+    const wait = vi.fn().mockResolvedValue(undefined);
+
+    const s = await createViewerSession('i-0123456789abcdef0', 'Ana Li', { onStarting, wait });
+
+    expect(s.sessionId).toBe('s1');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(onStarting).toHaveBeenCalledTimes(2);
+    expect(wait).toHaveBeenCalledWith(5000);
+  });
+
+  it('stops after a few retries and surfaces the starting message', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => starting());
+    const wait = vi.fn().mockResolvedValue(undefined);
+
+    const response = await postCreateSession('i-1', 'x', { wait });
+
+    expect(response.status).toBe(409);
+    expect(fetchMock).toHaveBeenCalledTimes(SESSION_START_RETRIES + 1);
+    expect((await response.json()).error).toMatch(/still starting/);
+    await expect(createViewerSession('i-1', 'x', { wait })).rejects.toThrow(/still starting/);
+  });
+
+  it('does not retry other errors', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(JSON.stringify({ error: 'conflict' }), { status: 409 }));
+    const wait = vi.fn();
+
+    const response = await postCreateSession('i-1', 'x', { wait });
+
+    expect(response.status).toBe(409);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(wait).not.toHaveBeenCalled();
   });
 });
