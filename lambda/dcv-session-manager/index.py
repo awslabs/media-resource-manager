@@ -29,11 +29,22 @@ def get_workstation_region(server_id):
     
     return None
 
+def _primary_region():
+    """Region of the MRM tables (workstations, users, groups).
+
+    A regional hub's copy of this Lambda gets PRIMARY_REGION from the hub
+    template; the primary copy doesn't set it and uses its own Region.
+    """
+    return os.environ.get('PRIMARY_REGION') or os.environ.get('AWS_REGION')
+
 # Cache DynamoDB table references to avoid creating new clients on every invocation
 _dynamodb_tables = {}
 def _dynamodb_table(table_name):
+    """A table in the primary Region (see _primary_region)."""
     if table_name not in _dynamodb_tables:
-        _dynamodb_tables[table_name] = boto3.resource('dynamodb').Table(table_name)
+        _dynamodb_tables[table_name] = boto3.resource(
+            'dynamodb', region_name=_primary_region()
+        ).Table(table_name)
     return _dynamodb_tables[table_name]
 
 def invoke_regional_lambda(region, event):
@@ -76,8 +87,7 @@ def get_default_session_owner(server_id):
     try:
         # Check if server_id looks like an EC2 instance ID
         if server_id and server_id.startswith('i-'):
-            dynamodb = boto3.resource('dynamodb')
-            table = dynamodb.Table(os.environ.get('WORKSTATION_TABLE_NAME', 'workstation-instances'))
+            table = _dynamodb_table(os.environ.get('WORKSTATION_TABLE_NAME', 'workstation-instances'))
             response = table.get_item(Key={'instanceId': server_id})
             
             if 'Item' in response:
@@ -1143,8 +1153,7 @@ def lambda_handler(event, context):
                 
                 try:
                     # Initialize DynamoDB client
-                    current_region = os.environ.get('AWS_REGION', 'us-east-1')
-                    dynamodb = boto3.resource('dynamodb', region_name=current_region)
+                    dynamodb = boto3.resource('dynamodb', region_name=_primary_region())
                     table = dynamodb.Table(os.environ.get('WORKSTATION_TABLE_NAME', 'workstation-instances'))
                     users_table = dynamodb.Table(os.environ.get('USER_TABLE_NAME', 'users'))
                     groups_table = dynamodb.Table(os.environ.get('GROUPS_TABLE_NAME', 'groups'))
