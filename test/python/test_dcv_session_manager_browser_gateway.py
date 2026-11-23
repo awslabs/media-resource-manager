@@ -61,7 +61,7 @@ class SsmLookupTest(unittest.TestCase):
         self.assertEqual(mod.get_browser_gateway_url(ssm, 'MediaResourceManager'),
                          'https://d111111abcdef8.cloudfront.net')
         ssm.get_parameter.assert_called_once_with(
-            Name='/MediaResourceManager/DCV/ConnectionGateway/BrowserGatewayUrl')
+            Name='/MediaResourceManager/DCV/BrowserGatewayUrl')
 
     def test_missing_or_unreadable_parameter_means_none(self):
         ssm = mock.Mock()
@@ -89,6 +89,34 @@ class RegionalHubRecordTest(unittest.TestCase):
             endpoints = mod.get_regional_dcv_endpoints('us-west-2')
         self.assertEqual(endpoints['connection_gateway_endpoint'], 'gw-west.example.com')
         self.assertEqual(endpoints['browser_gateway_url'], 'https://d222222abcdef8.cloudfront.net')
+
+    def test_hub_created_before_the_field_falls_back_to_its_gateway_on_8443(self):
+        endpoints = self._endpoints_for({
+            'region': 'us-west-2',
+            'sessionManagerEndpoint': 'sm.example.com',
+            'connectionGatewayEndpoint': 'gw-west.example.com',
+        })
+        self.assertIsNone(endpoints['browser_gateway_url'])
+        self.assertEqual(
+            mod.browser_gateway_url_for(endpoints['connection_gateway_endpoint'], endpoints['browser_gateway_url']),
+            'https://gw-west.example.com:8443')
+
+    def test_direct_mode_value_is_kept(self):
+        self.assertEqual(mod.browser_gateway_url_for('gw-west.example.com', 'https://gw-west.example.com:8443'),
+                         'https://gw-west.example.com:8443')
+
+    def _endpoints_for(self, item):
+        table = mock.Mock()
+        table.get_item.return_value = {'Item': item}
+        regional_ssm = mock.Mock()
+        regional_ssm.get_parameter.return_value = {'Parameter': {'Value': 'v'}}
+        fake_boto3 = types.SimpleNamespace(
+            resource=lambda *_a, **_k: types.SimpleNamespace(Table=lambda _n: table),
+            client=lambda *_a, **_k: regional_ssm,
+        )
+        with mock.patch.object(mod, 'boto3', fake_boto3), \
+                mock.patch.dict(os.environ, {'AWS_REGION': 'us-east-1'}):
+            return mod.get_regional_dcv_endpoints('us-west-2')
 
 
 if __name__ == '__main__':

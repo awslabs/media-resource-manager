@@ -132,11 +132,13 @@ def get_default_session_owner(server_id):
         return 'Administrator', None
 
 # Where the browser viewer's gateway URL is published. The gateway stacks write
-# it: SSM in the primary Region and in each hub Region, and the hub record for
-# satellite Regions. It is the gateway's CloudFront domain when the browser
-# path is CloudFront. When it is missing (for example a hub not yet updated),
-# browsers connect to the gateway itself on 8443.
-BROWSER_GATEWAY_URL_PARAM = 'DCV/ConnectionGateway/BrowserGatewayUrl'
+# it: SSM /<ProductName>/DCV/BrowserGatewayUrl in the primary Region and in each
+# hub Region, and the hub record field browserGatewayUrl (from the hub stack
+# output BrowserGatewayUrl). The value is https://<id>.cloudfront.net, or
+# https://<gateway>:8443 when DcvBrowserPath=direct. When it is missing (hubs
+# created before it existed, until their next Update), browsers connect to the
+# gateway itself on 8443.
+BROWSER_GATEWAY_URL_PARAM = 'DCV/BrowserGatewayUrl'
 HUB_BROWSER_GATEWAY_URL_FIELD = 'browserGatewayUrl'
 
 
