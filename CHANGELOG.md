@@ -12,7 +12,7 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
-## [1.5.0] - TBD
+## [1.5.0] - 2026-11-23
 
 Browser sessions open in a viewer page in the MRM console and reach a
 token-only DCV Connection Gateway through CloudFront. The native DCV client
@@ -377,7 +377,7 @@ client prompt.
 Earlier releases are listed on the
 [GitHub releases page](https://github.com/awslabs/media-resource-manager/releases).
 
-[Unreleased]: https://github.com/awslabs/media-resource-manager/compare/v1.4.4...HEAD
+[Unreleased]: https://github.com/awslabs/media-resource-manager/compare/v1.5.0...HEAD
 [1.5.0]: https://github.com/awslabs/media-resource-manager/compare/v1.4.4...v1.5.0
 [1.4.4]: https://github.com/awslabs/media-resource-manager/compare/v1.4.3...v1.4.4
 [1.4.3]: https://github.com/awslabs/media-resource-manager/compare/v1.4.2...v1.4.3
