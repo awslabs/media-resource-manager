@@ -32,6 +32,9 @@ regexes = [
     # Publicly documented Microsoft Office 2024 Volume License GVLK
     # (published by Microsoft for KMS activation, not a secret)
     '''XJ2XN-FW8RK-P4HMP-DKDBV-GCVGB''',
+    # Fingerprint of the public AWS CLI signing key from the AWS CLI install
+    # guide, pinned in ssm-documents/linux-phase1-base-install.js (not a secret)
+    '''FB5DB77FD5C118B80511ADA8A6310ACC4672475C''',
 ]
 
 # Reference the .gitleaksignore file for specific ignores

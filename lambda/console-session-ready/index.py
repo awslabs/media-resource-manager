@@ -1,12 +1,21 @@
 # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Post-reboot console session check for new Windows workstations.
+"""Console session check for new Windows and Linux workstations.
 
 The Windows creation workflow reboots the instance at the end so the new host
 name takes effect. After the reboot the DCV server registers with the Session
 Manager again under a new server ID, and the first console session can take
 minutes to reach READY. Until it does, Connect fails (HTTP 400/504).
+
+On Linux the DCV server can register while the desktop (GDM/Xorg) never
+starts, so a console session is never created and Connect fails. The Linux
+workflow runs this check after the DCV server registers and fails the
+creation if no session becomes READY.
+
+SESSION_PLATFORM selects the session owner: 'Windows' (default) uses
+Administrator; 'Linux' uses the distro's default user, chosen the same way
+dcv-session-manager chooses it at Connect.
 
 Each invocation is one poll step of a Step Functions loop:
   * a READY console session for the default owner exists -> ready
@@ -31,6 +40,46 @@ SESSION_OWNER = 'Administrator'
 SESSION_NAME = 'Console'
 TEST_SESSION_PREFIX = 'test-readiness-'
 PENDING_STATES = {'CREATING'}
+RHEL_FAMILY = ('rocky', 'rhel', 'centos')
+
+
+def linux_session_owner(item, image=None):
+    """Default Linux session owner for a workstation record and its AMI.
+
+    Same rules, in the same order, as get_default_session_owner in
+    lambda/dcv-session-manager/index.py, so Connect finds the session this
+    check creates. Keep the two in step.
+    """
+    distro = str(item.get('linuxDistro', '')).lower()
+    if distro in RHEL_FAMILY:
+        return 'rocky'
+    if distro == 'ubuntu':
+        return 'ubuntu'
+    name = str(item.get('workstationName', '')).lower()
+    if any(d in name for d in RHEL_FAMILY):
+        return 'rocky'
+    if image:
+        ami_name = str(image.get('Name', '')).lower()
+        ami_desc = str(image.get('Description', '')).lower()
+        if 'rocky' in ami_name or 'rocky' in ami_desc or 'rhel' in ami_name or 'centos' in ami_name:
+            return 'rocky'
+    return 'ubuntu'
+
+
+def _session_owner(event):
+    """Owner of the console session to wait for, looked up once and then carried in the event."""
+    if event.get('consoleSessionOwner'):
+        return event['consoleSessionOwner']
+    if os.environ.get('SESSION_PLATFORM', 'Windows') != 'Linux':
+        return SESSION_OWNER
+    import boto3
+    table = boto3.resource('dynamodb').Table(os.environ['WORKSTATION_TABLE_NAME'])
+    item = table.get_item(Key={'instanceId': event['instanceId']}).get('Item', {})
+    image = None
+    if not item.get('linuxDistro') and item.get('amiId'):
+        images = boto3.client('ec2').describe_images(ImageIds=[item['amiId']]).get('Images', [])
+        image = images[0] if images else None
+    return linux_session_owner(item, image)
 
 
 def safe_urlopen(url_or_request, *args, **kwargs):
@@ -142,17 +191,19 @@ def lambda_handler(event, context):
         return {**result, 'consoleSessionReady': True, 'consoleSessionCheckSkipped': True}
 
     try:
+        owner = _session_owner(event)
+        result['consoleSessionOwner'] = owner
         call = _broker()
         servers = _list(call, 'describeServers', 'Servers')
         sessions = _list(call, 'describeSessions', 'Sessions')
-        action, session_id = evaluate(servers, sessions, instance_id, event.get('consoleSessionId'))
+        action, session_id = evaluate(servers, sessions, instance_id, event.get('consoleSessionId'), owner)
         print(f'Check {checks} for {instance_id}: {len(matching_servers(servers, instance_id))} server entries, '
-              f'action={action}, session={session_id}')
+              f'owner={owner}, action={action}, session={session_id}')
 
         if action == 'create':
             created = call('createSessions', [{
                 'Name': SESSION_NAME,
-                'Owner': SESSION_OWNER,
+                'Owner': owner,
                 'Type': 'CONSOLE',
                 'Requirements': f"server:Host.Aws.Ec2InstanceId = '{instance_id}'",
             }])
