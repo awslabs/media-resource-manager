@@ -14,7 +14,7 @@ import { Construct } from 'constructs';
 import { NagSuppressions } from 'cdk-nag';
 import { REGIONAL_HUB_LAMBDAS, regionalHubTemplateVersion } from './regional-hub-version';
 import {
-  boundaryPolicyName, cfnIamPolicyName, cfnPolicyName, cfnRoleName, regionalHubBoundaryDocument,
+  boundaryPolicyName, cfnEdgePolicyName, cfnIamPolicyName, cfnPolicyName, cfnRoleName, regionalHubBoundaryDocument,
   regionalHubCfnPolicyDocuments,
 } from './regional-hub-iam';
 
@@ -187,12 +187,19 @@ export class RegionalHubStack extends cdk.Stack {
       description: 'What CloudFormation may do in IAM when it deploys a regional hub stack',
       document: cfnPolicies.iam,
     });
+    const cfnEdgePolicy = new iam.ManagedPolicy(this, 'RegionalHubCfnEdgePolicy', {
+      managedPolicyName: cfnEdgePolicyName(props.pascalCaseName),
+      description: 'What CloudFormation may do in CloudFront, ACM and Route 53 when it deploys a regional hub stack',
+      document: cfnPolicies.edge,
+    });
     cfnServiceRole.addManagedPolicy(cfnPolicy);
     cfnServiceRole.addManagedPolicy(cfnIamPolicy);
-    NagSuppressions.addResourceSuppressions([cfnPolicy, cfnIamPolicy], [{
+    cfnServiceRole.addManagedPolicy(cfnEdgePolicy);
+    NagSuppressions.addResourceSuppressions([cfnPolicy, cfnIamPolicy, cfnEdgePolicy], [{
       id: 'AwsSolutions-IAM5',
       reason: 'Hubs can be in any region and their physical IDs are generated, so resources are scoped by ' +
-        'region wildcard and hub name prefix. EC2 networking actions do not support name scoping. ' +
+        'region wildcard and hub name prefix. EC2 networking actions do not support name scoping, and ' +
+        'CloudFront, ACM and Route 53 IDs are generated (Route 53 changes are limited by record name). ' +
         'test/regional-hub-iam.test.ts checks the policy against the hub template.',
     }]);
     NagSuppressions.addResourceSuppressions(boundary, [{

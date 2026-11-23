@@ -42,6 +42,8 @@ const KMS_KEY = `arn:aws:kms:${PRIMARY}:${ACCOUNT}:key/00000000-0000-0000-0000-0
 const HUB_LAMBDAS = ['dcvSessionManager', 'dcvReadinessCheckWindows', 'dcvReadinessCheckLinux', 'dcvReadinessCheckMacos',
   'dcvSessionCleanup', 'configureOntapCifs'];
 
+const HOSTED_ZONE = { id: 'Z0EXAMPLE0ZONE0ID', name: 'example.com' };
+
 const VARIANTS = [
   { productName: 'MediaResourceManager', acronym: 'MRM', region: 'us-west-2' },
   // Long enough that hub IAM names fall back to the acronym.
@@ -50,7 +52,7 @@ const VARIANTS = [
 
 // ---------- policy evaluator ----------
 
-type Ctx = Record<string, string>;
+type Ctx = Record<string, string | string[]>;
 type Statement = { Effect: string; Action?: string | string[]; NotAction?: string | string[];
   Resource: string | string[]; Condition?: Record<string, Record<string, string | string[]>> };
 
@@ -62,11 +64,18 @@ function conditionsHold(condition: Statement['Condition'], ctx: Ctx): boolean {
   for (const [operator, keys] of Object.entries(condition || {})) {
     for (const [key, expected] of Object.entries(keys)) {
       const actual = ctx[key];
-      const matches = actual !== undefined && list(expected).includes(actual);
+      const values = actual === undefined ? [] : list(actual);
+      const equals = (x: string) => list(expected).includes(x);
+      const like = (x: string) => list(expected).some(p => glob(p, x));
+      const matches = actual !== undefined && !Array.isArray(actual) && equals(actual);
       switch (operator) {
         case 'StringEquals': case 'ArnEquals': if (!matches) return false; break;
         case 'StringEqualsIfExists': if (actual !== undefined && !matches) return false; break;
         case 'StringNotEquals': if (matches) return false; break;
+        // A missing key makes ForAllValues true and ForAnyValue false, as in IAM.
+        case 'ForAllValues:StringEquals': if (!values.every(equals)) return false; break;
+        case 'ForAllValues:StringLike': if (!values.every(like)) return false; break;
+        case 'ForAnyValue:StringLike': if (!values.some(like)) return false; break;
         default: throw new Error(`evaluator doesn't support ${operator}`);
       }
     }
@@ -105,6 +114,13 @@ function generate(v: typeof VARIANTS[number]) {
     enableLinux: true,
     enableMacOS: true,
     lambdaAssets: Object.fromEntries(HUB_LAMBDAS.map(n => [n, { bucket: regionalBucket, key: `lambda/${n}/0.zip` }])),
+    // Gateway browser path (#103), largest variant: CloudFront with the HTTPS
+    // origin hop and a client allowlist. A generator without it ignores these.
+    gatewayBrowserPath: 'cloudfront',
+    originFacingPrefixListId: 'pl-0a1b2c3d4e5f60718',
+    hostedZone: HOSTED_ZONE,
+    allowedClientCidrs: ['203.0.113.0/24'],
+    allowedPrefixListIds: ['pl-0123456789abcdef0', 'pl-0fedcba9876543210'],
   });
 }
 
@@ -114,9 +130,11 @@ const NAME_PROPERTY: Record<string, string> = {
   'AWS::Events::Rule': 'Name', 'AWS::SSM::Document': 'Name', 'AWS::SSM::Parameter': 'Name',
   'AWS::ResourceGroups::Group': 'Name', 'AWS::ElasticLoadBalancingV2::LoadBalancer': 'Name',
   'AWS::ElasticLoadBalancingV2::TargetGroup': 'Name', 'AWS::AutoScaling::AutoScalingGroup': 'AutoScalingGroupName',
+  'AWS::CloudFront::Function': 'Name',
 };
 
-const REF_IS_ARN = new Set(['AWS::ElasticLoadBalancingV2::LoadBalancer', 'AWS::ElasticLoadBalancingV2::TargetGroup']);
+const REF_IS_ARN = new Set(['AWS::ElasticLoadBalancingV2::LoadBalancer', 'AWS::ElasticLoadBalancingV2::TargetGroup',
+  'AWS::CertificateManager::Certificate']);
 
 /** Resolves the intrinsic functions the hub template uses, with every condition true. */
 function resolver(template: any, v: typeof VARIANTS[number]) {
@@ -133,6 +151,14 @@ function resolver(template: any, v: typeof VARIANTS[number]) {
   };
   const arn = (id: string): string => {
     const r = template.Resources[id];
+    // Types whose ARN holds a generated ID, not a name.
+    switch (r.Type) {
+      case 'AWS::CloudFront::Distribution': return `arn:aws:cloudfront::${ACCOUNT}:distribution/E0EXAMPLE0DIST`;
+      case 'AWS::CloudFront::VpcOrigin': return `arn:aws:cloudfront::${ACCOUNT}:vpcorigin/vo_0EXAMPLE0ORIGIN`;
+      case 'AWS::CertificateManager::Certificate':
+        return `arn:aws:acm:${v.region}:${ACCOUNT}:certificate/00000000-0000-0000-0000-000000000001`;
+      default: break;
+    }
     const n = name(id);
     switch (r.Type) {
       case 'AWS::Lambda::Function': return `arn:aws:lambda:${v.region}:${ACCOUNT}:function:${n}`;
@@ -145,7 +171,8 @@ function resolver(template: any, v: typeof VARIANTS[number]) {
       case 'AWS::SSM::Parameter': return `arn:aws:ssm:${v.region}:${ACCOUNT}:parameter${n}`;
       case 'AWS::ResourceGroups::Group': return `arn:aws:resource-groups:${v.region}:${ACCOUNT}:group/${n}`;
       case 'AWS::ElasticLoadBalancingV2::LoadBalancer':
-        return `arn:aws:elasticloadbalancing:${v.region}:${ACCOUNT}:loadbalancer/net/${n}/0123456789abcdef`;
+        return `arn:aws:elasticloadbalancing:${v.region}:${ACCOUNT}:loadbalancer/${r.Properties.Type === 'application' ? 'app' : 'net'}/${n}/0123456789abcdef`;
+      case 'AWS::CloudFront::Function': return `arn:aws:cloudfront::${ACCOUNT}:function/${n}`;
       case 'AWS::ElasticLoadBalancingV2::TargetGroup':
         return `arn:aws:elasticloadbalancing:${v.region}:${ACCOUNT}:targetgroup/${n}/0123456789abcdef`;
       case 'AWS::AutoScaling::AutoScalingGroup':
@@ -169,7 +196,10 @@ function resolver(template: any, v: typeof VARIANTS[number]) {
     if (value && typeof value === 'object') {
       if ('Ref' in value) return ref(value.Ref);
       if ('Fn::Sub' in value) return sub(Array.isArray(value['Fn::Sub']) ? value['Fn::Sub'][0] : value['Fn::Sub']);
-      if ('Fn::GetAtt' in value) return arn(value['Fn::GetAtt'][0]);
+      if ('Fn::GetAtt' in value) {
+        const [id, attr] = value['Fn::GetAtt'];
+        return /(Arn|ARN)$/.test(attr) ? arn(id) : `${id}.${attr}`;
+      }
       if ('Fn::If' in value) return resolve(value['Fn::If'][1]);
       if ('Fn::Join' in value) return resolve(value['Fn::Join'][1]).join(value['Fn::Join'][0]);
       return Object.fromEntries(Object.entries(value).map(([k, x]) => [k, resolve(x)]));
@@ -222,7 +252,9 @@ function cfnCalls(template: any, v: typeof VARIANTS[number]): Record<string, (id
         'autoscaling:DeleteAutoScalingGroup', 'autoscaling:CreateOrUpdateTags', 'autoscaling:DeleteTags',
         'autoscaling:AttachLoadBalancerTargetGroups', 'autoscaling:DetachLoadBalancerTargetGroups',
         'autoscaling:SuspendProcesses', 'autoscaling:ResumeProcesses', 'autoscaling:PutLifecycleHook',
-        'autoscaling:DeleteLifecycleHook', 'autoscaling:EnableMetricsCollection', 'autoscaling:DisableMetricsCollection']),
+        'autoscaling:DeleteLifecycleHook', 'autoscaling:EnableMetricsCollection', 'autoscaling:DisableMetricsCollection',
+        // Rolling update (the gateway ASG's UpdatePolicy)
+        'autoscaling:SetDesiredCapacity', 'autoscaling:TerminateInstanceInAutoScalingGroup']),
       ...onAny(['autoscaling:DescribeAutoScalingGroups', 'autoscaling:DescribeScalingActivities', 'ec2:Describe*',
         'ec2:GetInstanceTypesFromInstanceRequirements', 'elasticloadbalancing:DescribeTargetGroups', 'ec2:RunInstances']),
       ['iam:CreateServiceLinkedRole', `arn:aws:iam::${ACCOUNT}:role/aws-service-role/autoscaling.amazonaws.com/x`,
@@ -332,6 +364,62 @@ function cfnCalls(template: any, v: typeof VARIANTS[number]): Record<string, (id
     'Custom::EmptyBucket': (_, r) => on(resolve(r.Properties.ServiceToken), ['lambda:InvokeFunction']),
     'Custom::LicenseConfiguration': (_, r) => on(resolve(r.Properties.ServiceToken), ['lambda:InvokeFunction']),
     'Custom::TlsCertReplication': (_, r) => on(resolve(r.Properties.ServiceToken), ['lambda:InvokeFunction']),
+    // ---- gateway browser path (#103) ----
+    'AWS::EC2::SecurityGroupEgress': () => onAny(['ec2:AuthorizeSecurityGroupEgress', 'ec2:RevokeSecurityGroupEgress',
+      'ec2:UpdateSecurityGroupRuleDescriptionsEgress', 'ec2:DescribeSecurityGroupRules']),
+    'AWS::CloudFront::VpcOrigin': id => [
+      ...on(arn(id), ['cloudfront:CreateVpcOrigin', 'cloudfront:GetVpcOrigin', 'cloudfront:UpdateVpcOrigin',
+        'cloudfront:DeleteVpcOrigin', 'cloudfront:TagResource', 'cloudfront:UntagResource', 'cloudfront:ListTagsForResource']),
+      ...onAny(['ec2:DescribeInstances', 'ec2:DescribeInternetGateways', 'elasticloadbalancing:DescribeLoadBalancers']),
+      ['iam:CreateServiceLinkedRole', `arn:aws:iam::${ACCOUNT}:role/aws-service-role/vpcorigin.cloudfront.amazonaws.com/x`,
+        { 'iam:AWSServiceName': 'vpcorigin.cloudfront.amazonaws.com' }],
+      ['sts:AssumeRole', `arn:aws:iam::${ACCOUNT}:role/aws-service-role/vpcorigin.cloudfront.amazonaws.com/AWSServiceRoleForCloudFrontVPCOrigin`],
+    ],
+    'AWS::CloudFront::Function': id => on(arn(id), ['cloudfront:CreateFunction', 'cloudfront:PublishFunction',
+      'cloudfront:DescribeFunction', 'cloudfront:GetFunction', 'cloudfront:UpdateFunction', 'cloudfront:DeleteFunction',
+      'cloudfront:TagResource', 'cloudfront:UntagResource', 'cloudfront:ListTagsForResource']),
+    'AWS::CloudFront::Distribution': (id, r) => {
+      const behavior = r.Properties.DistributionConfig.DefaultCacheBehavior;
+      const vpcOrigins = r.Properties.DistributionConfig.Origins
+        .filter((o: any) => o.VpcOriginConfig).map((o: any) => arn(o.VpcOriginConfig.VpcOriginId.Ref));
+      return [
+        ...on(arn(id), ['cloudfront:CreateDistribution', 'cloudfront:CreateDistributionWithTags', 'cloudfront:GetDistribution',
+          'cloudfront:GetDistributionConfig', 'cloudfront:UpdateDistribution', 'cloudfront:DeleteDistribution',
+          'cloudfront:TagResource', 'cloudfront:UntagResource', 'cloudfront:ListTagsForResource']),
+        ...vpcOrigins.flatMap((o: string) => on(o, ['cloudfront:GetVpcOrigin'])),
+        ['cloudfront:GetCachePolicy', `arn:aws:cloudfront::${ACCOUNT}:cache-policy/${behavior.CachePolicyId}`],
+        ['cloudfront:GetOriginRequestPolicy', `arn:aws:cloudfront::${ACCOUNT}:origin-request-policy/${behavior.OriginRequestPolicyId}`],
+        ['cloudfront:GetResponseHeadersPolicy',
+          `arn:aws:cloudfront::${ACCOUNT}:response-headers-policy/${behavior.ResponseHeadersPolicyId}`],
+      ];
+    },
+    'AWS::CertificateManager::Certificate': (id, r) => {
+      const domain = resolve(r.Properties.DomainName) as string;
+      const zone = resolve(r.Properties.DomainValidationOptions[0].HostedZoneId);
+      return [
+        ['acm:RequestCertificate', '*', { 'acm:DomainNames': [domain] }],
+        ...on(arn(id), ['acm:DescribeCertificate', 'acm:AddTagsToCertificate', 'acm:RemoveTagsFromCertificate',
+          'acm:ListTagsForCertificate', 'acm:UpdateCertificateOptions', 'acm:DeleteCertificate']),
+        // CloudFormation writes the DNS validation record.
+        ['route53:ChangeResourceRecordSets', `arn:aws:route53:::hostedzone/${zone}`, {
+          'route53:ChangeResourceRecordSetsNormalizedRecordNames': [`_0a1b2c3d.${domain}`.toLowerCase()],
+          'route53:ChangeResourceRecordSetsRecordTypes': ['CNAME'],
+        }],
+        ['route53:GetChange', 'arn:aws:route53:::change/C0EXAMPLE'],
+      ];
+    },
+    'AWS::Route53::RecordSet': (_, r) => {
+      const zone = `arn:aws:route53:::hostedzone/${resolve(r.Properties.HostedZoneId)}`;
+      return [
+        ['route53:ListHostedZones', '*'],
+        ...on(zone, ['route53:GetHostedZone', 'route53:ListResourceRecordSets']),
+        ['route53:ChangeResourceRecordSets', zone, {
+          'route53:ChangeResourceRecordSetsNormalizedRecordNames': [(resolve(r.Properties.Name) as string).toLowerCase().replace(/\.$/, '')],
+          'route53:ChangeResourceRecordSetsRecordTypes': [r.Properties.Type],
+        }],
+        ['route53:GetChange', 'arn:aws:route53:::change/C0EXAMPLE'],
+      ];
+    },
   };
 }
 
@@ -356,9 +444,10 @@ const MANAGED_POLICY_ACTIONS: Record<string, string[]> = {
     'ec2:DeleteNetworkInterface', 'ec2:AssignPrivateIpAddresses', 'ec2:UnassignPrivateIpAddresses'],
 };
 
-/** Region an AWS request for `resource` goes to. IAM is global (us-east-1). */
+/** Region an AWS request for `resource` goes to. */
 function requestRegion(action: string, resource: string, hubRegion: string): string {
-  if (action.startsWith('iam:')) return 'us-east-1';
+  // Global services' calls count as us-east-1.
+  if (/^(iam|cloudfront|route53|sts):/.test(action)) return 'us-east-1';
   return resource.split(':')[3] || hubRegion;
 }
 
@@ -369,8 +458,9 @@ describe.each(VARIANTS)('regional hub IAM ($productName, $region)', (v) => {
   const cfnParts = regionalHubCfnPolicyDocuments(names);
   const cfnServices = render(cfnParts.services);
   const cfnIam = render(cfnParts.iam);
+  const cfnEdge = render(cfnParts.edge);
   // The role has both policies, so they're evaluated together.
-  const cfn = { Statement: [...cfnServices.Statement, ...cfnIam.Statement] };
+  const cfn = { Statement: [...cfnServices.Statement, ...cfnIam.Statement, ...cfnEdge.Statement] };
   const boundary = render(regionalHubBoundaryDocument(names));
   const boundaryArn = `arn:aws:iam::${ACCOUNT}:policy/${v.productName}-RegionalHub-Boundary`;
   const template = generate(v);
@@ -494,8 +584,45 @@ describe.each(VARIANTS)('regional hub IAM ($productName, $region)', (v) => {
       { 'aws:RequestedRegion': PRIMARY })).toBe(false);
   });
 
+  it('limits the gateway browser path to hub names, outside the primary Region', () => {
+    const global = { 'aws:RequestedRegion': 'us-east-1' };
+    const zone = 'arn:aws:route53:::hostedzone/Z0EXAMPLE0ZONE0ID';
+    const records = (names: string[], types = ['A']) => ({ ...global,
+      'route53:ChangeResourceRecordSetsNormalizedRecordNames': names, 'route53:ChangeResourceRecordSetsRecordTypes': types });
+    const ac = v.acronym.toLowerCase();
+    const hubCode = v.region.replace(/-/g, '');
+    // CloudFront and Route 53 calls count as us-east-1, the primary Region here.
+    expect(allowed(cfn, 'cloudfront:CreateDistributionWithTags', `arn:aws:cloudfront::${ACCOUNT}:distribution/E1`, global)).toBe(true);
+    expect(allowed(cfn, 'cloudfront:UpdateFunction', `arn:aws:cloudfront::${ACCOUNT}:function/${ac}-gateway-cors-${hubCode}`, global)).toBe(true);
+    expect(allowed(cfn, 'cloudfront:UpdateFunction', `arn:aws:cloudfront::${ACCOUNT}:function/${ac}-gateway-cors-useast1`, global)).toBe(false);
+    expect(allowed(cfn, 'cloudfront:UpdateFunction', `arn:aws:cloudfront::${ACCOUNT}:function/other`, global)).toBe(false);
+    expect(allowed(cfn, 'route53:ChangeResourceRecordSets', zone,
+      records([`dcv-gateway-origin.${v.region}.example.com`]))).toBe(true);
+    expect(allowed(cfn, 'route53:ChangeResourceRecordSets', zone,
+      records([`_0a1b.dcv-gateway-origin.${v.region}.example.com`], ['CNAME']))).toBe(true);
+    expect(allowed(cfn, 'route53:ChangeResourceRecordSets', zone, records(['www.example.com']))).toBe(false);
+    expect(allowed(cfn, 'route53:ChangeResourceRecordSets', zone,
+      records([`dcv-gateway-origin.${v.region}.example.com`, 'www.example.com']))).toBe(false);
+    expect(allowed(cfn, 'route53:ChangeResourceRecordSets', zone,
+      records([`dcv-gateway-origin.${v.region}.example.com`], ['TXT']))).toBe(false);
+    expect(allowed(cfn, 'route53:ChangeResourceRecordSets', zone,
+      records([`dcv-gateway-origin.${PRIMARY}.example.com`]))).toBe(false);
+    expect(allowed(cfn, 'route53:ChangeResourceRecordSets', zone,
+      records([`_0a1b.dcv-gateway-origin.${PRIMARY}.example.com`], ['CNAME']))).toBe(false);
+    // ACM in the hub Region only, for the origin name only.
+    const hub = { 'aws:RequestedRegion': v.region };
+    expect(allowed(cfn, 'acm:RequestCertificate', '*', { ...hub, 'acm:DomainNames': [`dcv-gateway-origin.${v.region}.example.com`] })).toBe(true);
+    expect(allowed(cfn, 'acm:RequestCertificate', '*', { ...hub, 'acm:DomainNames': ['www.example.com'] })).toBe(false);
+    expect(allowed(cfn, 'acm:RequestCertificate', '*',
+      { 'aws:RequestedRegion': PRIMARY, 'acm:DomainNames': [`dcv-gateway-origin.${PRIMARY}.example.com`] })).toBe(false);
+    // sts:AssumeRole only on CloudFront's VPC origin service-linked role.
+    expect(allowed(cfn, 'sts:AssumeRole', `arn:aws:iam::${ACCOUNT}:role/cdk-hnb659fds-deploy-role-${ACCOUNT}-${PRIMARY}`, global)).toBe(false);
+    expect(allowed(cfn, 'iam:CreateServiceLinkedRole', `arn:aws:iam::${ACCOUNT}:role/aws-service-role/x`,
+      { 'iam:AWSServiceName': 'vpcorigin.cloudfront.amazonaws.com' })).toBe(true);
+  });
+
   it('fits each managed policy in the 6,144-character limit', () => {
-    for (const doc of [cfnServices, cfnIam, boundary]) expect(JSON.stringify(doc).length).toBeLessThanOrEqual(6144);
+    for (const doc of [cfnServices, cfnIam, cfnEdge, boundary]) expect(JSON.stringify(doc).length).toBeLessThanOrEqual(6144);
   });
 });
 
@@ -524,6 +651,7 @@ describe('RegionalHubStack CFN role', () => {
       ManagedPolicyArns: [
         { Ref: idOf('MediaResourceManager-RegionalHub-CFN-Policy') },
         { Ref: idOf('MediaResourceManager-RegionalHub-CFN-IAM-Policy') },
+        { Ref: idOf('MediaResourceManager-RegionalHub-CFN-Edge-Policy') },
       ],
     });
   });
