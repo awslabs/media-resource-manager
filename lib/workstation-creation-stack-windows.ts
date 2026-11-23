@@ -841,7 +841,7 @@ export class WindowsWorkstationCreationStack extends cdk.Stack {
       environment: {
         PASCAL_CASE_NAME: props.pascalCaseName,
       },
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/console-session-ready-windows')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/console-session-ready')),
       timeout: cdk.Duration.seconds(60),
       vpc: props.vpc,
       vpcSubnets: {
