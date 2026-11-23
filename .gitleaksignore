@@ -2,3 +2,6 @@
 # Historical: documentation showing PEM header format strings (not a real key).
 # File in current tree has this pattern removed; fingerprint pins the old commit.
 dbef311db90e2eeedf000977addc0b3a76a3cb30:markdown/CUSTOM_DOMAIN_SETUP.md:private-key:291
+# Historical: test-only placeholder password in the first #78 commit. The test
+# now uses an obviously fake value; fingerprint pins the old commit.
+e301578b475af2f2f2a851aea4306b3b3987553a:test/linux-phase1-password.test.ts:generic-api-key:20

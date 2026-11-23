@@ -222,10 +222,10 @@ every release has:
   makes it depend on every other stack. The `lambdaLogRetentionDays` context
   value sets the retention (`cdk.example.json` uses 365); `0` turns the stack
   off. A new stack needs no extra wiring: the dependency loop picks it up.
-- **cdk-nag does not run in the build yet**
+- **cdk-nag is opt-in and does not run in the build yet**
   ([#61](https://github.com/awslabs/media-resource-manager/issues/61)), so do
-  not rely on it to catch IAM or encryption mistakes. See
-  [CDK_NAG.md](CDK_NAG.md).
+  not rely on it to catch IAM or encryption mistakes. Run `npm run nag-report`
+  to review findings for your change. See [CDK_NAG.md](CDK_NAG.md).
 
 ## Regional Hubs
 
