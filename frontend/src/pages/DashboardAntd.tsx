@@ -39,7 +39,7 @@ import { useNavigate } from 'react-router-dom';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
-import { toDcvClientUrl } from '../utils/dcvClient';
+import { nativeClientUrl, openBrowserViewer, parseNativeClientTransport, DEFAULT_NATIVE_CLIENT_TRANSPORT } from '../utils/dcvClient';
 import { useDcvClientPrompt } from '../components/DcvClientPrompt';
 
 const { Title, Text } = Typography;
@@ -90,6 +90,7 @@ const DashboardAntd: React.FC<DashboardProps> = ({
   const [startingInstances, setStartingInstances] = useState<Set<string>>(new Set());
   const [stoppingInstances, setStoppingInstances] = useState<Set<string>>(new Set());
   const [browserSessionsEnabled, setBrowserSessionsEnabled] = useState(true);
+  const [nativeClientTransport, setNativeClientTransport] = useState(DEFAULT_NATIVE_CLIENT_TRANSPORT);
   const { connectWithClient, promptModal: dcvClientPromptModal } = useDcvClientPrompt(browserSessionsEnabled);
   const [isAutoRefreshing, setIsAutoRefreshing] = useState(false);
   const [actionAlert, setActionAlert] = useState<{type: 'success' | 'error', message: string} | null>(null);
@@ -171,6 +172,7 @@ const DashboardAntd: React.FC<DashboardProps> = ({
       if (response.ok) {
         const data = await response.json();
         setBrowserSessionsEnabled(data.browserSessionsEnabled !== false);
+        setNativeClientTransport(parseNativeClientTransport(data.nativeClientTransport));
         setKeepAliveEnabled(data.keepAliveEnabled === true);
         setKeepAliveMaxHours(data.keepAliveMaxHours || 24);
       }
@@ -341,6 +343,10 @@ const DashboardAntd: React.FC<DashboardProps> = ({
   };
 
   const handleConnect = async (instanceId: string, connectionType: 'client' | 'browser') => {
+    if (connectionType === 'browser') {
+      openBrowserViewer(instanceId);
+      return;
+    }
     setConnectingInstances(prev => new Set(prev).add(instanceId));
     
     try {
@@ -364,12 +370,7 @@ const DashboardAntd: React.FC<DashboardProps> = ({
       if (response.ok) {
         const data = await response.json();
         
-        if (connectionType === 'client') {
-          const baseUrl = data.quicConnectionUrl || data.connectionUrl;
-          await connectWithClient(toDcvClientUrl(baseUrl), data.connectionUrl);
-        } else {
-          window.open(data.connectionUrl, '_blank');
-        }
+        await connectWithClient(nativeClientUrl(data, nativeClientTransport), instanceId);
       } else {
         throw new Error('Failed to create DCV session');
       }

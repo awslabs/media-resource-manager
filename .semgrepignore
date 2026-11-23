@@ -3,6 +3,7 @@ node_modules/
 cdk.out/
 frontend/dist/
 frontend/node_modules/
+frontend/public/dcvsdk/
 __pycache__/
 *.min.js
 *.bundle.js

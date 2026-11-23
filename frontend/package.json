@@ -13,7 +13,8 @@
     "test:e2e:setup": "playwright test --project=setup --headed",
     "test:e2e": "playwright test --project=chromium",
     "test:e2e:headed": "playwright test --project=chromium --headed",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:local": "playwright test --config playwright.local.config.ts"
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.0",
@@ -22,11 +23,14 @@
     "@aws-sdk/credential-providers": "^3.995.0",
     "@aws-sdk/lib-storage": "^3.995.0",
     "@aws-sdk/s3-request-presigner": "^3.995.0",
+    "@babel/runtime": "^7.29.15",
     "@cloudscape-design/chat-components": "^1.0.94",
     "@cloudscape-design/code-view": "^3.0.78",
     "@cloudscape-design/components": "^3.0.0",
+    "@cloudscape-design/design-tokens": "^3.0.119",
     "@cloudscape-design/global-styles": "^1.0.0",
     "antd": "^6.3.0",
+    "prop-types": "^15.8.1",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "^7.18.3"

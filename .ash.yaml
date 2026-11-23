@@ -23,6 +23,10 @@ global_settings:
       reason: 'Frontend third-party dependencies'
     - path: 'frontend/dist'
       reason: 'Frontend build output — not source code'
+    - path: 'frontend/public/dcvsdk'
+      reason: 'Amazon DCV Web Client SDK, fetched and GPG-verified at build time by scripts/fetch-dcv-web-sdk.sh — third-party, not source code'
+    - path: 'frontend/public/connect'
+      reason: 'License files copied from the Amazon DCV Web Client SDK at build time'
     - path: '.ash'
       reason: 'ASH scan output directory'
     - path: '.gitleaks.toml'
@@ -69,6 +73,15 @@ global_settings:
     - rule_id: 'generic-api-key'
       path: 'ssm-documents/linux-phase1-base-install.js'
       reason: 'Fingerprint of the public AWS CLI signing key (AWS_CLI_KEY_FPR) matches the generic API key pattern — not a secret'
+
+    # scripts/fetch-dcv-web-sdk.sh pins the fingerprint of the public NICE GPG
+    # key and the SHA-256 of the Amazon DCV Web Client SDK archive it verifies.
+    - rule_id: 'generic-api-key'
+      path: 'scripts/fetch-dcv-web-sdk.sh'
+      reason: 'Fingerprint of the public NICE GPG signing key (NICE_KEY_FINGERPRINT) matches the generic API key pattern — not a secret'
+    - rule_id: 'SECRET-HEX-HIGH-ENTROPY-STRING'
+      path: 'scripts/fetch-dcv-web-sdk.sh'
+      reason: 'Public NICE GPG key fingerprint and the published SHA-256 of the Amazon DCV Web Client SDK archive — not secrets'
 
 # Documented semgrep/opengrep rule exclusions. Reasons are in
 # docs/SECURITY_SCANNING.md; keep the two lists and that document in step.

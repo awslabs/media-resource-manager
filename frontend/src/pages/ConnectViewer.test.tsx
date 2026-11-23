@@ -1,0 +1,165 @@
+// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * The /connect/:instanceId viewer page with the Web UI SDK mocked: it starts
+ * the session itself, passes the token straight to DCVViewer, keeps it out of
+ * the URL and storage, and shows the right error and retry UI.
+ */
+import React, { act } from 'react';
+import { createRoot, Root } from 'react-dom/client';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import type { DCVViewerProps } from 'dcv-ui';
+import { setApiUrl } from '../utils/api';
+
+vi.mock('dcv', () => ({ default: { LogLevel: { WARN: 3 } } }));
+
+const viewerProps: DCVViewerProps[] = [];
+vi.mock('dcv-ui', () => ({
+  DCVViewer: (props: DCVViewerProps) => {
+    viewerProps.push(props);
+    return <div data-testid="mock-viewer" />;
+  },
+}));
+
+import ConnectViewer, { DCV_SDK_BASE_URL } from './ConnectViewer';
+
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+const SIGN_IN_JWT = `h.${btoa(JSON.stringify({ exp: Math.floor(Date.now() / 1000) + 3600 }))}.s`;
+const DCV_TOKEN = 'dcv-connection-token-value';
+const LB_GATEWAY = 'https://mrm-gw-0123456789abcdef.elb.us-east-1.amazonaws.com';
+
+function sessionResponse(browserGatewayUrl?: string) {
+  return new Response(JSON.stringify({
+    sessionId: 'console',
+    connectionToken: DCV_TOKEN,
+    connectionUrl: `${LB_GATEWAY}:8443/?authToken=${DCV_TOKEN}#console`,
+    quicConnectionUrl: `${LB_GATEWAY}:8444/?authToken=${DCV_TOKEN}#console`,
+    ...(browserGatewayUrl ? { browserGatewayUrl } : {}),
+  }), { status: 200 });
+}
+
+describe('ConnectViewer', () => {
+  let container: HTMLDivElement;
+  let root: Root;
+  let fetchMock: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    viewerProps.length = 0;
+    setApiUrl('https://api.example.com/prod');
+    sessionStorage.setItem('auth-token', SIGN_IN_JWT);
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: (query: string) => ({
+        matches: false, media: query, onchange: null,
+        addListener: () => {}, removeListener: () => {},
+        addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+      }),
+    });
+    fetchMock = vi.spyOn(globalThis, 'fetch');
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+  });
+
+  afterEach(() => {
+    act(() => root.unmount());
+    container.remove();
+    vi.restoreAllMocks();
+    sessionStorage.clear();
+    localStorage.clear();
+  });
+
+  async function render() {
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={['/connect/i-0123456789abcdef0']}>
+          <Routes>
+            <Route path="/connect/:instanceId" element={<ConnectViewer user={{ firstName: 'Ana', lastName: 'Li' }} />} />
+          </Routes>
+        </MemoryRouter>,
+      );
+    });
+  }
+
+  const lastViewer = () => viewerProps[viewerProps.length - 1];
+
+  it('starts the session and hands the token straight to DCVViewer through CloudFront', async () => {
+    fetchMock.mockResolvedValue(sessionResponse('https://d111111abcdef8.cloudfront.net'));
+    await render();
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string);
+    expect(body).toMatchObject({ action: 'create-session', serverId: 'i-0123456789abcdef0', sessionName: 'Ana Li' });
+
+    expect(container.querySelector('[data-testid="mock-viewer"]')).not.toBeNull();
+    expect(lastViewer().dcv).toMatchObject({
+      sessionId: 'console',
+      authToken: DCV_TOKEN,
+      serverUrl: 'https://d111111abcdef8.cloudfront.net',
+      baseUrl: DCV_SDK_BASE_URL,
+      logLevel: 3,
+    });
+  });
+
+  it('keeps the DCV token out of the URL and browser storage', async () => {
+    fetchMock.mockResolvedValue(sessionResponse('https://d111111abcdef8.cloudfront.net'));
+    await render();
+    expect(window.location.href).not.toContain(DCV_TOKEN);
+    const stored = [
+      ...Object.keys(sessionStorage).map((k) => sessionStorage.getItem(k)),
+      ...Object.keys(localStorage).map((k) => localStorage.getItem(k)),
+    ].join('\n');
+    expect(stored).not.toContain(DCV_TOKEN);
+  });
+
+  it('shows a gateway error with Retry and the trust-the-gateway prompt in direct mode', async () => {
+    fetchMock.mockResolvedValue(sessionResponse());
+    await render();
+    expect(lastViewer().dcv.serverUrl).toBe(`${LB_GATEWAY}:8443`);
+
+    await act(async () => lastViewer().dcv.onDisconnect!({ code: 5, message: 'Could not connect' }));
+    expect(container.textContent).toContain("Couldn't reach the workstation's gateway");
+    expect(container.textContent).toContain('Could not connect');
+    const trust = container.querySelector('[data-testid="trust-gateway"] a') as HTMLAnchorElement;
+    expect(trust).not.toBeNull();
+    expect(trust.getAttribute('href')).toBe(`${LB_GATEWAY}:8443/`);
+    expect(trust.getAttribute('rel')).toBe('noopener noreferrer');
+    expect(container.querySelector('[data-testid="mock-viewer"]')).toBeNull();
+
+    // Retry starts a new session (a fresh token).
+    fetchMock.mockResolvedValue(sessionResponse());
+    const retry = Array.from(container.querySelectorAll('button')).find((b) => b.textContent?.trim() === 'Retry')!;
+    await act(async () => retry.click());
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(container.querySelector('[data-testid="mock-viewer"]')).not.toBeNull();
+  });
+
+  it('does not show the trust prompt when connecting through CloudFront', async () => {
+    fetchMock.mockResolvedValue(sessionResponse('https://d111111abcdef8.cloudfront.net'));
+    await render();
+    await act(async () => lastViewer().dcv.onDisconnect!({ message: 'Could not connect' }));
+    expect(container.textContent).toContain("Couldn't reach the workstation's gateway");
+    expect(container.querySelector('[data-testid="trust-gateway"]')).toBeNull();
+  });
+
+  it('shows Reconnect after an established session closes', async () => {
+    fetchMock.mockResolvedValue(sessionResponse('https://d111111abcdef8.cloudfront.net'));
+    await render();
+    await act(async () => lastViewer().dcv.onConnectionEstablished!({}));
+    await act(async () => lastViewer().dcv.onDisconnect!({ message: 'Closed by the server' }));
+    expect(container.textContent).toContain('The session was disconnected');
+    expect(container.textContent).toContain('Closed by the server');
+    expect(Array.from(container.querySelectorAll('button')).some((b) => b.textContent?.trim() === 'Reconnect')).toBe(true);
+  });
+
+  it('shows the API error and Retry when the session cannot start', async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ error: 'Workstation is not running' }), { status: 400 }));
+    await render();
+    expect(container.textContent).toContain("Couldn't start the session");
+    expect(container.textContent).toContain('Workstation is not running');
+    expect(container.querySelector('[data-testid="mock-viewer"]')).toBeNull();
+  });
+});

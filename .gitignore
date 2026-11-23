@@ -24,6 +24,10 @@ cdk.json
 frontend/dist
 frontend/node_modules
 frontend/public/logo.png
+# Amazon DCV Web Client SDK, fetched and verified at build time by
+# scripts/fetch-dcv-web-sdk.sh (licensed under the Amazon DCV EULA)
+frontend/public/dcvsdk/
+frontend/public/connect/
 
 # Environment variables
 .env

@@ -19,6 +19,10 @@ const directoryService = new DirectoryServiceClient({});
 const directoryServiceData = new DirectoryServiceDataClient({});
 const cognitoClient = new CognitoIdentityProviderClient({});
 
+// How the native DCV client reaches the gateway (#47): QUIC over UDP, or
+// WebSocket over TCP for networks that block UDP.
+const NATIVE_CLIENT_TRANSPORTS = ['quic', 'websocket'];
+
 exports.handler = async (event) => {
   const { httpMethod, path, body } = event;
   
@@ -997,6 +1001,21 @@ exports.handler = async (event) => {
         settings.browserSessionsEnabled = true; // Default to enabled
       }
       
+      // Native client transport (available to all users: every Connect button needs it)
+      try {
+        const transportParam = await ssm.send(new GetParameterCommand({
+          Name: `/${pascalCaseName}/DCV/NativeClientTransport`
+        }));
+        settings.nativeClientTransport = NATIVE_CLIENT_TRANSPORTS.includes(transportParam.Parameter.Value)
+          ? transportParam.Parameter.Value
+          : 'quic';
+      } catch (error) {
+        if (error.name !== 'ParameterNotFound') {
+          console.log('Error getting native-client-transport parameter:', error);
+        }
+        settings.nativeClientTransport = 'quic'; // Default: QUIC, as before this setting existed
+      }
+      
       // Get Keep Alive settings (available to all users to know if feature is enabled)
       try {
         const keepAliveEnabledParam = await ssm.send(new GetParameterCommand({
@@ -1091,7 +1110,16 @@ exports.handler = async (event) => {
     }
 
     try {
-      const { disconnectedDuration, browserSessionsEnabled, keepAliveEnabled, keepAliveMaxHours, autoStartEnabled, autoStartLeadTimeMinutes } = data;
+      const { disconnectedDuration, browserSessionsEnabled, nativeClientTransport, keepAliveEnabled, keepAliveMaxHours, autoStartEnabled, autoStartLeadTimeMinutes } = data;
+      
+      if (nativeClientTransport !== null && nativeClientTransport !== undefined
+          && !NATIVE_CLIENT_TRANSPORTS.includes(nativeClientTransport)) {
+        return {
+          statusCode: 400,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          body: JSON.stringify({ error: `nativeClientTransport must be one of: ${NATIVE_CLIENT_TRANSPORTS.join(', ')}` })
+        };
+      }
       
       // Get pascal case name from environment variable
       const pascalCaseName = process.env.PASCAL_CASE_NAME || 'MediaResourceManager';
@@ -1115,6 +1143,17 @@ exports.handler = async (event) => {
           Type: 'String',
           Overwrite: true,
           Description: 'Whether browser-based DCV sessions are enabled for users'
+        }));
+      }
+      
+      // Save native client transport setting (validated above)
+      if (nativeClientTransport !== null && nativeClientTransport !== undefined) {
+        await ssm.send(new PutParameterCommand({
+          Name: `/${pascalCaseName}/DCV/NativeClientTransport`,
+          Value: nativeClientTransport,
+          Type: 'String',
+          Overwrite: true,
+          Description: 'How the native DCV client connects: quic (UDP) or websocket (TCP)'
         }));
       }
       

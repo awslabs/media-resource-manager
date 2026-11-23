@@ -41,6 +41,85 @@ export function toDcvClientUrl(connectionUrl: string): string {
   return connectionUrl.replace(/^https:\/\//, 'dcv://');
 }
 
+/*
+ * Shared connect-URL helper. Every Connect button in the console goes
+ * through `nativeClientUrl` (native client) or `openBrowserViewer` (browser).
+ */
+
+/**
+ * How the native client reaches the Connection Gateway: `quic` (UDP, the
+ * `quicConnectionUrl` port) or `websocket` (TCP, the `connectionUrl` port), for
+ * networks that block UDP. Admins choose it in Settings
+ * (`nativeClientTransport` in GET /settings).
+ */
+export type NativeClientTransport = 'quic' | 'websocket';
+
+export const DEFAULT_NATIVE_CLIENT_TRANSPORT: NativeClientTransport = 'quic';
+
+/** Read the transport from a GET /settings response; anything unknown means QUIC. */
+export function parseNativeClientTransport(value: unknown): NativeClientTransport {
+  return value === 'websocket' ? 'websocket' : DEFAULT_NATIVE_CLIENT_TRANSPORT;
+}
+
+/** The URLs that POST /dcv `create-session` returns for the native client. */
+export interface NativeClientUrls {
+  connectionUrl?: string;
+  quicConnectionUrl?: string;
+}
+
+/**
+ * The `dcv://` link that opens this session in the native client. The Amazon
+ * DCV clients read two optional query parameters from it:
+ * - `webPort`: the gateway's TCP (WebSocket/HTTPS) port. Without it the client
+ *   assumes the URL's port, which for QUIC links is UDP-only on the gateway.
+ *   Clients use it for HTTPS resources, and some retry a failed QUIC connection
+ *   over WebSocket on it.
+ * - `transport=websocket`: connect over TCP and skip QUIC entirely (#47). This
+ *   is the reliable choice when UDP is blocked.
+ */
+export function nativeClientUrl(
+  session: NativeClientUrls,
+  transport: NativeClientTransport = DEFAULT_NATIVE_CLIENT_TRANSPORT,
+): string {
+  const { connectionUrl, quicConnectionUrl } = session;
+  if (transport === 'websocket' || !quicConnectionUrl) {
+    if (!connectionUrl) throw new Error('The session response has no connection URL');
+    const url = toDcvClientUrl(connectionUrl);
+    return transport === 'websocket' ? withQueryParam(url, 'transport', 'websocket') : url;
+  }
+  const webPort = connectionUrl ? new URL(connectionUrl).port : '';
+  const url = toDcvClientUrl(quicConnectionUrl);
+  return webPort ? withQueryParam(url, 'webPort', webPort) : url;
+}
+
+/** Add `name=value` to a URL's query, leaving the rest (the token) exactly as it is. */
+function withQueryParam(url: string, name: string, value: string): string {
+  const hashAt = url.indexOf('#');
+  const base = hashAt === -1 ? url : url.slice(0, hashAt);
+  const fragment = hashAt === -1 ? '' : url.slice(hashAt);
+  const separator = base.includes('?') ? (base.endsWith('?') ? '' : '&') : '?';
+  return `${base}${separator}${encodeURIComponent(name)}=${encodeURIComponent(value)}${fragment}`;
+}
+
+/** Console path of the in-browser viewer for a workstation. */
+export function browserViewerPath(instanceId: string): string {
+  return `/connect/${encodeURIComponent(instanceId)}`;
+}
+
+/**
+ * Open the in-browser viewer in a new tab. Call it straight from the click
+ * handler, before any `await`, so popup blockers allow it. The viewer page
+ * starts the DCV session itself.
+ *
+ * No `noopener`: the page is this console's own origin, and keeping the opener
+ * makes the browser copy this tab's sessionStorage, where the console keeps
+ * its sign-in, into the new tab (HTML "copy session storage" on window.open).
+ * A tab opened another way shows the sign-in page first.
+ */
+export function openBrowserViewer(instanceId: string): void {
+  window.open(browserViewerPath(instanceId), '_blank');
+}
+
 export interface LaunchDcvClientOptions {
   timeoutMs?: number;
   method?: DcvLaunchMethod;

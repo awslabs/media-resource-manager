@@ -131,6 +131,45 @@ def get_default_session_owner(server_id):
         print(f"Error getting workstation platform: {e}")
         return 'Administrator', None
 
+# Where the browser viewer's gateway URL is published. The gateway stacks write
+# it: SSM in the primary Region and in each hub Region, and the hub record for
+# satellite Regions. It is the gateway's CloudFront domain when the browser
+# path is CloudFront. When it is missing (for example a hub not yet updated),
+# browsers connect to the gateway itself on 8443.
+BROWSER_GATEWAY_URL_PARAM = 'DCV/ConnectionGateway/BrowserGatewayUrl'
+HUB_BROWSER_GATEWAY_URL_FIELD = 'browserGatewayUrl'
+
+
+def normalize_browser_gateway_url(value):
+    """Return the https origin for a domain or URL, or None if it isn't one."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    candidate = value.strip()
+    if '://' not in candidate:
+        candidate = f'https://{candidate}'
+    parsed = urllib.parse.urlsplit(candidate)
+    if parsed.scheme != 'https' or not parsed.hostname:
+        return None
+    return f'https://{parsed.netloc}'
+
+
+def get_browser_gateway_url(ssm_client, pascal_case_name):
+    """Read the browser gateway URL from SSM; None when unset or unreadable."""
+    try:
+        value = ssm_client.get_parameter(
+            Name=f'/{pascal_case_name}/{BROWSER_GATEWAY_URL_PARAM}'
+        )['Parameter']['Value']
+    except Exception as e:  # ParameterNotFound on installs that predate it
+        print(f"No browser gateway URL in SSM ({type(e).__name__}); using the gateway directly")
+        return None
+    return normalize_browser_gateway_url(value)
+
+
+def browser_gateway_url_for(gateway_endpoint, published_url):
+    """The origin a browser connects to: the published URL, else the gateway on 8443."""
+    return normalize_browser_gateway_url(published_url) or f'https://{gateway_endpoint}:8443'
+
+
 def get_regional_dcv_endpoints(region):
     """Get DCV endpoints for a satellite region from regional hub config and regional SSM."""
     if not region or region == os.environ.get('AWS_REGION'):
@@ -156,6 +195,7 @@ def get_regional_dcv_endpoints(region):
             return {
                 'session_manager_endpoint': session_manager_endpoint,
                 'connection_gateway_endpoint': connection_gateway_endpoint,
+                'browser_gateway_url': hub.get(HUB_BROWSER_GATEWAY_URL_FIELD),
                 'client_id': client_id,
                 'client_password': client_password
             }
@@ -535,10 +575,12 @@ def lambda_handler(event, context):
                 
                 # Get regional connection gateway if workstation is in a satellite region
                 regional_connection_gateway = None
+                regional_browser_gateway_url = None
                 if workstation_region and workstation_region != os.environ.get('AWS_REGION'):
                     regional_endpoints = get_regional_dcv_endpoints(workstation_region)
                     if regional_endpoints and regional_endpoints.get('connection_gateway_endpoint'):
                         regional_connection_gateway = regional_endpoints['connection_gateway_endpoint']
+                        regional_browser_gateway_url = regional_endpoints.get('browser_gateway_url')
                         print(f"Using regional connection gateway for {workstation_region}: {regional_connection_gateway}")
                 
                 # Get the server's reported session count to validate session existence
@@ -784,7 +826,15 @@ def lambda_handler(event, context):
                 # QUIC URL for native DCV client (UDP port 8444) - better streaming performance
                 quic_url = f"https://{gateway_endpoint}:8444/?authToken={connection_token}#{created_session_id}"
                 
-                print(f"DCV URL constructed using gateway: {gateway_endpoint}")
+                # Origin for the console's in-browser viewer (/connect/:id).
+                # connectionUrl and quicConnectionUrl stay for the native client.
+                if regional_connection_gateway:
+                    published_browser_url = regional_browser_gateway_url
+                else:
+                    published_browser_url = get_browser_gateway_url(ssm, pascal_case_name)
+                browser_gateway_url = browser_gateway_url_for(gateway_endpoint, published_browser_url)
+                
+                print(f"DCV URL constructed using gateway: {gateway_endpoint}; browser gateway: {browser_gateway_url}")
                 
                 return {
                     'statusCode': 200,
@@ -793,6 +843,7 @@ def lambda_handler(event, context):
                         'sessionId': created_session_id,
                         'connectionUrl': dcv_url,
                         'quicConnectionUrl': quic_url,
+                        'browserGatewayUrl': browser_gateway_url,
                         'connectionToken': connection_token
                     })
                 }

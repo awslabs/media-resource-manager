@@ -106,11 +106,21 @@ Once your workstation is running:
 - Works on any modern browser (Chrome, Firefox, Edge, Safari)
 - Good for quick access or when DCV client isn't installed
 - May have slightly higher latency than native client
+- Opens the console's viewer page (`/connect/<workstation>`) in a new tab. The
+  page starts the session itself and keeps the session token in memory, so
+  copying the page's address to another browser doesn't share the session.
+- If the gateway uses its default self-signed certificate and the browser
+  can't connect, the page offers a link to open the gateway once and accept
+  the certificate, then **Retry**. A custom DCV domain with a trusted
+  certificate avoids this (see `docs/CUSTOM_DOMAIN_SETUP.md`).
 
 **DCV Client Connection:**
-- Download from [NICE DCV Client Downloads](https://download.nice-dcv.com/)
+- Download from [Amazon DCV Client Downloads](https://www.amazondcv.com/)
 - Better performance for graphics-intensive work
 - Supports features like USB redirection and multi-monitor
+- Connects with QUIC (UDP) by default. If a firewall or security agent blocks
+  UDP, an administrator can set **Settings → Session Management → Native client
+  protocol** to **TCP (WebSocket)**.
 
 ### Stopping a Workstation
 
