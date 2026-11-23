@@ -1,14 +1,23 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 /**
- * Unit tests for how the FSx for ONTAP template (lambda/generate-fsx-template)
- * handles the ONTAP admin credentials: the stack generates them in Secrets
- * Manager, and neither the template nor the Lambda's return value (which
+ * Unit tests for how lambda/generate-fsx-template handles credentials:
+ * - FSx for ONTAP: the stack generates the admin credentials in Secrets
+ *   Manager.
+ * - FSx for Windows: the stack reads the AD service-account credentials from
+ *   their secret through dynamic references.
+ * In both cases neither the template nor the Lambda's return value (which
  * Step Functions records) carries a password.
  */
-// Fixed fake AD service-account credentials for the FSx for Windows path
-// (getAdCredentials reads them from SSM + Secrets Manager).
-const FAKE_AD_PASSWORD = 'not-a-real-ad-value-0000';
+// Fixed fake AD service-account credentials, returned by the Secrets Manager
+// mock if anything reads the AD secret.
+const FAKE_AD_USERNAME = 'svc-fsx-unit-test';
+const FAKE_AD_PASSWORD = 'not-a-real-ad-value-0000'; // pragma: allowlist secret
+const AD_SECRET_ARN = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:unit-test-ad'; // pragma: allowlist secret
+const LEGACY_AD_SECRET_NAME = '/MediaResourceManager/Identity/ResourceAdminActiveDirectoryLoginCredentials';
+
+// When false, the AdServiceAccountSecretArn SSM parameter doesn't exist.
+let mockHasAdSecretArnParameter = true;
 
 // The Lambda runtime provides this client. The repo doesn't install it.
 jest.mock('@aws-sdk/client-secrets-manager', () => ({
@@ -20,7 +29,7 @@ jest.mock('@aws-sdk/client-secrets-manager', () => ({
 jest.mock('@aws-sdk/client-ssm', () => ({
   SSMClient: jest.fn(() => ({
     send: jest.fn(async (command: { input: { Name: string } }) => {
-      if (command.input.Name.endsWith('/Identity/AdServiceAccountSecretArn')) {
+      if (mockHasAdSecretArnParameter && command.input.Name.endsWith('/Identity/AdServiceAccountSecretArn')) {
         return { Parameter: { Value: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:unit-test-ad' } };
       }
       throw Object.assign(new Error(`unexpected parameter ${command.input.Name}`), { name: 'ParameterNotFound' });
@@ -31,10 +40,43 @@ jest.mock('@aws-sdk/client-ssm', () => ({
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { handler } = require('../lambda/generate-fsx-template/index.js');
-// Output of origin/main's handler (before this change) for WINDOWS_EVENTS,
-// captured with the same mocks. The Windows path must not change.
+// Output of the handler before the AD secret moved into dynamic references,
+// for WINDOWS_EVENTS, captured with the same mocks. Only the AD credentials
+// may differ from it (see withAdSecretReference).
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const WINDOWS_FIXTURE = require('./fixtures/generate-fsx-template-windows.json');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { GetSecretValueCommand } = jest.requireMock('@aws-sdk/client-secrets-manager');
+
+type StackParameter = { ParameterKey: string; ParameterValue: string };
+
+const AD_USERNAME_REF = { 'Fn::Sub': '{{resolve:secretsmanager:${ADSecretId}:SecretString:username}}' };
+const AD_PASSWORD_REF = { 'Fn::Sub': '{{resolve:secretsmanager:${ADSecretId}:SecretString:password}}' };
+
+// The fixture with ADUsername/ADPassword replaced by the ADSecretId parameter
+// and the dynamic references that read the secret.
+function withAdSecretReference(fixture: { template: any; parameters: StackParameter[] }) {
+  const expected = JSON.parse(JSON.stringify(fixture));
+  delete expected.template.Parameters.ADUsername;
+  delete expected.template.Parameters.ADPassword;
+  expected.template.Parameters.ADSecretId = {
+    Type: 'String',
+    Default: AD_SECRET_ARN,
+    Description: 'Name or ARN of the Secrets Manager secret that holds the Active Directory service account username and password',
+  };
+  const ad = expected.template.Resources.FsxFileSystem.Properties.WindowsConfiguration.SelfManagedActiveDirectoryConfiguration;
+  ad.UserName = AD_USERNAME_REF;
+  ad.Password = AD_PASSWORD_REF;
+  expected.parameters = expected.parameters
+    .filter((p: StackParameter) => p.ParameterKey !== 'ADUsername' && p.ParameterKey !== 'ADPassword')
+    .concat([{ ParameterKey: 'ADSecretId', ParameterValue: AD_SECRET_ARN }]);
+  return expected;
+}
+
+function loggedLines(): string[] {
+  return (console.log as jest.Mock).mock.calls.concat((console.warn as jest.Mock).mock.calls)
+    .map(args => args.map((a: unknown) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
+}
 
 const WINDOWS_EVENTS = {
   multiAzSsd: {
@@ -79,7 +121,10 @@ describe('generate-fsx-template ONTAP credentials', () => {
   beforeEach(() => {
     process.env.PRODUCT_NAME = 'MediaResourceManager';
     process.env.ACRONYM = 'MRM';
+    mockHasAdSecretArnParameter = true;
+    GetSecretValueCommand.mockClear();
     jest.spyOn(console, 'log').mockImplementation(() => undefined);
+    jest.spyOn(console, 'warn').mockImplementation(() => undefined);
   });
   afterEach(() => {
     process.env = { ...env };
@@ -134,17 +179,57 @@ describe('generate-fsx-template ONTAP credentials', () => {
     });
   });
 
-  it('leaves the FSx for Windows output unchanged', async () => {
+  it('changes only the AD credentials in the FSx for Windows output', async () => {
     for (const [key, event] of Object.entries(WINDOWS_EVENTS)) {
       const result = await handler(event);
       expect({ key, template: JSON.parse(result.template), parameters: result.parameters })
-        .toEqual({ key, ...WINDOWS_FIXTURE[key] });
+        .toEqual({ key, ...withAdSecretReference(WINDOWS_FIXTURE[key]) });
     }
+  });
+
+  it('puts no AD username or password in the FSx for Windows template or return value', async () => {
+    for (const event of Object.values(WINDOWS_EVENTS)) {
+      const result = await handler(event);
+      const output = JSON.stringify(result);
+      expect(output).not.toContain(FAKE_AD_PASSWORD);
+      expect(output).not.toContain(FAKE_AD_USERNAME);
+      const template = JSON.parse(result.template);
+      const parameterKeys = result.parameters.map((p: StackParameter) => p.ParameterKey);
+      for (const key of ['ADUsername', 'ADPassword']) {
+        expect(Object.keys(template.Parameters)).not.toContain(key);
+        expect(parameterKeys).not.toContain(key);
+      }
+    }
+  });
+
+  it('reads the AD username and password through dynamic references to the AD secret', async () => {
+    const result = await handler(WINDOWS_EVENTS.multiAzSsd);
+    const template = JSON.parse(result.template);
+    const ad = template.Resources.FsxFileSystem.Properties.WindowsConfiguration.SelfManagedActiveDirectoryConfiguration;
+    expect(ad.UserName).toEqual(AD_USERNAME_REF);
+    expect(ad.Password).toEqual(AD_PASSWORD_REF);
+    expect(template.Parameters.ADSecretId.Default).toBe(AD_SECRET_ARN);
+    expect(template.Parameters.ADSecretId.NoEcho).toBeUndefined();
+    expect(result.parameters).toContainEqual({ ParameterKey: 'ADSecretId', ParameterValue: AD_SECRET_ARN });
+  });
+
+  it('uses the legacy AD secret name when the AdServiceAccountSecretArn parameter is missing', async () => {
+    mockHasAdSecretArnParameter = false;
+    const result = await handler(WINDOWS_EVENTS.singleAzHdd);
+    expect(JSON.parse(result.template).Parameters.ADSecretId.Default).toBe(LEGACY_AD_SECRET_NAME);
+    expect(result.parameters).toContainEqual({ ParameterKey: 'ADSecretId', ParameterValue: LEGACY_AD_SECRET_NAME });
+  });
+
+  it('never reads the AD secret value', async () => {
+    for (const event of Object.values(WINDOWS_EVENTS)) await handler(event);
+    mockHasAdSecretArnParameter = false;
+    await handler(WINDOWS_EVENTS.multiAzSsd);
+    expect(GetSecretValueCommand).not.toHaveBeenCalled();
   });
 
   it('never logs the AD password on the FSx for Windows path', async () => {
     for (const event of Object.values(WINDOWS_EVENTS)) await handler(event);
-    const logged = (console.log as jest.Mock).mock.calls.map(args => args.map((a: unknown) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
+    const logged = loggedLines();
     expect(logged.length).toBeGreaterThan(0);
     expect(logged.filter(line => line.includes(FAKE_AD_PASSWORD))).toEqual([]);
   });
