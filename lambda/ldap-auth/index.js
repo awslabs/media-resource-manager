@@ -297,7 +297,6 @@ async function authenticateWithLDAP(username, password) {
                     console.log('Final admin status:', isAdmin);
                   } catch (entryError) {
                     console.log('Error processing entry:', entryError.message);
-                    console.log('Entry structure:', JSON.stringify(entry, null, 2));
                   }
                 });
                 
@@ -329,23 +328,54 @@ async function authenticateWithLDAP(username, password) {
           });
         }
         
-        exports.handler = async (event) => {
-          const rawBody = JSON.parse(event.body || '{}');
-          // Normalise UPN ("user@domain.tld") and down-level ("DOMAIN\user")
-          // forms into a bare sAMAccountName. The LDAP search filter below
-          // binds on sAMAccountName only, so the non-canonical forms would
-          // otherwise silently fail to match despite being valid AD
-          // identifiers. Frontend also strips defensively; doing it here
-          // covers direct API callers (curl, integration tests, other
-          // clients) too.
-          const rawUsername = rawBody.username;
-          const username = typeof rawUsername === 'string'
-            ? rawUsername.trim().replace(/^[^\\]+\\/, '').replace(/@.+$/, '')
-            : rawUsername;
-          const password = rawBody.password;
-          console.log('Direct LDAP Auth request for user:', username, rawUsername !== username ? `(normalised from "${rawUsername}")` : '');
+        // Upper bounds for sign-in input. AD itself limits sAMAccountName to
+        // 20 characters and passwords to 256; these caps only bound the request.
+        const MAX_RAW_USERNAME_LENGTH = 512;
+        const MAX_USERNAME_LENGTH = 64;
+        const MAX_PASSWORD_LENGTH = 1024;
+        // Characters AD does not allow in a sAMAccountName, plus '@' (one left
+        // after normalisation means a malformed name) and control characters.
+        const INVALID_USERNAME_CHARS = /["/\\[\]:;|=,+*?<>@\x00-\x1f\x7f]/;
 
-          if (!username || !password) {
+        /**
+         * Parse and validate a sign-in request body. Returns
+         * { username, password } or null when the request is not a JSON object
+         * with a usable string username and password. Callers answer null with
+         * the same generic 400, so the response gives no hint which check failed.
+         *
+         * Normalises UPN ("user@domain.tld") and down-level ("DOMAIN\user")
+         * forms into a bare sAMAccountName. The LDAP search filter binds on
+         * sAMAccountName only, so the non-canonical forms would otherwise
+         * silently fail to match despite being valid AD identifiers. The
+         * frontend also strips defensively; doing it here covers direct API
+         * callers and the change-password Lambda's direct invoke too.
+         */
+        function parseSignInRequest(event) {
+          let body;
+          try {
+            body = JSON.parse(event.body || '{}');
+          } catch (e) {
+            return null;
+          }
+          if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+          const { username: rawUsername, password } = body;
+          if (typeof rawUsername !== 'string' || typeof password !== 'string') return null;
+          if (rawUsername.length > MAX_RAW_USERNAME_LENGTH) return null;
+          const username = rawUsername.trim().replace(/^[^\\]+\\/, '').replace(/@.+$/, '');
+          if (!username || username.length > MAX_USERNAME_LENGTH || INVALID_USERNAME_CHARS.test(username)) return null;
+          if (!password || password.length > MAX_PASSWORD_LENGTH) return null;
+          return { username, password };
+        }
+
+        exports.handler = async (event) => {
+          const request = parseSignInRequest(event || {});
+          if (request) {
+            console.log('Direct LDAP Auth request for user:', request.username);
+          } else {
+            console.log('Direct LDAP Auth request rejected: invalid request body');
+          }
+
+          if (!request) {
             return {
               statusCode: 400,
               headers: { 
@@ -357,6 +387,7 @@ async function authenticateWithLDAP(username, password) {
               body: JSON.stringify({ error: 'Username and password required' })
             };
           }
+          const { username, password } = request;
           
           try {
             // Use direct LDAP authentication with group checking
@@ -415,7 +446,7 @@ async function authenticateWithLDAP(username, password) {
               };
             }
           } catch (error) {
-            console.error('Authentication error:', error);
+            console.error('Authentication error:', error && error.name, error && error.message);
             return {
               statusCode: 500,
               headers: { 
