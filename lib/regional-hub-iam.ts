@@ -230,6 +230,7 @@ function cfnIamDocument(n: RegionalHubIamNames): iam.PolicyDocument {
       // CloudFormation reads the boundary (and attached policies) when it
       // plans a role change.
       allow('IamPolicyRead', ['iam:GetPolicy'], [boundaryArn, ...HUB_MANAGED_POLICY_ARNS]),
+      allow('IamBoundaryEntities', ['iam:ListEntitiesForPolicy'], [boundaryArn]),
       // Granting a hub role access needs the boundary on the role.
       allow('IamBoundedRoleWrites', ['iam:CreateRole', 'iam:PutRolePermissionsBoundary', 'iam:PutRolePolicy'], hubRoles, {
         StringEquals: { 'iam:PermissionsBoundary': boundaryArn },
