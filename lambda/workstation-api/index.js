@@ -221,8 +221,6 @@ exports.handler = async (event) => {
             displayName = lastName;
           }
           
-          console.log(`Cognito user: ${user.Username}, email: ${email}, emailPrefix: ${emailPrefix}, firstName: ${firstName}, lastName: ${lastName}, name: ${attributes.name || ''}, displayName: ${displayName}`);
-          
           users.push({
             userId: user.Username,
             email: email,
@@ -250,7 +248,6 @@ exports.handler = async (event) => {
     const isAdmin = authorizerContext.isAdmin === 'true';
     const currentUserId = authorizerContext.username;
     
-    console.log('User:', currentUserId);
     console.log('Is admin:', isAdmin);
     
     if (!currentUserId) {
@@ -261,7 +258,7 @@ exports.handler = async (event) => {
       };
     }
     
-    console.log('Querying workstations for user:', currentUserId);
+    console.log('Querying workstations:', JSON.stringify({ isAdmin: !!isAdmin, hasUser: !!currentUserId }));
     
     let result;
     
@@ -273,8 +270,6 @@ exports.handler = async (event) => {
     } else if (currentUserId) {
       // Regular users see workstations assigned to them directly OR to their groups
       const userIdForQuery = currentUserId.includes('@') ? currentUserId.split('@')[0] : currentUserId;
-      console.log('Querying workstations for user:', userIdForQuery);
-      
       // Get user's groups from Directory Services
       let userGroups = [];
       try {
@@ -285,7 +280,7 @@ exports.handler = async (event) => {
           TableName: process.env.GROUPS_TABLE_NAME
         }));
         
-        console.log(`Checking group memberships for user: ${userIdForQuery}`);
+        console.log(`Checking group memberships in ${(groupsResult.Items || []).length} groups`);
         
         // For each group, check if user is a member via Directory Services
         for (const group of groupsResult.Items || []) {
@@ -299,10 +294,10 @@ exports.handler = async (event) => {
             }));
             
             const members = membersResult.Members?.map(member => member.SAMAccountName) || [];
-            console.log('Group', sanitizedGroupName, 'members:', members);
+            console.log(`Group ${sanitizedGroupName} has ${members.length} members`);
             
             if (members.includes(userIdForQuery)) {
-              console.log(`User ${userIdForQuery} is member of group ${sanitizedGroupName}`);
+              console.log(`User is a member of group ${sanitizedGroupName}`);
               userGroups.push(group.groupId);
             }
           } catch (error) {
@@ -415,9 +410,6 @@ exports.handler = async (event) => {
         }));
         const users = usersResult.Items || [];
         console.log(`Fetched ${users.length} users from DynamoDB for display name resolution`);
-        users.forEach(u => {
-          console.log(`DynamoDB user: userId=${u.userId}, email=${u.email}, firstName=${u.firstName}, lastName=${u.lastName}`);
-        });
         
         // Get Cognito users for fallback display name resolution
         const cognitoUsers = await getCognitoUsersForDisplay();
@@ -445,25 +437,21 @@ exports.handler = async (event) => {
         const findUserByAssignedId = (assignedUserId) => {
           if (!assignedUserId) return null;
           
-          console.log(`Looking up user for assignedUserId: "${assignedUserId}"`);
-          
           // Try exact match in DynamoDB users first
           let user = users.find(u => u.userId === assignedUserId);
           if (user) {
-            console.log(`Found user in DynamoDB by exact match: ${user.userId}`);
+            console.log('Resolved assigned user: DynamoDB, exact match');
             return user;
           }
           
           // Try matching by formatted userId in DynamoDB
           const formattedAssignedId = formatUserIdForDisplay(assignedUserId).toLowerCase();
-          console.log(`Formatted assignedUserId for lookup: "${formattedAssignedId}"`);
-          
           user = users.find(u => {
             const formattedUserId = formatUserIdForDisplay(u.userId).toLowerCase();
             return formattedUserId === formattedAssignedId;
           });
           if (user) {
-            console.log(`Found user in DynamoDB by formatted match: ${user.userId}`);
+            console.log('Resolved assigned user: DynamoDB, formatted match');
             return user;
           }
           
@@ -476,7 +464,7 @@ exports.handler = async (event) => {
             return false;
           });
           if (user) {
-            console.log(`Found user in DynamoDB by email prefix: ${user.userId}, firstName: ${user.firstName}, lastName: ${user.lastName}`);
+            console.log('Resolved assigned user: DynamoDB, email prefix');
             return user;
           }
           
@@ -484,7 +472,7 @@ exports.handler = async (event) => {
           if (assignedUserId.includes('@')) {
             user = users.find(u => u.email && u.email.toLowerCase() === assignedUserId.toLowerCase());
             if (user) {
-              console.log(`Found user in DynamoDB by full email: ${user.userId}, firstName: ${user.firstName}, lastName: ${user.lastName}`);
+              console.log('Resolved assigned user: DynamoDB, full email');
               return user;
             }
           }
@@ -495,7 +483,7 @@ exports.handler = async (event) => {
           // Try exact match by username
           let cognitoUser = cognitoUsers.find(u => u.userId === assignedUserId);
           if (cognitoUser) {
-            console.log(`Found Cognito user by exact match: ${cognitoUser.userId}, displayName: ${cognitoUser.displayName}`);
+            console.log('Resolved assigned user: Cognito, exact match');
             return cognitoUser;
           }
           
@@ -505,14 +493,14 @@ exports.handler = async (event) => {
             return formattedCognitoId === formattedAssignedId;
           });
           if (cognitoUser) {
-            console.log(`Found Cognito user by formatted username "${formattedAssignedId}": ${cognitoUser.userId}, firstName: ${cognitoUser.firstName}, lastName: ${cognitoUser.lastName}, displayName: ${cognitoUser.displayName}`);
+            console.log('Resolved assigned user: Cognito, formatted username');
             return cognitoUser;
           }
           
           // Try matching by email prefix in Cognito
           cognitoUser = cognitoUsers.find(u => u.emailPrefix === formattedAssignedId);
           if (cognitoUser) {
-            console.log(`Found Cognito user by email prefix "${formattedAssignedId}": ${cognitoUser.userId}, displayName: ${cognitoUser.displayName}`);
+            console.log('Resolved assigned user: Cognito, email prefix');
             return cognitoUser;
           }
           
@@ -520,12 +508,12 @@ exports.handler = async (event) => {
           if (assignedUserId.includes('@')) {
             cognitoUser = cognitoUsers.find(u => u.email.toLowerCase() === assignedUserId.toLowerCase());
             if (cognitoUser) {
-              console.log(`Found Cognito user by full email: ${cognitoUser.userId}, displayName: ${cognitoUser.displayName}`);
+              console.log('Resolved assigned user: Cognito, full email');
               return cognitoUser;
             }
           }
           
-          console.log(`No user found for assignedUserId: "${assignedUserId}"`);
+          console.log('Assigned user not found in DynamoDB or Cognito');
           return null;
         };
         
@@ -1411,7 +1399,7 @@ exports.handler = async (event) => {
         }
       }));
       
-      console.log(`Keep Alive set for ${instanceId} until ${keepAliveUntil} by ${currentUserId}`);
+      console.log(`Keep Alive set for ${instanceId} until ${keepAliveUntil} by ${isAdmin ? 'an admin' : 'the assigned user'}`);
       
       return {
         statusCode: 200,
@@ -1486,7 +1474,7 @@ exports.handler = async (event) => {
         UpdateExpression: 'REMOVE keepAliveUntil, keepAliveRequestedBy, keepAliveRequestedAt'
       }));
       
-      console.log(`Keep Alive cancelled for ${instanceId} by ${currentUserId}`);
+      console.log(`Keep Alive cancelled for ${instanceId} by ${isAdmin ? 'an admin' : 'the assigned user'}`);
       
       return {
         statusCode: 200,

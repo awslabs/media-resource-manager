@@ -6,7 +6,7 @@ const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/
 const { SFNClient, StartExecutionCommand } = require('@aws-sdk/client-sfn');
 const crypto = require('crypto');
 const { requireAdmin } = require('../shared/authz');
-const { redactForLog } = require('../shared/log-redact');
+const { requestSummary } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -19,7 +19,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-  console.log('StartDataSyncExecution event:', JSON.stringify(redactForLog(event), null, 2));
+  console.log('StartDataSyncExecution event:', JSON.stringify(requestSummary(event)));
 
   // SECURITY: starting a DataSync task execution launches a Step Functions
   // workflow that reads/writes storage on behalf of the service.

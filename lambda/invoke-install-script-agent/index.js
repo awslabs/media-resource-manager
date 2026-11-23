@@ -14,7 +14,7 @@ const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { SFNClient, StartExecutionCommand } = require('@aws-sdk/client-sfn');
 const { randomUUID } = require('crypto');
 const { requireAdmin } = require('../shared/authz');
-const { redactForLog } = require('../shared/log-redact');
+const { requestSummary } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -33,7 +33,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify(redactForLog(event), null, 2));
+  console.log('Event:', JSON.stringify(requestSummary(event)));
 
   try {
     // Handle OPTIONS preflight

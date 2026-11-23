@@ -81,4 +81,25 @@ function redactForLog(value) {
   return redactValue(value, 0);
 }
 
-module.exports = { REDACTED, redactForLog };
+/**
+ * What to log about an incoming event: for an API Gateway request, the
+ * method, the resource template (such as /workstations/{id}, or the path
+ * when there is no template) and the request ID; for any other event, its
+ * top-level field names. Headers, the authorizer context, the caller's
+ * identity and the body are left out.
+ */
+function requestSummary(event) {
+  if (!event || typeof event !== 'object') return { eventType: typeof event };
+  const ctx = event.requestContext || {};
+  const method = event.httpMethod || ctx.http?.method;
+  if (method) {
+    return {
+      method,
+      resource: event.resource || event.routeKey || event.path || ctx.http?.path,
+      requestId: ctx.requestId,
+    };
+  }
+  return { eventKeys: Object.keys(event).sort() };
+}
+
+module.exports = { REDACTED, redactForLog, requestSummary };

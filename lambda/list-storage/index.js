@@ -3,7 +3,7 @@
 
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, ScanCommand, QueryCommand } = require('@aws-sdk/lib-dynamodb');
-const { redactForLog } = require('../shared/log-redact');
+const { requestSummary } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });
 const dynamodb = DynamoDBDocumentClient.from(dynamoClient);
@@ -15,7 +15,7 @@ const corsHeaders = {
 };
 
 exports.handler = async (event) => {
-  console.log('ListStorage event:', JSON.stringify(redactForLog(event), null, 2));
+  console.log('ListStorage event:', JSON.stringify(requestSummary(event)));
   
   try {
     console.log('Starting DynamoDB query...');
