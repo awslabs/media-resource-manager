@@ -365,6 +365,7 @@ function cfnCalls(template: any, v: typeof VARIANTS[number]): Record<string, (id
     'Custom::LicenseConfiguration': (_, r) => on(resolve(r.Properties.ServiceToken), ['lambda:InvokeFunction']),
     'Custom::TlsCertReplication': (_, r) => on(resolve(r.Properties.ServiceToken), ['lambda:InvokeFunction']),
     // ---- gateway browser path (#103) ----
+    'Custom::GatewayBrowserEniWait': (_, r) => on(resolve(r.Properties.ServiceToken), ['lambda:InvokeFunction']),
     'AWS::EC2::SecurityGroupEgress': () => onAny(['ec2:AuthorizeSecurityGroupEgress', 'ec2:RevokeSecurityGroupEgress',
       'ec2:UpdateSecurityGroupRuleDescriptionsEgress', 'ec2:DescribeSecurityGroupRules']),
     'AWS::CloudFront::VpcOrigin': id => [
