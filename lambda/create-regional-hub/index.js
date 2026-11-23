@@ -6,7 +6,7 @@ const { DynamoDBDocumentClient, PutCommand, GetCommand } = require('@aws-sdk/lib
 const { SFNClient, StartExecutionCommand } = require('@aws-sdk/client-sfn');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { EC2Client, DescribeAvailabilityZonesCommand } = require('@aws-sdk/client-ec2');
-const { requireAdmin } = require('./authz');
+const { requireAdmin } = require('../shared/authz');
 const { requestSummary } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({});

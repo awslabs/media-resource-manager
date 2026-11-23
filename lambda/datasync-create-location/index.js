@@ -8,7 +8,7 @@ const { FSxClient, DescribeFileSystemsCommand, DescribeStorageVirtualMachinesCom
 const { EC2Client, DescribeNetworkInterfacesCommand } = require('@aws-sdk/client-ec2');
 const crypto = require('crypto');
 const { generateBucketPolicy } = require('./policy-generator');
-const { requireAdmin } = require('./authz');
+const { requireAdmin } = require('../shared/authz');
 const { requestSummary } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });

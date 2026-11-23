@@ -10,7 +10,7 @@ const { DirectoryServiceClient, DescribeDirectoriesCommand } = require('@aws-sdk
 const { DirectoryServiceDataClient, ListGroupMembersCommand } = require('@aws-sdk/client-directory-service-data');
 const { LambdaClient, InvokeCommand } = require('@aws-sdk/client-lambda');
 const { CognitoIdentityProviderClient, ListUsersCommand } = require('@aws-sdk/client-cognito-identity-provider');
-const { requireAdmin, requireSelfOrAdmin } = require('./authz');
+const { requireAdmin, requireSelfOrAdmin } = require('../shared/authz');
 const { requestSummary } = require('../shared/log-redact');
 
 const dynamoClient = new DynamoDBClient({ region: process.env.AWS_REGION });

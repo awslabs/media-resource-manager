@@ -13,7 +13,7 @@ const { SSOAdminClient, ListInstancesCommand } = require('@aws-sdk/client-sso-ad
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, PutCommand } = require('@aws-sdk/lib-dynamodb');
-const { requireAdmin } = require('./authz');
+const { requireAdmin } = require('../shared/authz');
 const { requestSummary } = require('../shared/log-redact');
 
 const identitystore = new IdentitystoreClient({});
