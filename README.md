@@ -106,41 +106,16 @@ Before deploying, check for account-level controls that can block the internet-f
 components MRM provisions (the DCV Connection Gateway NLB, the CloudFront frontend
 distribution, and the API Gateway endpoint):
 
-- **VPC Block Public Access (BPA)** — if enabled in `block-ingress` mode on the target
-  account/region, inbound internet traffic to your VPC is blocked and the DCV Connection
-  Gateway NLB will be unreachable, showing up client-side as "endpoint is unreachable" in
-  the DCV Viewer. Some organizations enable this by default on newly created accounts as
-  a preventive security guardrail, so a fresh account may already have BPA on.
-
+- **VPC Block Public Access (BPA)**: some organizations turn this on for new accounts.
   Check the setting:
 
   ```bash
   aws ec2 describe-vpc-block-public-access-options --region <region>
   ```
 
-  If it reports `"InternetGatewayBlockMode": "block-ingress"`, add an exclusion for the
-  MRM VPC (or, for tighter blast radius, only the public subnets hosting the DCV
-  Connection Gateway NLB):
-
-  ```bash
-  # VPC-level (simplest — fine for test/dev accounts)
-  aws ec2 create-vpc-block-public-access-exclusion \
-    --vpc-id <mrm-vpc-id> \
-    --internet-gateway-exclusion-mode allow-bidirectional \
-    --region <region>
-
-  # Subnet-level (recommended for prod — only the DCV public subnets)
-  for SUBNET in <dcv-public-subnet-1> <dcv-public-subnet-2> <dcv-public-subnet-3>; do
-    aws ec2 create-vpc-block-public-access-exclusion \
-      --subnet-id $SUBNET \
-      --internet-gateway-exclusion-mode allow-bidirectional \
-      --region <region>
-  done
-  ```
-
-  Exclusions are self-service — no ticket or approval needed provided the account owner
-  can call the API (`ExclusionsAllowed: allowed`). Exclusions take effect within a couple
-  of minutes.
+  If `InternetGatewayBlockMode` is `block-ingress` or `block-bidirectional`, read
+  [Deploying in accounts with VPC Block Public Access](#deploying-in-accounts-with-vpc-block-public-access)
+  before you deploy.
 
 ### One-Click Deployment (CloudFormation + CodeBuild)
 
@@ -655,6 +630,58 @@ aws ec2 create-tags --resources subnet-aaa subnet-bbb \
 ```
 
 Tag your public subnets `Value=Public` the same way if the lookup misses them.
+
+### Deploying in accounts with VPC Block Public Access
+
+[VPC Block Public Access](https://docs.aws.amazon.com/vpc/latest/userguide/security-vpc-bpa.html) (BPA) in `block-ingress` mode blocks internet traffic through internet gateways, except traffic that leaves through a NAT gateway or an egress-only internet gateway. For MRM this means:
+
+| Component | With ingress-only BPA and no exclusions |
+|-----------|------------------------------------------|
+| Workstations and Lambdas in private subnets, egress through a NAT gateway | Work |
+| NAT instance (instead of a NAT gateway) | No internet access, so private subnets routed through it have none either |
+| CloudFront VPC origin for browser sessions (`DcvBrowserPath=cloudfront`) | Can't be created: the `<ACRONYM>-Dcv-Infrastructure` stack fails and rolls back |
+| Internet-facing Network Load Balancer of the DCV Connection Gateway | Deploys, but drops all inbound traffic, so native DCV clients can't connect |
+
+In `block-bidirectional` mode, NAT gateway traffic is blocked too.
+
+**Fix: subnet exclusions.** Deploy into an existing VPC (`VpcId`) that uses a NAT gateway, and create a bidirectional exclusion for four subnets before you deploy:
+
+- the two private subnets in `PrivateSubnetIds`, where the internal load balancer behind the CloudFront VPC origin runs
+- the two public subnets in `PublicSubnetIds`, where the gateway's Network Load Balancer runs
+
+```bash
+for SUBNET in <private-subnet-1> <private-subnet-2> <public-subnet-1> <public-subnet-2>; do
+  aws ec2 create-vpc-block-public-access-exclusion \
+    --subnet-id "$SUBNET" \
+    --internet-gateway-exclusion-mode allow-bidirectional \
+    --region <region>
+done
+
+# Wait until each exclusion is "create-complete"
+aws ec2 describe-vpc-block-public-access-exclusions --region <region> --max-results 50 \
+  --query 'VpcBlockPublicAccessExclusions[].[ResourceArn,State]' --output table
+```
+
+Creating exclusions needs `ExclusionsAllowed: allowed` in `describe-vpc-block-public-access-options`; an AWS Organizations declarative policy can turn it off. A VPC-level exclusion (`--vpc-id`) also works, but it opens every subnet in the VPC, so we don't recommend it.
+
+**Limit who can reach the gateway.** The excluded public subnets accept internet traffic, so set `DcvAllowedClientCidrs` and/or `DcvAllowedPrefixListIds` (see [Infrastructure Parameters](#2-infrastructure-parameters-parametersjson)) to your users' address ranges. The Network Load Balancer keeps the client's source IP, so the gateway's security group applies these rules to each client.
+
+**What we tested** (existing VPC, ingress-only BPA, the four exclusions above, the gateway limited to one client CIDR):
+
+- Browser sessions through the CloudFront VPC origin
+- The native DCV client over QUIC (UDP 8444) and over TCP 8443
+- Linux and Windows workstation setup, with egress through the NAT gateway
+- FSx for Windows File Server storage attached to a workstation in another Availability Zone
+
+Regional hubs weren't tested with BPA.
+
+**Upgrading an existing installation:**
+
+- Starting with v1.5.0, browser sessions go through a CloudFront VPC origin by default (`DcvBrowserPath=cloudfront`), including installations that never set `DcvBrowserPath`. With BPA on, create the exclusions for the two `PrivateSubnetIds` subnets before you upgrade, or set `DcvBrowserPath=direct` to keep the previous browser path. Without them, the VPC origin can't be created and the `<ACRONYM>-Dcv-Infrastructure` update fails.
+- If you deployed into an existing VPC with several private subnets per Availability Zone and passed `PrivateSubnetIds` and `PublicSubnetIds` through `MRM_PARAM_OVERRIDES`, set the same subnets, in the same order, as the pipeline stack's `PrivateSubnetIds` and `PublicSubnetIds` parameters. Changing them replaces the Managed Microsoft AD directory. With the same subnets, the upgrade replaces one resource: the DynamoDB gateway endpoint in `<ACRONYM>-Infrastructure`, which is now attached to the private subnets' route tables. The previous endpoint wasn't attached to any route table, so DynamoDB access isn't interrupted. Nothing else in the VPC changes: the directory, interface endpoints, load balancers, subnets and route tables stay as they are.
+- After you update the pipeline stack, check that a build started. A stack update may not start one; if no build starts, start one yourself (`aws codebuild start-build --project-name <project-name>`).
+
+**Planned improvements:** [#106](https://github.com/awslabs/media-resource-manager/issues/106) (an optional `CreateBpaExclusions` parameter that creates these exclusions, also in regional hubs) and [#107](https://github.com/awslabs/media-resource-manager/issues/107) (an internal-only gateway for users on VPN, Direct Connect or Transit Gateway, which works with BPA on and no exclusions).
 
 ### Hostname Customization
 
