@@ -23,7 +23,7 @@ vi.mock('dcv-ui', () => ({
   },
 }));
 
-import ConnectViewer, { dcvSdkBaseUrl } from './ConnectViewer';
+import ConnectViewer, { dcvSdkBaseUrl, MODIFIER_KEYS, releaseModifierKeys } from './ConnectViewer';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -189,6 +189,81 @@ describe('ConnectViewer', () => {
     await act(async () => lastViewer().dcv.onConnectionEstablished!({}));
     expect(viewerProps.length).toBe(renders);
     expect(lastViewer().dcv).toBe(first.dcv);
+  });
+
+  describe('modifier keys on page hide', () => {
+    const fakeConnection = () => ({ latchModifierKey: vi.fn((_key: string, _location: number, _isDown: boolean) => true) });
+
+    async function connect(conn: unknown) {
+      fetchMock.mockResolvedValue(sessionResponse('https://d111111abcdef8.cloudfront.net'));
+      await render();
+      await act(async () => lastViewer().dcv.onConnectionEstablished!(conn));
+    }
+
+    function setVisibility(state: DocumentVisibilityState) {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+    }
+
+    afterEach(() => {
+      delete (document as any).visibilityState;
+    });
+
+    it('sends a keyup for every modifier on pagehide, before the SDK disconnects', async () => {
+      const conn = fakeConnection();
+      // Stands in for the SDK's own pagehide listener, which disconnects.
+      // It is added first and in the bubble phase, as the SDK does.
+      let releasesBeforeDisconnect = -1;
+      const sdkDisconnect = () => { releasesBeforeDisconnect = conn.latchModifierKey.mock.calls.length; };
+      window.addEventListener('pagehide', sdkDisconnect);
+      try {
+        await connect(conn);
+        window.dispatchEvent(new Event('pagehide'));
+      } finally {
+        window.removeEventListener('pagehide', sdkDisconnect);
+      }
+
+      expect(conn.latchModifierKey).toHaveBeenCalledTimes(MODIFIER_KEYS.length);
+      for (const [key, location] of MODIFIER_KEYS) {
+        expect(conn.latchModifierKey).toHaveBeenCalledWith(key, location, false);
+      }
+      expect(conn.latchModifierKey).toHaveBeenCalledWith('Meta', 1, false);
+      expect(conn.latchModifierKey.mock.calls.every((call) => call[2] === false)).toBe(true);
+      expect(releasesBeforeDisconnect).toBe(MODIFIER_KEYS.length);
+    });
+
+    it('sends the keyups when the page becomes hidden, not when it becomes visible', async () => {
+      const conn = fakeConnection();
+      await connect(conn);
+      setVisibility('visible');
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(conn.latchModifierKey).not.toHaveBeenCalled();
+      setVisibility('hidden');
+      document.dispatchEvent(new Event('visibilitychange'));
+      expect(conn.latchModifierKey).toHaveBeenCalledTimes(MODIFIER_KEYS.length);
+    });
+
+    it('sends nothing before the connection opens or after it closes', async () => {
+      const conn = fakeConnection();
+      fetchMock.mockResolvedValue(sessionResponse('https://d111111abcdef8.cloudfront.net'));
+      await render();
+      window.dispatchEvent(new Event('pagehide'));
+      await act(async () => lastViewer().dcv.onConnectionEstablished!(conn));
+      await act(async () => lastViewer().dcv.onDisconnect!({ message: 'Closed by the server' }));
+      window.dispatchEvent(new Event('pagehide'));
+      expect(conn.latchModifierKey).not.toHaveBeenCalled();
+    });
+
+    it('keeps releasing the other modifiers when one call throws', async () => {
+      const conn = fakeConnection();
+      conn.latchModifierKey.mockImplementationOnce(() => { throw new Error('channel closed'); });
+      await connect(conn);
+      expect(() => window.dispatchEvent(new Event('pagehide'))).not.toThrow();
+      expect(conn.latchModifierKey).toHaveBeenCalledTimes(MODIFIER_KEYS.length);
+    });
+  });
+
+  it('releaseModifierKeys does nothing without a connection', () => {
+    expect(() => releaseModifierKeys(null)).not.toThrow();
   });
 
   it('shows the API error and Retry when the session cannot start', async () => {

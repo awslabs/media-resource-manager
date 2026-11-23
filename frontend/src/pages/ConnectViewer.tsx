@@ -29,6 +29,42 @@ export function dcvSdkBaseUrl(origin: string = window.location.origin): string {
   return `${origin.replace(/\/+$/, '')}${DCV_SDK_PATH}`;
 }
 
+/** The part of the Web Client SDK's Connection used to release modifier keys. */
+export interface ModifierKeyLatch {
+  latchModifierKey(key: string, location: number, isDown: boolean): boolean;
+}
+
+function isModifierKeyLatch(connection: unknown): connection is ModifierKeyLatch {
+  return typeof (connection as ModifierKeyLatch | null)?.latchModifierKey === 'function';
+}
+
+/** Every key and location the SDK's `latchModifierKey` accepts (KeyboardEvent.location values). */
+export const MODIFIER_KEYS: ReadonlyArray<readonly [key: string, location: number]> = [
+  ['Control', 1], ['Control', 2],
+  ['Alt', 1], ['Alt', 2],
+  ['AltGraph', 0],
+  ['Meta', 1], ['Meta', 2],
+  ['OS', 1], ['OS', 2],
+  ['Shift', 1], ['Shift', 2],
+];
+
+/**
+ * Sends a keyup for every modifier. The SDK releases held keys when its input
+ * loses focus, but on page unload it only disconnects, so a modifier that is
+ * down at that moment (Cmd during Cmd+R) stays held in the remote session.
+ * A keyup for a key that is not down has no effect, so this is safe to repeat.
+ */
+export function releaseModifierKeys(connection: ModifierKeyLatch | null): void {
+  if (!connection) return;
+  for (const [key, location] of MODIFIER_KEYS) {
+    try {
+      connection.latchModifierKey(key, location, false);
+    } catch {
+      // The connection may already be closing; release the rest anyway.
+    }
+  }
+}
+
 type ViewerState =
   | { phase: 'starting' }
   | { phase: 'session'; session: ViewerSession }
@@ -51,6 +87,23 @@ export default function ConnectViewer({ user }: ConnectViewerProps) {
   // Kept out of React state on purpose: the SDK holds references to the DOM it
   // rendered, so the viewer must not re-render when the connection opens.
   const connected = useRef(false);
+  // The open connection, while there is one; used to release modifier keys.
+  const connection = useRef<ModifierKeyLatch | null>(null);
+
+  // Release modifiers when the page is hidden or unloaded. pagehide is caught
+  // in the capture phase so it runs before the SDK's own pagehide disconnect.
+  useEffect(() => {
+    const onPageHide = () => releaseModifierKeys(connection.current);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') releaseModifierKeys(connection.current);
+    };
+    window.addEventListener('pagehide', onPageHide, { capture: true });
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', onPageHide, { capture: true });
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, []);
 
   useEffect(() => {
     if (!instanceId) return;
@@ -72,13 +125,15 @@ export default function ConnectViewer({ user }: ConnectViewerProps) {
 
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
-  const onConnectionEstablished = useCallback(() => {
+  const onConnectionEstablished = useCallback((conn: unknown) => {
     connected.current = true;
+    connection.current = isModifierKeyLatch(conn) ? conn : null;
   }, []);
 
   // Called when connect is rejected and when an open connection closes. The
   // token is dropped from state either way; Retry starts a new session.
   const onDisconnect = useCallback((reason: DcvDisconnectReason) => {
+    connection.current = null;
     setState((prev) => {
       if (prev.phase !== 'session') return prev;
       if (connected.current) return { phase: 'disconnected', message: reasonText(reason) };
