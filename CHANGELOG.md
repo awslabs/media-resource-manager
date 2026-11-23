@@ -16,6 +16,7 @@ upgrade to that version; a version without it needs only a redeploy.
 
 - The unused `GET /auth/validate` route and its `validate-jwt` Lambda.
   Protected routes validate tokens with the API's JWT authorizer.
+  ([#121](https://github.com/awslabs/media-resource-manager/pull/121))
 
 ### Security
 
@@ -23,6 +24,7 @@ upgrade to that version; a version without it needs only a redeploy.
   username and password, bounded lengths, and only characters allowed in an
   AD account name) and returns the existing generic 400 otherwise. The API
   stage throttles the route at 10 requests per second with a burst of 20.
+  ([#121](https://github.com/awslabs/media-resource-manager/pull/121))
 
 ## [1.5.0] - 2026-11-23
 
