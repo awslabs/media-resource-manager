@@ -16,25 +16,36 @@ upgrade to that version; a version without it needs only a redeploy.
 
 Browser sessions open in a viewer page in the MRM console and reach a
 token-only DCV Connection Gateway through CloudFront. The native DCV client
-gets a TCP option, and Linux workstation setup gets several fixes. Regional
-hubs need an update.
+gets a TCP option, regional hubs get scoped IAM, and Linux workstation setup
+and the deployment pipeline get several fixes. Regional hubs need an update.
 
 ### Upgrade steps
 
-- After the pipeline deploy finishes, open **Regions** in the MRM console and
-  click **Update** on each regional hub. The banner lists the hubs that need
-  it.
+- Don't create, update or delete a regional hub while the deploy runs. The
+  deploy changes the policies of the hub CloudFormation role, and a hub
+  operation in progress at that moment can fail with `AccessDenied`.
+- If you deploy through the CodeBuild pipeline, update the pipeline stack
+  (for example `MRM-DeployPipeline`) with the new
+  `scripts/deploy-pipeline.yaml` first, then start a build yourself with
+  `aws codebuild start-build --project-name <project-name>`. A stack update
+  may not start a build, and the new build steps run only in a build started
+  after the update.
+- After the deploy finishes, open **Regions** in the MRM console and click
+  **Update** on each regional hub. The banner lists the hubs that need it.
+  The hub update brings in the scoped hub IAM roles
+  ([#99](https://github.com/awslabs/media-resource-manager/pull/99)), the new
+  gateway browser path
+  ([#103](https://github.com/awslabs/media-resource-manager/pull/103)) and the
+  hub session manager fix
+  ([#115](https://github.com/awslabs/media-resource-manager/pull/115)). <!-- pending merge: #115 -->
 - Connection gateways are replaced one at a time: the primary Region's
   gateways during the deploy, and each hub's gateway during its **Update**.
-  Plan the deploy and the hub updates outside working hours.
-- DCV sessions on a gateway that is being replaced disconnect. Users reconnect
-  from the console.
+  DCV sessions on a gateway that is being replaced disconnect, and users
+  reconnect from the console. Plan the deploy and the hub updates outside
+  working hours.
 - If your account uses VPC Block Public Access, read
   [Deploying in accounts with VPC Block Public Access](README.md#deploying-in-accounts-with-vpc-block-public-access)
   before you deploy.
-- Don't create, update or delete a regional hub while the deploy runs. The
-  deploy changes the policies of the hub CloudFormation role, and a hub
-  operation in progress at that moment can fail with `AccessDenied`. <!-- pending merge -->
 - With `DcvBrowserPath=cloudfront` (the default), a new install or a hub
   **Update** takes about 15 minutes longer while the CloudFront distribution
   deploys, and each gateway Region adds an Application Load Balancer (about
@@ -62,6 +73,10 @@ hubs need an update.
   limit the gateway's TCP 8443 and UDP 8444 to those sources, in the primary
   Region and in hubs.
   ([#103](https://github.com/awslabs/media-resource-manager/pull/103))
+- The pipeline template (`scripts/deploy-pipeline.yaml`) has the parameters
+  `DcvBrowserPath`, `DcvHostedZoneId`, `DcvAllowedClientCidrs` and
+  `DcvAllowedPrefixListIds`. Empty keeps the stored value.
+  ([#111](https://github.com/awslabs/media-resource-manager/pull/111))
 - **Settings → Session Management → Native client protocol**: **QUIC (UDP)**,
   the default, or **TCP (WebSocket)** for networks that block UDP.
   ([#104](https://github.com/awslabs/media-resource-manager/pull/104),
@@ -128,6 +143,25 @@ hubs need an update.
   CloudFormation requires for templates over 51,200 bytes.
   ([#91](https://github.com/awslabs/media-resource-manager/pull/91),
   [#90](https://github.com/awslabs/media-resource-manager/issues/90))
+- The CodeBuild pipeline keeps the deployment config in SSM: it stores
+  `parameters.json` as compact JSON, checks that it fits the 8,192-byte
+  parameter limit, and fails the build when saving the config or `cdk.json`
+  fails. Values set with `MRM_PARAM_OVERRIDES` or in the SSM parameter are
+  kept by later builds. The README says that creating the pipeline stack
+  starts the first build.
+  ([#111](https://github.com/awslabs/media-resource-manager/pull/111))
+- Creating a workstation in a regional hub whose IAM role names have a Region
+  suffix works. The instance-create Lambdas can pass the hub workstation
+  role in each naming form, only to EC2. Hubs need no update for this fix.
+  ([#113](https://github.com/awslabs/media-resource-manager/pull/113))
+- In regional hubs, the session manager reads the workstation tables in the
+  primary Region. Linux and macOS hub workstations get the right default
+  session owner, and assigned users can connect to hub workstations. Needs a
+  hub **Update**.
+  ([#115](https://github.com/awslabs/media-resource-manager/pull/115)) <!-- pending merge -->
+- `npm run build` compiles the tests again after a `StorageStack` prop was
+  removed.
+  ([#110](https://github.com/awslabs/media-resource-manager/pull/110))
 
 ### Security
 
@@ -145,7 +179,13 @@ hubs need an update.
   boundary. The same hub update includes code-scanning fixes in the hub's
   `configure-ontap-cifs` Lambda.
   ([#99](https://github.com/awslabs/media-resource-manager/pull/99),
-  [#62](https://github.com/awslabs/media-resource-manager/issues/62)) <!-- pending merge -->
+  [#62](https://github.com/awslabs/media-resource-manager/issues/62))
+- The external developer policy in `scripts/codecommit-repo-setup.yaml`
+  applies its protected-branch deny to `main` and to `deploy/*` separately,
+  following the AWS CodeCommit branch-protection example. Pushes, merges,
+  branch deletes and file writes on those branches are denied; git pushes to
+  other branches are allowed.
+  ([#112](https://github.com/awslabs/media-resource-manager/pull/112))
 
 ## [1.4.4] - 2026-11-22
 
