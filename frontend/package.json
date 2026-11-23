@@ -1,6 +1,6 @@
 {
   "name": "media-resource-manager-frontend",
-  "version": "1.4.4",
+  "version": "1.5.0",
   "description": "Frontend for Media Resource Manager Console",
   "scripts": {
     "dev": "vite",
