@@ -45,13 +45,26 @@ class NormalizeTest(unittest.TestCase):
 
 
 class BrowserGatewayUrlForTest(unittest.TestCase):
-    def test_uses_the_published_url(self):
-        self.assertEqual(mod.browser_gateway_url_for(GATEWAY, 'd111111abcdef8.cloudfront.net'),
-                         'https://d111111abcdef8.cloudfront.net')
+    def test_uses_the_published_url_without_a_fallback_line(self):
+        with mock.patch('builtins.print') as printed:
+            self.assertEqual(mod.browser_gateway_url_for(GATEWAY, 'd111111abcdef8.cloudfront.net'),
+                             'https://d111111abcdef8.cloudfront.net')
+        printed.assert_not_called()
 
     def test_falls_back_to_the_gateway_on_8443(self):
-        self.assertEqual(mod.browser_gateway_url_for(GATEWAY, None), 'https://gw.example.com:8443')
-        self.assertEqual(mod.browser_gateway_url_for(GATEWAY, 'http://bad'), 'https://gw.example.com:8443')
+        with mock.patch('builtins.print'):
+            self.assertEqual(mod.browser_gateway_url_for(GATEWAY, None), 'https://gw.example.com:8443')
+            self.assertEqual(mod.browser_gateway_url_for(GATEWAY, 'http://bad'), 'https://gw.example.com:8443')
+
+    def test_fallback_logs_one_line_with_the_host_and_reason(self):
+        with mock.patch('builtins.print') as printed:
+            mod.browser_gateway_url_for(GATEWAY, None, 'SSM AccessDeniedException')
+        printed.assert_called_once()
+        line = printed.call_args[0][0]
+        self.assertIn('Browser gateway URL fallback', line)
+        self.assertIn('https://gw.example.com:8443', line)
+        self.assertIn('SSM AccessDeniedException', line)
+        self.assertNotIn('authToken', line)
 
 
 class SsmLookupTest(unittest.TestCase):
@@ -59,14 +72,20 @@ class SsmLookupTest(unittest.TestCase):
         ssm = mock.Mock()
         ssm.get_parameter.return_value = {'Parameter': {'Value': 'd111111abcdef8.cloudfront.net'}}
         self.assertEqual(mod.get_browser_gateway_url(ssm, 'MediaResourceManager'),
-                         'https://d111111abcdef8.cloudfront.net')
+                         ('https://d111111abcdef8.cloudfront.net', None))
         ssm.get_parameter.assert_called_once_with(
             Name='/MediaResourceManager/DCV/BrowserGatewayUrl')
 
-    def test_missing_or_unreadable_parameter_means_none(self):
+    def test_missing_or_unreadable_parameter_gives_the_reason(self):
         ssm = mock.Mock()
         ssm.get_parameter.side_effect = NotFound('ParameterNotFound')
-        self.assertIsNone(mod.get_browser_gateway_url(ssm, 'MediaResourceManager'))
+        self.assertEqual(mod.get_browser_gateway_url(ssm, 'MediaResourceManager'), (None, 'SSM NotFound'))
+
+    def test_non_https_value_gives_the_reason(self):
+        ssm = mock.Mock()
+        ssm.get_parameter.return_value = {'Parameter': {'Value': 'http://gw.example.com'}}
+        self.assertEqual(mod.get_browser_gateway_url(ssm, 'MediaResourceManager'),
+                         (None, 'SSM value is not an https URL'))
 
 
 class RegionalHubRecordTest(unittest.TestCase):
@@ -97,13 +116,16 @@ class RegionalHubRecordTest(unittest.TestCase):
             'connectionGatewayEndpoint': 'gw-west.example.com',
         })
         self.assertIsNone(endpoints['browser_gateway_url'])
-        self.assertEqual(
-            mod.browser_gateway_url_for(endpoints['connection_gateway_endpoint'], endpoints['browser_gateway_url']),
-            'https://gw-west.example.com:8443')
+        with mock.patch('builtins.print'):
+            self.assertEqual(
+                mod.browser_gateway_url_for(endpoints['connection_gateway_endpoint'], endpoints['browser_gateway_url']),
+                'https://gw-west.example.com:8443')
 
-    def test_direct_mode_value_is_kept(self):
-        self.assertEqual(mod.browser_gateway_url_for('gw-west.example.com', 'https://gw-west.example.com:8443'),
-                         'https://gw-west.example.com:8443')
+    def test_direct_mode_value_is_kept_without_a_fallback_line(self):
+        with mock.patch('builtins.print') as printed:
+            self.assertEqual(mod.browser_gateway_url_for('gw-west.example.com', 'https://gw-west.example.com:8443'),
+                             'https://gw-west.example.com:8443')
+        printed.assert_not_called()
 
     def _endpoints_for(self, item):
         table = mock.Mock()

@@ -156,20 +156,29 @@ def normalize_browser_gateway_url(value):
 
 
 def get_browser_gateway_url(ssm_client, pascal_case_name):
-    """Read the browser gateway URL from SSM; None when unset or unreadable."""
+    """Read the browser gateway URL from SSM. Returns (url or None, why it is missing)."""
     try:
         value = ssm_client.get_parameter(
             Name=f'/{pascal_case_name}/{BROWSER_GATEWAY_URL_PARAM}'
         )['Parameter']['Value']
-    except Exception as e:  # ParameterNotFound on installs that predate it
-        print(f"No browser gateway URL in SSM ({type(e).__name__}); using the gateway directly")
-        return None
-    return normalize_browser_gateway_url(value)
+    except Exception as e:  # ParameterNotFound on installs that predate it; AccessDenied without the grant
+        return None, f'SSM {type(e).__name__}'
+    url = normalize_browser_gateway_url(value)
+    return url, (None if url else 'SSM value is not an https URL')
 
 
-def browser_gateway_url_for(gateway_endpoint, published_url):
-    """The origin a browser connects to: the published URL, else the gateway on 8443."""
-    return normalize_browser_gateway_url(published_url) or f'https://{gateway_endpoint}:8443'
+def browser_gateway_url_for(gateway_endpoint, published_url, missing_reason='not published'):
+    """The origin a browser connects to: the published URL, else the gateway on 8443.
+
+    The fallback logs one line (host and reason only, never a token) so the
+    path a session took shows in CloudWatch.
+    """
+    url = normalize_browser_gateway_url(published_url)
+    if url:
+        return url
+    direct = f'https://{gateway_endpoint}:8443'
+    print(f"Browser gateway URL fallback: using the gateway directly ({direct}); reason: {missing_reason}")
+    return direct
 
 
 def get_regional_dcv_endpoints(region):
@@ -832,9 +841,11 @@ def lambda_handler(event, context):
                 # connectionUrl and quicConnectionUrl stay for the native client.
                 if regional_connection_gateway:
                     published_browser_url = regional_browser_gateway_url
+                    missing_reason = f'hub record has no https {HUB_BROWSER_GATEWAY_URL_FIELD}'
                 else:
-                    published_browser_url = get_browser_gateway_url(ssm, pascal_case_name)
-                browser_gateway_url = browser_gateway_url_for(gateway_endpoint, published_browser_url)
+                    published_browser_url, missing_reason = get_browser_gateway_url(ssm, pascal_case_name)
+                browser_gateway_url = browser_gateway_url_for(
+                    gateway_endpoint, published_browser_url, missing_reason)
                 
                 print(f"DCV URL constructed using gateway: {gateway_endpoint}; browser gateway: {browser_gateway_url}")
                 
