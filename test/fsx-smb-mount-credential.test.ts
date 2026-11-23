@@ -57,7 +57,7 @@ jest.mock('@aws-sdk/client-ssm', () => ({
       if (cmd.kind === 'SendCommand') return { Command: { CommandId: 'cmd-1' } };
       const values: Record<string, string> = {
         '/MediaResourceManager/Identity/ActiveDirectoryDomainName': 'example.internal',
-        '/MediaResourceManager/Identity/AdServiceAccountSecretArn': 'ad-secret',
+        '/MediaResourceManager/Identity/AdServiceAccountSecretArn': 'ad-secret', // pragma: allowlist secret
         '/MediaResourceManager/DCV/InstanceRoleArn': ROLE_ARN,
       };
       return { Parameter: { Value: values[cmd.input.Name] } };
