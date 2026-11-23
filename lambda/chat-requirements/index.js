@@ -11,7 +11,7 @@
 
 const { BedrockRuntimeClient, ConverseCommand } = require('@aws-sdk/client-bedrock-runtime');
 const { requireAdmin } = require('./authz');
-const { redactForLog } = require('../shared/log-redact');
+const { requestSummary } = require('../shared/log-redact');
 
 const bedrockClient = new BedrockRuntimeClient({ region: process.env.AWS_REGION });
 
@@ -85,7 +85,7 @@ Set readyToGenerate to true when:
 Set confidence based on how well you understand what the user needs.`;
 
 exports.handler = async (event) => {
-  console.log('Event:', JSON.stringify(redactForLog(event), null, 2));
+  console.log('Event:', JSON.stringify(requestSummary(event)));
 
   try {
     // Handle OPTIONS preflight
