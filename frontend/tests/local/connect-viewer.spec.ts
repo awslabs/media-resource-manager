@@ -130,6 +130,23 @@ test('new-tab handoff: window.open from a signed-in console tab opens a signed-i
   await expectTokenNotStored(viewer);
 });
 
+test('the viewer container fills the viewport, so the SDK requests a full-tab resolution', async ({ page }) => {
+  // The Web UI SDK sizes its resolution request from #dcv-container (on
+  // connect and, debounced, on every window resize). A container smaller than
+  // the tab would make the remote desktop smaller than the tab.
+  await mockBackend(page, { browserGatewayUrl: 'https://gw.example.test' });
+  await page.routeWebSocket(/gw\.example\.test/, () => { /* never answer: the viewer stays mounted */ });
+  await signIn(page);
+  for (const size of [{ width: 1600, height: 900 }, { width: 1024, height: 700 }]) {
+    await page.setViewportSize(size);
+    if (!page.url().includes('/connect/')) await page.goto(`/connect/${INSTANCE}`);
+    const box = await page.locator('#dcv-container').boundingBox({ timeout: 20_000 });
+    expect(box).toEqual({ x: 0, y: 0, width: size.width, height: size.height });
+  }
+  // Not checked here: the SDK's own resize handling (#dcv-display-frame), which
+  // it attaches only after a connection is established.
+});
+
 test('the SDK license files are served next to the viewer', async ({ request }) => {
   for (const path of ['/connect/EULA.txt', '/connect/third-party-licenses.txt', '/dcvsdk/EULA.txt', '/dcvsdk/dcvjs/dcv.js']) {
     const res = await request.get(path);
