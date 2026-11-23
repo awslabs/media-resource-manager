@@ -188,6 +188,27 @@ export class LinuxWorkstationCreationStack extends cdk.Stack {
       timeout: cdk.Duration.minutes(2),
     });
 
+    // Lambda: Wait for a READY console session. The DCV server can register
+    // while the desktop never starts, so a registered server alone does not
+    // mean Connect will work. Shared with the Windows workflow.
+    const checkConsoleSessionFunction = new lambda.Function(this, 'CheckLinuxConsoleSessionFunction', {
+      functionName: `${props.acronym.toLowerCase()}-console-session-ready-linux`,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.lambda_handler',
+      reservedConcurrentExecutions: 5,
+      environmentEncryption: props.dataEncryptionKey,
+      environment: {
+        PASCAL_CASE_NAME: props.pascalCaseName,
+        SESSION_PLATFORM: 'Linux',
+        WORKSTATION_TABLE_NAME: props.workstationTable.tableName,
+      },
+      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/console-session-ready')),
+      timeout: cdk.Duration.seconds(60),
+      vpc: props.vpc,
+      vpcSubnets: { subnets: props.vpc.privateSubnets },
+      securityGroups: [props.workstationSecurityGroup],
+    });
+
     // ============================================
     // IAM PERMISSIONS
     // ============================================
@@ -281,6 +302,22 @@ export class LinuxWorkstationCreationStack extends cdk.Stack {
     
     props.workstationTable.grantWriteData(checkDCVReadinessFunction);
     if (props.dataEncryptionKey) props.dataEncryptionKey.grantEncryptDecrypt(checkDCVReadinessFunction);
+
+    checkConsoleSessionFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ssm:GetParameter'],
+      resources: ['Endpoint', 'ClientId', 'ClientPassword'].map(name =>
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/DCV/SessionManager/${name}`),
+    }));
+    // The session owner depends on the distro, read from the workstation record and its AMI.
+    // ec2:DescribeImages has no resource-level permissions.
+    checkConsoleSessionFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ec2:DescribeImages'],
+      resources: ['*'],
+    }));
+    props.workstationTable.grant(checkConsoleSessionFunction, 'dynamodb:GetItem');
+    if (props.dataEncryptionKey) props.dataEncryptionKey.grantDecrypt(checkConsoleSessionFunction);
 
 
     // ============================================
@@ -622,17 +659,21 @@ export class LinuxWorkstationCreationStack extends cdk.Stack {
     });
 
     // Helper to create unique failure update states (each state can only have one .next())
-    const createFailureUpdate = (id: string) => new tasks.CallAwsService(this, id, {
+    // A failureReason is shown with the Failed status in the web console.
+    const createFailureUpdate = (id: string, failureReason?: string) => new tasks.CallAwsService(this, id, {
       service: 'dynamodb',
       action: 'updateItem',
       parameters: {
         'TableName': props.workstationTable.tableName,
         'Key': { 'instanceId': { 'S.$': '$.instanceId' } },
-        'UpdateExpression': 'SET #status = :status, dcvStatus = :dcvStatus',
+        'UpdateExpression': failureReason
+          ? 'SET #status = :status, dcvStatus = :dcvStatus, failureReason = :failureReason'
+          : 'SET #status = :status, dcvStatus = :dcvStatus',
         'ExpressionAttributeNames': { '#status': 'status' },
         'ExpressionAttributeValues': {
           ':status': { 'S': 'failed' },
-          ':dcvStatus': { 'S': 'failed' }
+          ':dcvStatus': { 'S': 'failed' },
+          ...(failureReason && { ':failureReason': { 'S': failureReason } }),
         }
       },
       resultPath: stepfunctions.JsonPath.DISCARD,
@@ -761,6 +802,36 @@ export class LinuxWorkstationCreationStack extends cdk.Stack {
       }
     });
 
+    // After the DCV server registers, poll until a console session is READY:
+    // up to 20 checks 30 s apart (~10 minutes). If none is READY by then, the
+    // desktop did not start and Connect would fail, so the creation fails.
+    const maxConsoleSessionChecks = 20;
+    const checkConsoleSessionTask = new tasks.LambdaInvoke(this, 'CheckLinuxConsoleSession', {
+      lambdaFunction: checkConsoleSessionFunction,
+      outputPath: '$.Payload',
+      retryOnServiceExceptions: false,
+    });
+    checkConsoleSessionTask.addRetry({
+      errors: ['Lambda.TooManyRequestsException', 'Lambda.ServiceException'],
+      interval: cdk.Duration.seconds(2),
+      maxAttempts: 6,
+      backoffRate: 2,
+    });
+    const consoleSessionLoop = checkConsoleSessionTask
+      .next(new stepfunctions.Choice(this, 'LinuxConsoleSessionReady?')
+        .when(stepfunctions.Condition.booleanEquals('$.consoleSessionReady', true),
+          updateStatusComplete.next(successState)
+        )
+        .when(stepfunctions.Condition.numberGreaterThanEquals('$.consoleSessionChecks', maxConsoleSessionChecks),
+          createFailureUpdate('FailConsoleSessionTimeout',
+            'The DCV console session did not become ready within 10 minutes, so the desktop is not available. '
+            + 'Check that the display manager and X server start on the workstation.')
+        )
+        .otherwise(new stepfunctions.Wait(this, 'WaitForLinuxConsoleSession', {
+          time: stepfunctions.WaitTime.duration(cdk.Duration.seconds(30)),
+        }).next(checkConsoleSessionTask))
+      );
+
     // Phase 1 polling loop - LINEAR FLOW (assumes all instances have GPU)
     // Phase 1 → Phase 2 → Reboot → Phase 3 → DCV Ready
     const phase1PollLoop = checkSSMCommandPhase1
@@ -795,7 +866,7 @@ export class LinuxWorkstationCreationStack extends cdk.Stack {
                               .next(checkDCVReadinessGpu)
                               .next(new stepfunctions.Choice(this, 'DcvReady?')
                                 .when(stepfunctions.Condition.booleanEquals('$.dcvReady', true),
-                                  updateStatusComplete.next(successState)
+                                  consoleSessionLoop
                                 )
                                 .otherwise(
                                   incDcvRetry
