@@ -73,24 +73,64 @@ export function sessionNameFor(user: { firstName?: string; lastName?: string; em
   return `${user?.firstName || ''} ${user?.lastName || ''}`.trim() || user?.email?.split('@')[0] || 'User';
 }
 
+/** What Connect shows while it waits for a console session that is still starting. */
+export const STARTING_SESSION_MESSAGE = 'Starting your session. This can take a minute on a new workstation...';
+
+/** How many times Connect asks again while the console session is still starting. */
+export const SESSION_START_RETRIES = 4;
+const DEFAULT_RETRY_AFTER_SECONDS = 5;
+
+export interface CreateSessionOptions {
+  /** Called before each retry, so the page can say the session is starting. */
+  onStarting?: () => void;
+  /** Wait between retries (tests pass a fake). */
+  wait?: (ms: number) => Promise<void>;
+}
+
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+/**
+ * POST /dcv `create-session` for the workstation's console session. A new
+ * console session can take a minute to reach READY; until then the API
+ * answers 409 `{status: 'session-starting', retryAfterSeconds}`, and this asks
+ * again up to SESSION_START_RETRIES times. Returns the last response.
+ */
+export async function postCreateSession(
+  instanceId: string,
+  sessionName: string,
+  { onStarting, wait = sleep }: CreateSessionOptions = {},
+): Promise<Response> {
+  const token = getAuthToken();
+  if (!token) throw new Error('No current user');
+
+  for (let attempt = 0; ; attempt++) {
+    const response = await apiCall('/dcv', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({
+        action: 'create-session',
+        serverId: instanceId,
+        sessionName,
+        sessionType: 'console',
+      }),
+    });
+    if (response.status !== 409 || attempt >= SESSION_START_RETRIES) return response;
+    const data = await response.clone().json().catch(() => ({}));
+    if (data.status !== 'session-starting') return response;
+    const seconds = Number(data.retryAfterSeconds);
+    const delay = Number.isFinite(seconds) ? Math.min(Math.max(seconds, 1), 30) : DEFAULT_RETRY_AFTER_SECONDS;
+    onStarting?.();
+    await wait(delay * 1000);
+  }
+}
+
 /** Start (or reuse) the workstation's console session through POST /dcv. */
 export async function createViewerSession(
   instanceId: string,
   sessionName: string,
+  options: CreateSessionOptions = {},
 ): Promise<ViewerSession> {
-  const token = getAuthToken();
-  if (!token) throw new Error('No current user');
-
-  const response = await apiCall('/dcv', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    body: JSON.stringify({
-      action: 'create-session',
-      serverId: instanceId,
-      sessionName,
-      sessionType: 'console',
-    }),
-  });
+  const response = await postCreateSession(instanceId, sessionName, options);
   const data = await response.json().catch(() => ({}));
   if (!response.ok || data.error) {
     throw new Error(data.error || `The session request failed (HTTP ${response.status})`);

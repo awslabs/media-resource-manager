@@ -3395,6 +3395,14 @@ function generateDcvLambdaResources(acronymLower, privateSubnetRefs, lambdaAsset
                 Resource: '*'
               },
               {
+                // dcv-session-manager reads a Linux workstation's AMI name to pick
+                // the session owner (rocky or ubuntu). No resource-level permissions.
+                Effect: 'Allow',
+                Action: ['ec2:DescribeImages'],
+                Resource: '*',
+                Condition: { StringEquals: { 'aws:RequestedRegion': { Ref: 'AWS::Region' } } }
+              },
+              {
                 Effect: 'Allow',
                 Action: ['logs:CreateLogGroup', 'logs:CreateLogStream', 'logs:PutLogEvents'],
                 Resource: { 'Fn::Sub': 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*' }

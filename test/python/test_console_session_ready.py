@@ -4,6 +4,8 @@
 """Unit tests for lambda/console-session-ready (run by test/workstation-creation-windows.test.ts)."""
 
 import importlib.util
+import io
+import json
 import os
 import sys
 import unittest
@@ -70,11 +72,63 @@ class HandlerTest(unittest.TestCase):
     def setUp(self):
         os.environ['AWS_REGION'] = 'us-east-1'
 
-    def test_skips_satellite_regions(self):
-        out = mod.lambda_handler({'instanceId': INSTANCE, 'region': 'us-west-2'}, None)
+    def test_hub_workstation_is_checked_through_the_hub_session_manager(self):
+        invokes, boto3 = [], hub_boto3([
+            {'Servers': [NEW]},
+            {'Sessions': [session('s1', 'READY')]},
+        ])
+        boto3.invokes = invokes
+        env = {'REGIONAL_SESSION_MANAGER_FUNCTION': 'mrm-regional-dcv-session-manager'}
+        with mock.patch.dict(os.environ, env), mock.patch.dict(sys.modules, {'boto3': boto3}), \
+                mock.patch.object(mod, '_broker', side_effect=AssertionError('primary broker used')):
+            out = mod.lambda_handler({'instanceId': INSTANCE, 'region': 'us-west-2'}, None)
+        boto3.client.assert_called_with('lambda', region_name='us-west-2')
+        self.assertEqual([c['FunctionName'] for c in invokes], ['mrm-regional-dcv-session-manager'] * 2)
+        self.assertEqual([json.loads(c['Payload'])['consoleSessionBrokerCall']['api'] for c in invokes],
+                         ['describeServers', 'describeSessions'])
+        self.assertTrue(out['consoleSessionReady'])
+        self.assertNotIn('consoleSessionCheckSkipped', out)
+        self.assertEqual(out['consoleSessionChecks'], 1)
+
+    def test_hub_workstation_creates_the_session_in_the_hub_and_waits(self):
+        invokes, boto3 = [], hub_boto3([
+            {'Servers': [NEW]},
+            {'Sessions': []},
+            {'SuccessfulList': [{'Id': 's1'}]},
+        ])
+        boto3.invokes = invokes
+        env = {'REGIONAL_SESSION_MANAGER_FUNCTION': 'mrm-regional-dcv-session-manager'}
+        with mock.patch.dict(os.environ, env), mock.patch.dict(sys.modules, {'boto3': boto3}):
+            out = mod.lambda_handler({'instanceId': INSTANCE, 'region': 'us-west-2'}, None)
+        create = json.loads(invokes[2]['Payload'])['consoleSessionBrokerCall']
+        self.assertEqual(create['api'], 'createSessions')
+        self.assertEqual(create['body'][0]['Type'], 'CONSOLE')
+        self.assertFalse(out['consoleSessionReady'])
+        self.assertEqual(out['consoleSessionId'], 's1')
+
+    def test_hub_errors_mean_not_ready(self):
+        boto3 = hub_boto3([{'statusCode': 502, 'body': '{}'}], raw=True)
+        env = {'REGIONAL_SESSION_MANAGER_FUNCTION': 'mrm-regional-dcv-session-manager'}
+        with mock.patch.dict(os.environ, env), mock.patch.dict(sys.modules, {'boto3': boto3}):
+            out = mod.lambda_handler({'instanceId': INSTANCE, 'region': 'us-west-2'}, None)
+        self.assertFalse(out['consoleSessionReady'])
+        self.assertNotIn('consoleSessionCheckSkipped', out)
+
+    def test_hub_not_updated_yet_is_skipped_as_before(self):
+        # A hub copy from before the broker calls answers 401 (no authorizer context).
+        boto3 = hub_boto3([{'statusCode': 401, 'body': '{"error": "Missing authorizer context"}'}], raw=True)
+        env = {'REGIONAL_SESSION_MANAGER_FUNCTION': 'mrm-regional-dcv-session-manager'}
+        with mock.patch.dict(os.environ, env), mock.patch.dict(sys.modules, {'boto3': boto3}):
+            out = mod.lambda_handler({'instanceId': INSTANCE, 'region': 'us-west-2'}, None)
         self.assertTrue(out['consoleSessionReady'])
         self.assertTrue(out['consoleSessionCheckSkipped'])
-        self.assertEqual(out['consoleSessionChecks'], 1)
+
+    def test_hub_without_a_session_manager_is_skipped(self):
+        boto3 = hub_boto3([], missing=True)
+        env = {'REGIONAL_SESSION_MANAGER_FUNCTION': 'mrm-regional-dcv-session-manager'}
+        with mock.patch.dict(os.environ, env), mock.patch.dict(sys.modules, {'boto3': boto3}):
+            out = mod.lambda_handler({'instanceId': INSTANCE, 'region': 'us-west-2'}, None)
+        self.assertTrue(out['consoleSessionCheckSkipped'])
 
     def test_creates_session_and_keeps_its_id(self):
         calls = []
@@ -128,6 +182,34 @@ class HandlerTest(unittest.TestCase):
         self.assertEqual(out['consoleSessionOwner'], 'Administrator')
 
 
+class FunctionNotFound(Exception):
+    pass
+
+
+def hub_boto3(responses, raw=False, missing=False):
+    """A boto3 stand-in whose Lambda client answers invokes with `responses` in order.
+
+    Each response is a broker JSON result wrapped as the hub copy returns it,
+    or (raw=True) the whole Lambda payload.
+    """
+    boto3 = mock.MagicMock()
+    boto3.invokes = []
+    pending = list(responses)
+    client = boto3.client.return_value
+    client.exceptions.ResourceNotFoundException = FunctionNotFound
+
+    def invoke(**kwargs):
+        boto3.invokes.append(kwargs)
+        if missing:
+            raise FunctionNotFound('Function not found')
+        result = pending.pop(0)
+        payload = result if raw else {'statusCode': 200, 'body': json.dumps(result)}
+        return {'Payload': io.BytesIO(json.dumps(payload).encode())}
+
+    client.invoke.side_effect = invoke
+    return boto3
+
+
 def fake_boto3(item, images=()):
     """A boto3 stand-in that returns one workstation record and DescribeImages result."""
     boto3 = mock.MagicMock()
@@ -162,6 +244,14 @@ class LinuxOwnerTest(unittest.TestCase):
             self.assertEqual(mod._session_owner({'instanceId': INSTANCE}), 'rocky')
         boto3.resource.return_value.Table.assert_called_with('workstations')
         boto3.client.return_value.describe_images.assert_called_with(ImageIds=['ami-1'])
+
+    def test_reads_a_hub_workstations_ami_in_the_hub_region(self):
+        boto3 = fake_boto3({'instanceId': INSTANCE, 'amiId': 'ami-1', 'workstationName': 'ws-01'},
+                           [{'Name': 'Rocky-9-EC2-Base'}])
+        env = {'SESSION_PLATFORM': 'Linux', 'WORKSTATION_TABLE_NAME': 'workstations'}
+        with mock.patch.dict(os.environ, env), mock.patch.dict(sys.modules, {'boto3': boto3}):
+            self.assertEqual(mod._session_owner({'instanceId': INSTANCE, 'region': 'us-west-2'}), 'rocky')
+        boto3.client.assert_called_with('ec2', region_name='us-west-2')
 
     def test_skips_the_ami_lookup_when_the_record_names_the_distro(self):
         boto3 = fake_boto3({'instanceId': INSTANCE, 'amiId': 'ami-1', 'linuxDistro': 'ubuntu'})

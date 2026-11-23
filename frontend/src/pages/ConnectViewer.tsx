@@ -14,7 +14,7 @@ import { Button, Result, Space, Spin, Typography } from 'antd';
 import dcv from 'dcv';
 import { DCVViewer } from 'dcv-ui';
 import type { DcvDisconnectReason } from 'dcv-ui';
-import { createViewerSession, sessionNameFor, type ViewerSession } from '../utils/dcvViewer';
+import { createViewerSession, sessionNameFor, STARTING_SESSION_MESSAGE, type ViewerSession } from '../utils/dcvViewer';
 
 /** Where scripts/fetch-dcv-web-sdk.sh puts the Web Client SDK (dcv.js, workers, decoders). */
 export const DCV_SDK_PATH = '/dcvsdk/dcvjs';
@@ -66,7 +66,8 @@ export function releaseModifierKeys(connection: ModifierKeyLatch | null): void {
 }
 
 type ViewerState =
-  | { phase: 'starting' }
+  // waiting: the console session exists but isn't ready yet, so the request is retried.
+  | { phase: 'starting'; waiting?: boolean }
   | { phase: 'session'; session: ViewerSession }
   | { phase: 'session-error'; message: string }
   | { phase: 'connect-error'; message: string; serverUrl: string; untrustedCertificateLikely: boolean }
@@ -109,7 +110,11 @@ export default function ConnectViewer({ user }: ConnectViewerProps) {
     if (!instanceId) return;
     let cancelled = false;
     setState({ phase: 'starting' });
-    createViewerSession(instanceId, sessionNameFor(user))
+    createViewerSession(instanceId, sessionNameFor(user), {
+      onStarting: () => {
+        if (!cancelled) setState({ phase: 'starting', waiting: true });
+      },
+    })
       .then((session) => {
         connected.current = false;
         if (!cancelled) setState({ phase: 'session', session });
@@ -184,7 +189,9 @@ export default function ConnectViewer({ user }: ConnectViewerProps) {
     return page(
       <Space direction="vertical" align="center">
         <Spin size="large" />
-        <Typography.Text>Starting a session on {instanceId}...</Typography.Text>
+        <Typography.Text>
+          {state.waiting ? STARTING_SESSION_MESSAGE : `Starting a session on ${instanceId}...`}
+        </Typography.Text>
       </Space>,
     );
   }
