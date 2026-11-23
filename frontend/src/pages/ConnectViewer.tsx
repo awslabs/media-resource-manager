@@ -8,7 +8,7 @@
  * which connects with the token. The Connection Gateway accepts token
  * connections only, so the viewer never asks for credentials.
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { Button, Result, Space, Spin, Typography } from 'antd';
 import dcv from 'dcv';
@@ -17,11 +17,21 @@ import type { DcvDisconnectReason } from 'dcv-ui';
 import { createViewerSession, sessionNameFor, type ViewerSession } from '../utils/dcvViewer';
 
 /** Where scripts/fetch-dcv-web-sdk.sh puts the Web Client SDK (dcv.js, workers, decoders). */
-export const DCV_SDK_BASE_URL = '/dcvsdk/dcvjs/';
+export const DCV_SDK_PATH = '/dcvsdk/dcvjs';
+
+/**
+ * The SDK's `baseUrl`, as an absolute URL. The Web Client SDK resolves any
+ * `baseUrl` that doesn't start with `http` against the page's own directory,
+ * so `/dcvsdk/dcvjs` on /connect/<id> became /connect/<id>/dcvsdk/dcvjs and
+ * the decoder workers loaded the SPA's index.html instead of JavaScript.
+ */
+export function dcvSdkBaseUrl(origin: string = window.location.origin): string {
+  return `${origin.replace(/\/+$/, '')}${DCV_SDK_PATH}`;
+}
 
 type ViewerState =
   | { phase: 'starting' }
-  | { phase: 'session'; session: ViewerSession; connected: boolean }
+  | { phase: 'session'; session: ViewerSession }
   | { phase: 'session-error'; message: string }
   | { phase: 'connect-error'; message: string; serverUrl: string; untrustedCertificateLikely: boolean }
   | { phase: 'disconnected'; message: string };
@@ -38,6 +48,9 @@ export default function ConnectViewer({ user }: ConnectViewerProps) {
   const { instanceId } = useParams<{ instanceId: string }>();
   const [state, setState] = useState<ViewerState>({ phase: 'starting' });
   const [attempt, setAttempt] = useState(0);
+  // Kept out of React state on purpose: the SDK holds references to the DOM it
+  // rendered, so the viewer must not re-render when the connection opens.
+  const connected = useRef(false);
 
   useEffect(() => {
     if (!instanceId) return;
@@ -45,7 +58,8 @@ export default function ConnectViewer({ user }: ConnectViewerProps) {
     setState({ phase: 'starting' });
     createViewerSession(instanceId, sessionNameFor(user))
       .then((session) => {
-        if (!cancelled) setState({ phase: 'session', session, connected: false });
+        connected.current = false;
+        if (!cancelled) setState({ phase: 'session', session });
       })
       .catch((error: Error) => {
         if (!cancelled) setState({ phase: 'session-error', message: error.message });
@@ -59,7 +73,7 @@ export default function ConnectViewer({ user }: ConnectViewerProps) {
   const retry = useCallback(() => setAttempt((n) => n + 1), []);
 
   const onConnectionEstablished = useCallback(() => {
-    setState((prev) => (prev.phase === 'session' ? { ...prev, connected: true } : prev));
+    connected.current = true;
   }, []);
 
   // Called when connect is rejected and when an open connection closes. The
@@ -67,7 +81,7 @@ export default function ConnectViewer({ user }: ConnectViewerProps) {
   const onDisconnect = useCallback((reason: DcvDisconnectReason) => {
     setState((prev) => {
       if (prev.phase !== 'session') return prev;
-      if (prev.connected) return { phase: 'disconnected', message: reasonText(reason) };
+      if (connected.current) return { phase: 'disconnected', message: reasonText(reason) };
       return {
         phase: 'connect-error',
         message: reasonText(reason),
@@ -77,26 +91,30 @@ export default function ConnectViewer({ user }: ConnectViewerProps) {
     });
   }, []);
 
+  const session = state.phase === 'session' ? state.session : null;
+  // Stable props: built once per session, so DCVViewer never re-renders with new objects.
+  const viewerProps = useMemo(() => session && {
+    dcv: {
+      sessionId: session.sessionId,
+      authToken: session.authToken,
+      serverUrl: session.serverUrl,
+      baseUrl: dcvSdkBaseUrl(),
+      logLevel: dcv.LogLevel.WARN,
+      onConnectionEstablished,
+      onDisconnect,
+    },
+    uiConfig: { toolbar: { visible: true, fullscreenButton: true, multimonitorButton: true } },
+  }, [session, onConnectionEstablished, onDisconnect]);
+
   if (!instanceId) {
     return <Result status="404" title="No workstation was given" />;
   }
 
   if (state.phase === 'session') {
-    const { session } = state;
+    if (!viewerProps) return null; // set whenever phase is 'session'
     return (
-      <div style={{ height: '100vh', width: '100vw' }} data-testid="dcv-viewer">
-        <DCVViewer
-          dcv={{
-            sessionId: session.sessionId,
-            authToken: session.authToken,
-            serverUrl: session.serverUrl,
-            baseUrl: DCV_SDK_BASE_URL,
-            logLevel: dcv.LogLevel.WARN,
-            onConnectionEstablished,
-            onDisconnect,
-          }}
-          uiConfig={{ toolbar: { visible: true, fullscreenButton: true, multimonitorButton: true } }}
-        />
+      <div style={{ height: '100vh', width: '100vw' }} data-testid="dcv-viewer" data-sdk-base-url={viewerProps.dcv.baseUrl}>
+        <DCVViewer dcv={viewerProps.dcv} uiConfig={viewerProps.uiConfig} />
       </div>
     );
   }

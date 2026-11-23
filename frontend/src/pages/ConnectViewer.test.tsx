@@ -23,7 +23,7 @@ vi.mock('dcv-ui', () => ({
   },
 }));
 
-import ConnectViewer, { DCV_SDK_BASE_URL } from './ConnectViewer';
+import ConnectViewer, { dcvSdkBaseUrl } from './ConnectViewer';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -40,6 +40,16 @@ function sessionResponse(browserGatewayUrl?: string) {
     ...(browserGatewayUrl ? { browserGatewayUrl } : {}),
   }), { status: 200 });
 }
+
+describe('dcvSdkBaseUrl', () => {
+  // The SDK prefixes any baseUrl that doesn't start with "http" with the
+  // page's directory (/connect/<id>/), so it must be absolute.
+  it('is an absolute URL at the site root, whatever route the viewer is on', () => {
+    expect(dcvSdkBaseUrl('https://console.example.com')).toBe('https://console.example.com/dcvsdk/dcvjs');
+    expect(dcvSdkBaseUrl('https://console.example.com/')).toBe('https://console.example.com/dcvsdk/dcvjs');
+    expect(dcvSdkBaseUrl()).toMatch(/^https?:\/\//);
+  });
+});
 
 describe('ConnectViewer', () => {
   let container: HTMLDivElement;
@@ -99,7 +109,7 @@ describe('ConnectViewer', () => {
       sessionId: 'console',
       authToken: DCV_TOKEN,
       serverUrl: 'https://d111111abcdef8.cloudfront.net',
-      baseUrl: DCV_SDK_BASE_URL,
+      baseUrl: `${window.location.origin}/dcvsdk/dcvjs`,
       logLevel: 3,
     });
   });
@@ -153,6 +163,16 @@ describe('ConnectViewer', () => {
     expect(container.textContent).toContain('The session was disconnected');
     expect(container.textContent).toContain('Closed by the server');
     expect(Array.from(container.querySelectorAll('button')).some((b) => b.textContent?.trim() === 'Reconnect')).toBe(true);
+  });
+
+  it('does not re-render DCVViewer when the connection opens', async () => {
+    fetchMock.mockResolvedValue(sessionResponse('https://d111111abcdef8.cloudfront.net'));
+    await render();
+    const renders = viewerProps.length;
+    const first = lastViewer();
+    await act(async () => lastViewer().dcv.onConnectionEstablished!({}));
+    expect(viewerProps.length).toBe(renders);
+    expect(lastViewer().dcv).toBe(first.dcv);
   });
 
   it('shows the API error and Retry when the session cannot start', async () => {

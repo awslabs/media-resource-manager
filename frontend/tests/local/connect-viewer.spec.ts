@@ -130,6 +130,40 @@ test('new-tab handoff: window.open from a signed-in console tab opens a signed-i
   await expectTokenNotStored(viewer);
 });
 
+test('on the nested /connect/<id> route, every SDK worker and decoder loads from the site root', async ({ page }) => {
+  await mockBackend(page, { browserGatewayUrl: 'https://gw.example.test' });
+  await page.routeWebSocket(/gw\.example\.test/, () => { /* never answer: the viewer stays mounted */ });
+  await signIn(page);
+  await page.goto(`/connect/${INSTANCE}`);
+  const baseUrl = await page.getByTestId('dcv-viewer').getAttribute('data-sdk-base-url', { timeout: 20_000 });
+  const origin = new URL(page.url()).origin;
+  // Absolute, so the SDK keeps it as is (it rewrites anything not starting with http).
+  expect(baseUrl).toBe(`${origin}/dcvsdk/dcvjs`);
+
+  // Start each decoder worker exactly as dcv.js does (a Blob that sets baseUrl
+  // and calls importScripts), and collect load errors and the workers' own
+  // "failed to import" warnings.
+  const problems = await page.evaluate(async (base) => {
+    const found: string[] = [];
+    for (const worker of ['lz4decoder-worker.js', 'jsmpegdecoder-worker.js', 'broadwayh264decoder-worker.js']) {
+      const blob = new Blob([`var baseUrl = "${base}";`, `importScripts("${base}/dcv/${worker}");`], { type: 'text/javascript' });
+      const url = URL.createObjectURL(blob);
+      const w = new Worker(url);
+      URL.revokeObjectURL(url);
+      await new Promise<void>((resolve) => {
+        w.onerror = (e) => { found.push(`${worker}: ${e.message}`); e.preventDefault(); resolve(); };
+        w.onmessage = (e) => { if (e.data?.type === 'warn') found.push(`${worker}: ${e.data.message}`); };
+        setTimeout(resolve, 1500);
+      });
+      w.terminate();
+    }
+    const mic = await fetch(`${base}/dcv/microphoneprocessor.js`);
+    if (!/javascript/.test(mic.headers.get('content-type') || '')) found.push(`microphoneprocessor.js: ${mic.headers.get('content-type')}`);
+    return found;
+  }, baseUrl!);
+  expect(problems).toEqual([]);
+});
+
 test('the viewer container fills the viewport, so the SDK requests a full-tab resolution', async ({ page }) => {
   // The Web UI SDK sizes its resolution request from #dcv-container (on
   // connect and, debounced, on every window resize). A container smaller than
