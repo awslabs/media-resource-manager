@@ -1282,6 +1282,19 @@ async function deleteWorkstation(instanceId) {
       // Instance already terminated or purged from EC2 — that's fine, just clean up DynamoDB
       console.log(`EC2 terminate skipped for ${instanceId}: ${ec2Error.message}`);
     }
+
+    // Remove the workstation's SMB mount secret, if it has one
+    if (process.env.FSX_SMB_MOUNT_MANAGER_FUNCTION_ARN) {
+      try {
+        await lambdaClient.send(new InvokeCommand({
+          FunctionName: process.env.FSX_SMB_MOUNT_MANAGER_FUNCTION_ARN,
+          InvocationType: 'Event',
+          Payload: JSON.stringify({ action: 'removeInstance', instanceId })
+        }));
+      } catch (error) {
+        console.error('Failed to request SMB mount secret cleanup for', instanceId + ':', error.name, error.message);
+      }
+    }
     
     // Remove from DynamoDB
     await dynamodb.send(new DeleteCommand({

@@ -996,6 +996,20 @@ ${connectionGatewayInstallScript}`;
     // Grant the workstation instance role permission to read the secret
     this.standaloneAdminPasswordSecret.grantRead(workstationInstanceRole);
 
+    // Standalone Windows workstations read their own SMB mount credentials at
+    // logon. The FSx SMB mount manager writes one secret per workstation,
+    // /<ProductName>/Workstation/<instanceId>/SmbMount, and gives each a
+    // resource policy that denies GetSecretValue to every caller except a
+    // workstation role session for that instance ID. Regional hub workstation
+    // roles already read /<ProductName>/Workstation/* in this Region.
+    workstationInstanceRole.addToPolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/${props.pascalCaseName}/Workstation/*/SmbMount-*`,
+      ],
+    }));
+
     // Store the secret ARN in SSM for cross-stack references (secret name has random suffix)
     new ssm.StringParameter(this, 'StandaloneAdminPasswordSecretArnParameter', {
       parameterName: `/${props.pascalCaseName}/Workstation/StandaloneAdminPasswordSecretArn`,
