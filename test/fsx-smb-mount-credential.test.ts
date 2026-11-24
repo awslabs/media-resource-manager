@@ -30,7 +30,8 @@ const mockState: {
   purgeAttempts: number;
   pendingDeletion: number;
   createFailure: string | null;
-} = { workstation: null, storage: {}, secretExists: false, failPutSecret: false, purgeAttempts: 0, pendingDeletion: 0, createFailure: null };
+  createdArn: string | null;
+} = { workstation: null, storage: {}, secretExists: false, failPutSecret: false, purgeAttempts: 0, pendingDeletion: 0, createFailure: null, createdArn: null };
 
 function mockCommand(kind: string) {
   return class {
@@ -124,10 +125,10 @@ jest.mock('@aws-sdk/client-secrets-manager', () => {
             }
             if (mockState.secretExists) throw error('ResourceExistsException');
             mockState.secretExists = true;
-            return { ARN: SECRET_ARN };
+            return { ARN: mockState.createdArn ?? SECRET_ARN };
           case 'PutSecretValue':
             if (mockState.failPutSecret) throw error('AccessDeniedException');
-            return { ARN: SECRET_ARN };
+            return { ARN: mockState.createdArn ?? SECRET_ARN };
           case 'DeleteSecret':
             if (!mockState.secretExists) throw error('ResourceNotFoundException');
             mockState.secretExists = false;
@@ -184,6 +185,7 @@ beforeEach(() => {
   mockState.purgeAttempts = 0;
   mockState.pendingDeletion = 0;
   mockState.createFailure = null;
+  mockState.createdArn = null;
   mockState.storage = { 'st-win': FSX_WINDOWS, 'st-ontap': FSX_ONTAP };
   // Run retry back-offs at once and record their lengths.
   jest.spyOn(global, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
@@ -294,6 +296,9 @@ describe('standalone workstation with FSx for Windows', () => {
     await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
     const script = sentScript();
     const dotnet = script.indexOf("[System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll'))");
+    const sigV4 = script.indexOf('$smResponse = Invoke-WebRequest @smRequest');
+    expect(sigV4).toBeGreaterThan(-1);
+    expect(dotnet).toBeGreaterThan(sigV4);
     const cli = script.indexOf('Get-Command aws.exe');
     const modular = script.indexOf('Get-Module -ListAvailable -Name AWS.Tools.SecretsManager');
     const monolithic = script.indexOf("$readClient = 'AWSPowerShell'");
@@ -344,11 +349,91 @@ describe('standalone workstation with FSx for Windows', () => {
   test('the secret is parsed once, and a parse error is logged without its message', async () => {
     await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
     const script = sentScript();
-    expect(script.match(/ConvertFrom-Json/g)).toHaveLength(1);
+    expect(script.match(/\$secretString \| ConvertFrom-Json/g)).toHaveLength(1);
     expect(script).toContain('try { $mountCredentials = $secretString | ConvertFrom-Json } catch {');
     expect(script).toContain('ERROR: The SMB mount credentials are not valid JSON"');
     expect(script).toContain('Remove-Variable -Name secretString');
     expect(script).not.toMatch(/Add-Content[^\n]*\$secretString/);
+  });
+
+  test('the Run Command runs the mount task at normal priority (4) as well as queuing starts', async () => {
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    const command = sentScript();
+    expect(command).toContain('if ($task.Settings.MultipleInstances -ne "Queue" -or $task.Settings.Priority -ne 4) {');
+    expect(command).toContain('$task.Settings.Priority = 4');
+    expect(command.indexOf('$task.Settings.Priority = 4')).toBeLessThan(command.indexOf('Set-ScheduledTask -InputObject $task -ErrorAction Stop'));
+  });
+});
+
+describe('SigV4 read of the mount secret', () => {
+  beforeEach(() => {
+    mockState.workstation = workstation(false, ['st-win']);
+  });
+
+  const scriptFor = async (arn?: string) => {
+    if (arn) mockState.createdArn = arn;
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    return sentScript();
+  };
+
+  test('is the first client, after a self-test against the AWS SigV4 documentation example', async () => {
+    const script = await scriptFor();
+    const selfTest = script.indexOf("$sigV4Check = Get-SigV4Signature 'GET' '/' 'Action=ListUsers&Version=2010-05-08'");
+    expect(selfTest).toBeGreaterThan(-1);
+    expect(script).toContain("'x-amz-date'   = '20150830T123600Z'");
+    expect(script).toContain("elseif ($sigV4Check.Signature -ne '5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7') {"); // pragma: allowlist secret
+    expect(script).toContain('SigV4 self-test failed, trying the next client');
+    const request = script.indexOf('$smResponse = Invoke-WebRequest @smRequest');
+    expect(request).toBeGreaterThan(selfTest);
+    expect(script.indexOf("[System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSPowerShell.dll'))")).toBeGreaterThan(request);
+    // Later clients run only when the signed request got nothing.
+    expect(script).toContain('if (-not $secretString -and $awsPowerShellBase -and');
+    expect(script).toContain("$readClient = 'SigV4 (instance role from IMDSv2)'");
+  });
+
+  test('gets IMDSv2 role credentials with 5 s timeouts and signs a 15 s GetSecretValue call', async () => {
+    const script = await scriptFor();
+    expect(script).toContain(`$imdsToken = Invoke-RestMethod -Method Put -Uri "$imds/api/token" -Headers @{ 'X-aws-ec2-metadata-token-ttl-seconds' = '60' } -TimeoutSec 5`);
+    expect(script.match(/169\.254\.169\.254|\$imds\//g)!.length).toBeGreaterThanOrEqual(3);
+    expect(script.match(/Invoke-RestMethod [^\n]*-TimeoutSec 5/g)).toHaveLength(3);
+    expect(script).toContain('TimeoutSec      = 15');
+    expect(script).toContain("'x-amz-target'         = 'secretsmanager.GetSecretValue'");
+    expect(script).toContain("'x-amz-security-token' = $imdsCredentials.Token");
+    expect(script).toContain("$smBody = '{\"SecretId\":\"' + $secretArn + '\"}'");
+    // TLS certificate validation is left at its default.
+    expect(script).not.toMatch(/ServerCertificateValidationCallback|SkipCertificateCheck|CheckCertificateRevocationList/);
+  });
+
+  test('logs no credential, Authorization header, token or response body', async () => {
+    const script = await scriptFor();
+    const logLines = script.split('\n').filter((l) => l.includes('Add-Content'));
+    for (const line of logLines) {
+      expect(line).not.toMatch(/\$(imdsCredentials|smAuthorization|imdsToken|smResponseText|smResponse|sigV4|smRequest|secretString)\b/);
+    }
+    // Errors log the HTTP status and AWS's error type, or only the exception type.
+    expect(script).toContain('SigV4 request failed after $([int]((Get-Date) - $readStart).TotalMilliseconds) ms (HTTP $sigV4Status $sigV4ErrorType), trying the next client');
+    expect(script).toContain('SigV4 request failed after $([int]((Get-Date) - $readStart).TotalMilliseconds) ms ($($_.Exception.GetType().Name)), trying the next client');
+    expect(script).toContain('$imdsCredentials = $null; $sigV4 = $null; $smAuthorization = $null; $imdsToken = $null; $smRequest = $null');
+    expect(script).toContain('$smResponseText = $null');
+  });
+
+  test.each([
+    ['aws', 'us-east-1', 'secretsmanager.us-east-1.amazonaws.com'],
+    ['aws-cn', 'cn-north-1', 'secretsmanager.cn-north-1.amazonaws.com.cn'],
+    ['aws-us-gov', 'us-gov-west-1', 'secretsmanager.us-gov-west-1.amazonaws.com'],
+  ])('signs for the %s partition endpoint in the secret ARN Region', async (partition, region, host) => {
+    const script = await scriptFor(`arn:${partition}:secretsmanager:${region}:123456789012:secret:/MediaResourceManager/Workstation/${INSTANCE_ID}/SmbMount-AbCdEf`); // pragma: allowlist secret
+    expect(script).toContain(`$smHost = '${host}'`);
+    expect(script).toContain(`$secretRegion = '${region}'`);
+    expect(script).not.toMatch(/\$smHost = "secretsmanager/);
+  });
+
+  test('an unknown partition skips the signed request and keeps the SDK and module clients', async () => {
+    const script = await scriptFor(`arn:aws-iso:secretsmanager:us-iso-east-1:123456789012:secret:/MediaResourceManager/Workstation/${INSTANCE_ID}/SmbMount-AbCdEf`); // pragma: allowlist secret
+    expect(script).toContain('$smHost = $null');
+    expect(script).toContain("No signed-request endpoint for this secret's partition, trying the next client");
+    expect(script).toContain("$readClient = 'AWS SDK for .NET (AWSPowerShell assemblies)'");
+    expect(script).toContain("$readClient = 'AWSPowerShell'");
   });
 
   test('every log line gets the time it is written', async () => {

@@ -98,6 +98,26 @@ function isScheduledForDeletion(error) {
     return error.name === 'InvalidRequestException' && /scheduled for deletion/i.test(error.message || '');
 }
 
+// DNS suffix of the Secrets Manager endpoint in each partition.
+const PARTITION_DNS_SUFFIX = { 'aws': 'amazonaws.com', 'aws-cn': 'amazonaws.com.cn', 'aws-us-gov': 'amazonaws.com' };
+const REGION_PATTERN = /^[a-z]{2}(-[a-z]+)+-\d+$/;
+
+/**
+ * Region and Secrets Manager endpoint host for a secret, from its ARN
+ * (arn:<partition>:secretsmanager:<region>:...). The logon script signs its
+ * request for that host. host is null for a partition not listed above; the
+ * script then skips the signed request and uses the AWS SDK or tools, which
+ * resolve the endpoint themselves.
+ */
+function secretsManagerEndpoint(secretArn) {
+    const parts = String(secretArn).split(':');
+    const partition = parts[1];
+    const arnRegion = parts[3];
+    const region = REGION_PATTERN.test(arnRegion || '') ? arnRegion : process.env.AWS_REGION;
+    const suffix = PARTITION_DNS_SUFFIX[partition];
+    return { region, host: suffix && REGION_PATTERN.test(arnRegion || '') ? `secretsmanager.${arnRegion}.${suffix}` : null };
+}
+
 /** IAM role ARN patterns of the primary and regional hub workstation roles. */
 async function workstationRoleArnPatterns() {
     const param = await ssmPrimary.send(new GetParameterCommand({
@@ -607,7 +627,7 @@ async function getStorageForInstance(instanceId, workstation, isDomainJoined, wo
         await deleteMountSecret(instanceId);
     }
     const mountSecret = mountSecretArn
-        ? { arn: mountSecretArn, region: process.env.AWS_REGION, storageIds: new Set(Object.keys(mounts)) }
+        ? { arn: mountSecretArn, ...secretsManagerEndpoint(mountSecretArn), storageIds: new Set(Object.keys(mounts)) }
         : null;
 
     // Non-secret ONTAP share details for the script (share name, CIFS server).
@@ -692,26 +712,127 @@ $mountCredentials = $null`;
     return `
 # Read this workstation's SMB mount credentials from Secrets Manager with the
 # instance role. Fastest first:
-#   1. the AWS SDK for .NET assemblies that ship inside the AWSPowerShell
-#      module, loaded directly (importing the whole module takes minutes the
-#      first time);
-#   2. the AWS CLI;
-#   3. the modular AWS.Tools.SecretsManager module;
-#   4. the AWSPowerShell module.
-# The secret value stays in this process; only the ARN is on any command line.
+#   1. a SigV4-signed GetSecretValue request with the instance role
+#      credentials from IMDSv2 (no AWS assemblies to load);
+#   2. the AWS SDK for .NET assemblies that ship inside the AWSPowerShell
+#      module, loaded directly;
+#   3. the AWS CLI;
+#   4. the modular AWS.Tools.SecretsManager module;
+#   5. the AWSPowerShell module (importing it takes minutes the first time).
+# The secret value stays in this process; only the ARN is on any command
+# line, and no credential, Authorization header or response body is logged.
 $mountCredentials = $null
 $secretString = $null
 $secretArn = ${psQuote(mountSecret.arn)}
 $secretRegion = ${psQuote(mountSecret.region)}
+$smHost = ${mountSecret.host ? psQuote(mountSecret.host) : '$null'}
 $readStart = Get-Date
 $readClient = $null
-# The AWSPowerShell folder on Amazon Windows AMIs; otherwise ask PowerShell.
-$awsPowerShellBase = $null
-if (\${env:ProgramFiles(x86)}) { $awsPowerShellBase = Join-Path \${env:ProgramFiles(x86)} 'AWS Tools\\PowerShell\\AWSPowerShell' }
-if (-not ($awsPowerShellBase -and (Test-Path (Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll')))) {
-    $awsPowerShellBase = (Get-Module -ListAvailable -Name AWSPowerShell | Sort-Object Version -Descending | Select-Object -First 1).ModuleBase
+
+function ConvertTo-HexString([byte[]]$bytes) { [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant() }
+function Get-Sha256Hex([string]$text) {
+    $alg = [Security.Cryptography.SHA256]::Create()
+    try { ConvertTo-HexString ($alg.ComputeHash([Text.Encoding]::UTF8.GetBytes($text))) } finally { $alg.Dispose() }
 }
-if ($awsPowerShellBase -and (Test-Path (Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll'))) {
+function Get-HmacSha256([byte[]]$key, [string]$text) {
+    $alg = [Security.Cryptography.HMACSHA256]::new($key)
+    try { , $alg.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) } finally { $alg.Dispose() }
+}
+function Get-SigV4Signature([string]$method, [string]$path, [string]$query, [hashtable]$headers, [string]$payload, [string]$amzDate, [string]$region, [string]$service, [string]$secretKey) {
+    $lf = [string][char]10
+    $lower = @{}
+    foreach ($name in $headers.Keys) { $lower[$name.ToLowerInvariant()] = ([string]$headers[$name]).Trim() }
+    $names = [string[]]@($lower.Keys)
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    $canonicalHeaders = ($names | ForEach-Object { $_ + ':' + $lower[$_] + $lf }) -join ''
+    $signedHeaders = $names -join ';'
+    $canonical = $method + $lf + $path + $lf + $query + $lf + $canonicalHeaders + $lf + $signedHeaders + $lf + (Get-Sha256Hex $payload)
+    $date = $amzDate.Substring(0, 8)
+    $scope = "$date/$region/$service/aws4_request"
+    $toSign = 'AWS4-HMAC-SHA256' + $lf + $amzDate + $lf + $scope + $lf + (Get-Sha256Hex $canonical)
+    $key = Get-HmacSha256 ([Text.Encoding]::UTF8.GetBytes("AWS4$secretKey")) $date
+    $key = Get-HmacSha256 $key $region
+    $key = Get-HmacSha256 $key $service
+    $key = Get-HmacSha256 $key 'aws4_request'
+    @{ Signature = (ConvertTo-HexString (Get-HmacSha256 $key $toSign)); SignedHeaders = $signedHeaders; Scope = $scope }
+}
+
+# 1. SigV4 with IMDSv2 role credentials. The signer is checked first against
+# the AWS SigV4 documentation example (IAM ListUsers, 2015-08-30).
+$sigV4Check = Get-SigV4Signature 'GET' '/' 'Action=ListUsers&Version=2010-05-08' @{
+    'content-type' = 'application/x-www-form-urlencoded; charset=utf-8'
+    'host'         = 'iam.amazonaws.com'
+    'x-amz-date'   = '20150830T123600Z'
+} '' '20150830T123600Z' 'us-east-1' 'iam' 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY' # pragma: allowlist secret (AWS documentation example key)
+if (-not $smHost) {
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] No signed-request endpoint for this secret's partition, trying the next client"
+} elseif ($sigV4Check.Signature -ne '5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7') { # pragma: allowlist secret (documented signature)
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] SigV4 self-test failed, trying the next client"
+} else {
+    $imdsCredentials = $null
+    $sigV4 = $null
+    $smAuthorization = $null
+    $imdsToken = $null
+    try {
+        $imds = 'http://169.254.169.254/latest'
+        $imdsToken = Invoke-RestMethod -Method Put -Uri "$imds/api/token" -Headers @{ 'X-aws-ec2-metadata-token-ttl-seconds' = '60' } -TimeoutSec 5
+        $imdsRole = ([string](Invoke-RestMethod -Uri "$imds/meta-data/iam/security-credentials/" -Headers @{ 'X-aws-ec2-metadata-token' = $imdsToken } -TimeoutSec 5)).Trim()
+        $imdsCredentials = Invoke-RestMethod -Uri "$imds/meta-data/iam/security-credentials/$imdsRole" -Headers @{ 'X-aws-ec2-metadata-token' = $imdsToken } -TimeoutSec 5
+        if ($imdsCredentials -is [string]) { $imdsCredentials = $imdsCredentials | ConvertFrom-Json }
+        $smBody = '{"SecretId":"' + $secretArn + '"}'
+        $amzDate = [DateTime]::UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'", [Globalization.CultureInfo]::InvariantCulture)
+        $sigV4 = Get-SigV4Signature 'POST' '/' '' @{
+            'host'                 = $smHost
+            'x-amz-date'           = $amzDate
+            'x-amz-security-token' = $imdsCredentials.Token
+            'x-amz-target'         = 'secretsmanager.GetSecretValue'
+        } $smBody $amzDate $secretRegion 'secretsmanager' $imdsCredentials.SecretAccessKey
+        $smAuthorization = "AWS4-HMAC-SHA256 Credential=$($imdsCredentials.AccessKeyId)/$($sigV4.Scope), SignedHeaders=$($sigV4.SignedHeaders), Signature=$($sigV4.Signature)"
+        $smRequest = @{
+            UseBasicParsing = $true
+            Method          = 'Post'
+            Uri             = "https://$smHost/"
+            TimeoutSec      = 15
+            ContentType     = 'application/x-amz-json-1.1'
+            Headers         = @{ 'X-Amz-Date' = $amzDate; 'X-Amz-Security-Token' = $imdsCredentials.Token; 'X-Amz-Target' = 'secretsmanager.GetSecretValue'; 'Authorization' = $smAuthorization }
+            Body            = [Text.Encoding]::UTF8.GetBytes($smBody)
+        }
+        $smResponse = Invoke-WebRequest @smRequest
+        $smResponseText = [Text.Encoding]::UTF8.GetString($smResponse.RawContentStream.ToArray())
+        $smResponse = $null
+        try { $secretString = ($smResponseText | ConvertFrom-Json).SecretString } catch { $secretString = $null }
+        $smResponseText = $null
+        if ($secretString) {
+            $readClient = 'SigV4 (instance role from IMDSv2)'
+        } else {
+            Add-Content -Path $logFile -Value "[$(Get-LogTime)] SigV4 GetSecretValue returned no secret, trying the next client"
+        }
+    } catch [System.Net.WebException] {
+        # Log only the HTTP status and AWS's error type, never the body.
+        $sigV4Status = 'no response'
+        $sigV4ErrorType = ''
+        if ($_.Exception.Response) {
+            $sigV4Status = [int]$_.Exception.Response.StatusCode
+            try { $sigV4ErrorType = ((New-Object IO.StreamReader($_.Exception.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json).__type } catch { }
+        }
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] SigV4 request failed after $([int]((Get-Date) - $readStart).TotalMilliseconds) ms (HTTP $sigV4Status $sigV4ErrorType), trying the next client"
+    } catch {
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] SigV4 request failed after $([int]((Get-Date) - $readStart).TotalMilliseconds) ms ($($_.Exception.GetType().Name)), trying the next client"
+    } finally {
+        $imdsCredentials = $null; $sigV4 = $null; $smAuthorization = $null; $imdsToken = $null; $smRequest = $null
+    }
+}
+
+# 2. The AWS SDK for .NET assemblies from the AWSPowerShell folder on Amazon
+# Windows AMIs; otherwise ask PowerShell where the module is.
+$awsPowerShellBase = $null
+if (-not $secretString) {
+    if (\${env:ProgramFiles(x86)}) { $awsPowerShellBase = Join-Path \${env:ProgramFiles(x86)} 'AWS Tools\\PowerShell\\AWSPowerShell' }
+    if (-not ($awsPowerShellBase -and (Test-Path (Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll')))) {
+        $awsPowerShellBase = (Get-Module -ListAvailable -Name AWSPowerShell | Sort-Object Version -Descending | Select-Object -First 1).ModuleBase
+    }
+}
+if (-not $secretString -and $awsPowerShellBase -and (Test-Path (Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll'))) {
     try {
         # Load only what the call needs, without enumerating types (Add-Type
         # does, and fails on dependencies it can't bind). The module's own
@@ -1059,14 +1180,17 @@ async function deployLoginScript(instanceId, scriptContent, workstationRegion) {
                 '$scriptContent | Out-File $scriptFile -Encoding UTF8',
                 '',
                 '# Queue a start that arrives while the task is running, so the latest',
-                '# script always runs (the default ignores it). Then start the task to',
-                '# mount for the signed-in user now; fail the command if it cannot start.',
+                '# script always runs (the default ignores it), and run it at normal',
+                '# priority (schtasks creates tasks at 7, below normal with low I/O).',
+                '# Then start the task to mount for the signed-in user now; fail the',
+                '# command if it cannot start.',
                 'try {',
                 '    $task = Get-ScheduledTask -TaskName "FSxMountScript" -ErrorAction Stop',
-                '    if ($task.Settings.MultipleInstances -ne "Queue") {',
+                '    if ($task.Settings.MultipleInstances -ne "Queue" -or $task.Settings.Priority -ne 4) {',
                 '        $task.Settings.MultipleInstances = "Queue"',
+                '        $task.Settings.Priority = 4',
                 '        Set-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null',
-                '        Write-Host "Set the FSxMountScript task to queue new starts"',
+                '        Write-Host "Set the FSxMountScript task to queue new starts at priority 4"',
                 '    }',
                 '    Start-ScheduledTask -TaskName "FSxMountScript" -ErrorAction Stop',
                 '    Write-Host "Started the FSxMountScript task"',

@@ -69,9 +69,12 @@ upgrade to that version; a version without it needs only a redeploy.
   log on the workstation (`C:\Windows\Temp\fsx-mount-log.txt`) shows the
   time of each step and how long the credential read took, and says
   "completed with errors" when a mount failed. The logon script reads its
-  credentials through the AWS SDK for .NET assemblies already installed with
-  AWS Tools for PowerShell, which takes seconds instead of the minutes the
-  first load of the full module can take.
+  credentials with a signed Secrets Manager request using the workstation's
+  instance role, which takes under a second instead of the minute or more it
+  took to load AWS Tools for PowerShell, and runs at normal priority. The
+  workstation needs a route to Secrets Manager in its own Region (a NAT
+  gateway or a Secrets Manager interface endpoint with private DNS), as the
+  existing credential reads do.
   ([#131](https://github.com/awslabs/media-resource-manager/pull/131))
 
 ### Removed
