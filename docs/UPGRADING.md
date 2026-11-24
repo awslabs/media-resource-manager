@@ -15,9 +15,73 @@ The commands below use these shell variables. Set them first:
 export AWS_REGION=<your-region>   # the Region of the pipeline stack
 STACK=MRM-DeployPipeline          # your pipeline stack name
 TAG=<tag>                         # the release you're upgrading to, e.g. v1.5.0
+PROJECT=$(aws cloudformation describe-stacks --stack-name "$STACK" \
+  --query "Stacks[0].Outputs[?OutputKey=='CodeBuildProjectName'].OutputValue" --output text)
 ```
 
-For a [console-only path](#console-only-path), see the end of this page.
+## Choose your path
+
+Each release's Upgrade notes say **Pipeline template changed: yes** or
+**no**:
+
+- **no**: take the [quick path](#quick-path) below.
+- **yes**, or the notes don't say: follow the full path, steps
+  [1](#1-before-you-start) to [9](#9-roll-back). For a
+  [console-only path](#console-only-path), see the end of this page.
+
+A build deploys the code at `GitBranch` with the CodeBuild project, build
+steps and parameters already in the pipeline stack. Changes to the pipeline
+template, such as new parameters, changed build steps or IAM changes, arrive
+only through a stack update with the new template.
+
+If you skip versions, take the quick path only when every release in between
+also says **no**.
+
+**Pin `GitBranch` to a release tag.** A rebuild then deploys the code you
+tested, and rolling back is one parameter change. With `GitBranch=main`, each
+build deploys whatever is on `main` when the build starts.
+
+### Quick path
+
+1. Do the checks in [Before you start](#1-before-you-start).
+2. **If `GitBranch` is pinned to a tag**, set it to the new tag. This is a
+   stack update too, but with the current template and only `GitBranch`
+   changed. The update starts a build, so don't start another one.
+
+   CLI:
+   ```bash
+   aws cloudformation update-stack \
+     --stack-name "$STACK" \
+     --use-previous-template \
+     --capabilities CAPABILITY_NAMED_IAM \
+     --parameters ParameterKey=GitBranch,ParameterValue="$TAG" \
+       $(aws cloudformation describe-stacks --stack-name "$STACK" \
+           --query "Stacks[0].Parameters[?ParameterKey!='GitBranch'].ParameterKey" --output text \
+         | xargs -n1 printf 'ParameterKey=%s,UsePreviousValue=true\n')
+   aws cloudformation wait stack-update-complete --stack-name "$STACK"
+   ```
+   `update-stack` gives any parameter you don't list its template default,
+   so the command lists every other parameter with `UsePreviousValue=true`.
+   Don't use `aws cloudformation deploy` here: it needs a template file, and
+   the file you have may not match the template the stack runs.
+
+   Console: in the CloudFormation console, select the pipeline stack, choose
+   **Update**, then **Use existing template**. Change only **GitBranch**,
+   acknowledge that the template creates IAM resources with custom names, and
+   choose **Update stack**.
+
+   **If `GitBranch` is `main`**, leave the stack as it is and start a build:
+   ```bash
+   aws codebuild start-build --project-name "$PROJECT"
+   ```
+   Or, in the CodeBuild console, open the project and choose **Start build**.
+3. [Follow the build](#6-follow-the-build) until it succeeds.
+4. [Update regional hubs](#7-update-regional-hubs) and
+   [verify](#8-verify).
+
+To roll back, set `GitBranch` to the previous tag the same way. The pipeline
+template didn't change between the two releases, so the stack's template
+fits both.
 
 ## 1. Before you start
 
