@@ -17,7 +17,8 @@ upgrade to that version; a version without it needs only a redeploy.
 - [Upgrading](docs/UPGRADING.md), a step-by-step guide to upgrading an
   installation to a new release: the pipeline template from the release tag,
   a change set preview, the build, regional hub updates, checks and rollback.
-  The README's upgrade notes moved there.
+  The README's upgrade notes moved there, and the user guide now says when a
+  regional hub **Update** replaces the hub's DCV Connection Gateway.
   ([#126](https://github.com/awslabs/media-resource-manager/pull/126))
 
 ### Removed

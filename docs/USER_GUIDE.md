@@ -430,7 +430,11 @@ To update a hub:
 2. Click **Update** on the hub's row, then **Update** to confirm
 3. The status changes to **Updating**, then back to **Available** when the update finishes. The page refreshes until then.
 
-The update rebuilds the hub's CloudFormation template from the current code and updates its stack. Workstations in the region keep running, and the existing DCV Session Manager and Connection Gateway instances aren't replaced. If the update fails, the status shows **Update failed** with the reason, and you can click **Update** again.
+The update rebuilds the hub's CloudFormation template from the current code and updates its stack. Workstations in the region keep running, and the DCV Session Manager instance isn't replaced.
+
+The DCV Connection Gateway instance is replaced only when the update changes the gateway's launch template, for example its setup script or the security groups attached to it; the release notes say when a release does. The hub then starts a new gateway, waits about 5 minutes for it to start, and terminates the old one. Active DCV sessions in that region disconnect when the old gateway stops, and users reconnect from the console. Plan such updates outside working hours. When the launch template doesn't change, the gateway keeps running and sessions aren't interrupted.
+
+If the update fails, the status shows **Update failed** with the reason, and you can click **Update** again.
 
 ### Settings
 
