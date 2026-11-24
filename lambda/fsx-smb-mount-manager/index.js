@@ -90,8 +90,8 @@ function mountSecretName(instanceId) {
     return `/${PASCAL_CASE_NAME}/Workstation/${instanceId}/SmbMount`;
 }
 
-// About 30 s in all; the mount manager's timeout is 10 minutes.
-const CREATE_SECRET_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
+// 15 s in all; the mount manager's timeout is 10 minutes.
+const CREATE_SECRET_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function isScheduledForDeletion(error) {
@@ -725,6 +725,7 @@ $logFile = "C:\\Windows\\Temp\\fsx-mount-log.txt"
 function Get-LogTime { Get-Date -Format "yyyy-MM-dd HH:mm:ss" }
 
 try {
+    $mountErrors = 0
     Add-Content -Path $logFile -Value "[$(Get-LogTime)] Starting FSx mount for user: $env:USERNAME (Domain-joined: ${isDomainJoined})"
 ${generateMountCredentialReader(mountSecret)}
     
@@ -741,7 +742,11 @@ ${generateMountCredentialReader(mountSecret)}
     
     ${mountCommands}
     
-    Add-Content -Path $logFile -Value "[$(Get-LogTime)] FSx mount completed successfully for user: $env:USERNAME"
+    if ($mountErrors -gt 0) {
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] FSx mount completed with errors ($mountErrors failed) for user: $env:USERNAME"
+    } else {
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] FSx mount completed successfully for user: $env:USERNAME"
+    }
     
     # Minimal refresh - just notify shell of drive changes (non-disruptive)
     Add-Content -Path $logFile -Value "[$(Get-LogTime)] Refreshing drive display"
@@ -795,6 +800,7 @@ try {
     
 } catch {
     Write-Warning "Failed to mount ${storage.name} to ${driveLetter}: $_"
+    $mountErrors++
     Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Failed to mount ${storage.name}: $_"
 }`;
 }
@@ -837,6 +843,7 @@ try {
     Add-Content -Path $logFile -Value "[$(Get-LogTime)] Successfully mounted ${storage.name}${logSuffix} to ${driveLetter}:"
 } catch {
     Write-Warning "Failed to mount ${storage.name}${logSuffix} to ${driveLetter}: $($_.Exception.Message)"
+    $mountErrors++
     Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Failed to mount ${storage.name}${logSuffix}: $($_.Exception.Message)"
 } finally {
     Remove-Variable -Name mountCredential -ErrorAction SilentlyContinue
@@ -848,6 +855,7 @@ function generateStandaloneMountCommand(storage, driveLetter, fsxDnsName, shareN
         return `
 # Mount ${storage.name} to ${driveLetter}: (Standalone - CREDENTIALS NOT AVAILABLE)
 Write-Warning "Cannot mount ${storage.name} - AD credentials not configured for standalone workstation"
+$mountErrors++
 Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Cannot mount ${storage.name} - AD credentials not available for standalone workstation"`;
     }
     return generateCredentialMountCommand(storage, driveLetter, `\\\\${fsxDnsName}\\${shareName}`,
@@ -868,6 +876,7 @@ function generateFsxOntapMountCommand(storage, driveLetter, ontapShare, hasMount
         return `
 # Mount ${storage.name} to ${driveLetter}: (FSxN - SVM DNS NAME NOT AVAILABLE)
 Write-Warning "Cannot mount ${storage.name} - SVM DNS name not available"
+$mountErrors++
 Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Cannot mount ${storage.name} - SVM DNS name not available"`;
     }
     
@@ -913,6 +922,7 @@ try {
     
 } catch {
     Write-Warning "Failed to mount ${storage.name} (FSxN) to ${driveLetter}: $_ - You may need to configure ONTAP credentials"
+    $mountErrors++
     Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Failed to mount ${storage.name} (FSxN): $_ - ONTAP credentials may be required"
 }`;
     }
@@ -956,12 +966,21 @@ async function deployLoginScript(instanceId, scriptContent, workstationRegion) {
                 `'@`,
                 '$scriptContent | Out-File $scriptFile -Encoding UTF8',
                 '',
-                '# Trigger the scheduled task to run immediately for current user',
+                '# Queue a start that arrives while the task is running, so the latest',
+                '# script always runs (the default ignores it). Then start the task to',
+                '# mount for the signed-in user now; fail the command if it cannot start.',
                 'try {',
-                '    Start-ScheduledTask -TaskName "FSxMountScript" -ErrorAction SilentlyContinue',
-                '    Write-Host "Triggered FSx mount script to run immediately"',
+                '    $task = Get-ScheduledTask -TaskName "FSxMountScript" -ErrorAction Stop',
+                '    if ($task.Settings.MultipleInstances -ne "Queue") {',
+                '        $task.Settings.MultipleInstances = "Queue"',
+                '        Set-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null',
+                '        Write-Host "Set the FSxMountScript task to queue new starts"',
+                '    }',
+                '    Start-ScheduledTask -TaskName "FSxMountScript" -ErrorAction Stop',
+                '    Write-Host "Started the FSxMountScript task"',
                 '} catch {',
-                '    Write-Host "Could not trigger scheduled task (may not exist yet): $_"',
+                '    Write-Error "Could not start the FSxMountScript task: $($_.Exception.Message)"',
+                '    exit 1',
                 '}',
                 '',
                 'Write-Host "FSx login script deployed successfully to $scriptFile"'

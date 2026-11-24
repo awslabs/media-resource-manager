@@ -59,10 +59,14 @@ upgrade to that version; a version without it needs only a redeploy.
   detaching it mounts the drive. The mount manager waits until the
   workstation's previous SMB mount secret is fully removed before it writes
   the new one, and if it can't write the secret it reports an error instead
-  of sending a logon script without credentials. The mount log on the
-  workstation (`C:\Windows\Temp\fsx-mount-log.txt`) now shows the time of
-  each step, and the logon script reads its credentials with the fastest AWS
-  client installed.
+  of sending a logon script without credentials. On Windows workstations, a
+  mount requested while the previous one is still running now runs after it
+  instead of being skipped, so attaching and then detaching quickly ends
+  with the drive removed, and a Run Command that can't start the mount
+  reports a failure. The mount log on the workstation
+  (`C:\Windows\Temp\fsx-mount-log.txt`) shows the time of each step and
+  says "completed with errors" when a mount failed, and the logon script
+  reads its credentials with the fastest AWS client installed.
   ([#131](https://github.com/awslabs/media-resource-manager/pull/131))
 
 ### Removed
