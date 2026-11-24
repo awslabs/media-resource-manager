@@ -40,6 +40,15 @@ upgrade to that version; a version without it needs only a redeploy.
   otherwise both use the console's Join Domain default for the deployment's
   sign-in mode.
   ([#123](https://github.com/awslabs/media-resource-manager/pull/123))
+- On standalone Windows workstations, attaching storage a few seconds after
+  detaching it mounts the drive. The mount manager waits until the
+  workstation's previous SMB mount secret is fully removed before it writes
+  the new one, and if it can't write the secret it reports an error instead
+  of sending a logon script without credentials. The mount log on the
+  workstation (`C:\Windows\Temp\fsx-mount-log.txt`) now shows the time of
+  each step, and the logon script reads its credentials with the fastest AWS
+  client installed.
+  ([#131](https://github.com/awslabs/media-resource-manager/pull/131))
 
 ### Removed
 
