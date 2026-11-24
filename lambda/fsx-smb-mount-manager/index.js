@@ -90,6 +90,34 @@ function mountSecretName(instanceId) {
     return `/${PASCAL_CASE_NAME}/Workstation/${instanceId}/SmbMount`;
 }
 
+// 15 s in all; the mount manager's timeout is 10 minutes.
+const CREATE_SECRET_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000];
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isScheduledForDeletion(error) {
+    return error.name === 'InvalidRequestException' && /scheduled for deletion/i.test(error.message || '');
+}
+
+// DNS suffix of the Secrets Manager endpoint in each partition.
+const PARTITION_DNS_SUFFIX = { 'aws': 'amazonaws.com', 'aws-cn': 'amazonaws.com.cn', 'aws-us-gov': 'amazonaws.com' };
+const REGION_PATTERN = /^[a-z]{2}(-[a-z]+)+-\d+$/;
+
+/**
+ * Region and Secrets Manager endpoint host for a secret, from its ARN
+ * (arn:<partition>:secretsmanager:<region>:...). The logon script signs its
+ * request for that host. host is null for a partition not listed above; the
+ * script then skips the signed request and uses the AWS SDK or tools, which
+ * resolve the endpoint themselves.
+ */
+function secretsManagerEndpoint(secretArn) {
+    const parts = String(secretArn).split(':');
+    const partition = parts[1];
+    const arnRegion = parts[3];
+    const region = REGION_PATTERN.test(arnRegion || '') ? arnRegion : process.env.AWS_REGION;
+    const suffix = PARTITION_DNS_SUFFIX[partition];
+    return { region, host: suffix && REGION_PATTERN.test(arnRegion || '') ? `secretsmanager.${arnRegion}.${suffix}` : null };
+}
+
 /** IAM role ARN patterns of the primary and regional hub workstation roles. */
 async function workstationRoleArnPatterns() {
     const param = await ssmPrimary.send(new GetParameterCommand({
@@ -140,20 +168,32 @@ function mountSecretPolicy(instanceId, roleArnPatterns) {
  * Create or update the workstation's SMB mount secret and return its ARN.
  * A new secret starts with an empty value; the credentials are written only
  * after the resource policy is in place.
+ *
+ * A detach force-deletes the secret, and Secrets Manager removes it
+ * asynchronously. Until it is gone, CreateSecret with the same name fails
+ * with InvalidRequestException ("scheduled for deletion"), so an attach soon
+ * after a detach retries until the name is free.
  */
 async function putMountSecret(instanceId, mounts) {
     assertInstanceId(instanceId);
     const policy = JSON.stringify(mountSecretPolicy(instanceId, await workstationRoleArnPatterns()));
     let secretId = mountSecretName(instanceId);
-    try {
-        const created = await secretsManager.send(new CreateSecretCommand({
-            Name: secretId,
-            Description: `SMB mount credentials for workstation ${instanceId}, read by the workstation at logon`,
-            SecretString: '{}',
-        }));
-        secretId = created.ARN;
-    } catch (error) {
-        if (error.name !== 'ResourceExistsException') throw error;
+    for (let attempt = 0; ; attempt++) {
+        try {
+            const created = await secretsManager.send(new CreateSecretCommand({
+                Name: secretId,
+                Description: `SMB mount credentials for workstation ${instanceId}, read by the workstation at logon`,
+                SecretString: '{}',
+            }));
+            secretId = created.ARN;
+            break;
+        } catch (error) {
+            if (error.name === 'ResourceExistsException') break;
+            const delay = CREATE_SECRET_RETRY_DELAYS_MS[attempt];
+            if (!isScheduledForDeletion(error) || delay === undefined) throw error;
+            console.log(`SMB mount secret for ${instanceId} is still being deleted; retrying in ${delay / 1000} s`);
+            await sleep(delay);
+        }
     }
     await secretsManager.send(new PutResourcePolicyCommand({
         SecretId: secretId,
@@ -273,7 +313,7 @@ async function resolveJoinDomain(workstation, workstationRegion) {
     return joined;
 }
 
-async function updateInstanceMountScript(instanceId) {
+async function updateInstanceMountScript(instanceId, attempt = 0) {
     console.log(`Updating mount script for instance: ${instanceId}`);
     
     // Get workstation record to check domain status and platform
@@ -311,8 +351,18 @@ async function updateInstanceMountScript(instanceId) {
     const isDomainJoined = await resolveJoinDomain(workstation, workstationRegion);
     console.log(`Workstation ${instanceId} domain-joined: ${isDomainJoined}`);
     
-    // Get storage configuration for this instance
-    const storageConfigs = await getStorageForInstance(instanceId, workstation, isDomainJoined, workstationRegion);
+    // Get storage configuration for this instance. If it changed while this
+    // run was building the script, start over from the current record so the
+    // latest configuration (and its secret) is what the workstation gets.
+    let storageConfigs;
+    try {
+        storageConfigs = await getStorageForInstance(instanceId, workstation, isDomainJoined, workstationRegion);
+    } catch (error) {
+        if (error instanceof StaleStorageConfigError && attempt < 2) {
+            return updateInstanceMountScript(instanceId, attempt + 1);
+        }
+        throw error;
+    }
     
     return {
         success: true,
@@ -395,6 +445,7 @@ async function getStorageForInstance(instanceId, workstation, isDomainJoined, wo
         // Generate empty script to clear any existing mounts
         await deleteMountSecret(instanceId);
         const loginScript = generateLoginScript([], isDomainJoined, null, {});
+        await assertStorageConfigCurrent(instanceId, workstation.storageConfig);
         await deployLoginScript(instanceId, loginScript, workstationRegion);
         return [];
     }
@@ -562,17 +613,21 @@ async function getStorageForInstance(instanceId, workstation, isDomainJoined, wo
 
     let mountSecretArn = null;
     if (Object.keys(mounts).length > 0) {
+        // If the secret can't be written, fail the run rather than send a
+        // script whose mounts have no credentials. The workstation keeps its
+        // current script, and the async invocation is retried.
         try {
             mountSecretArn = await putMountSecret(instanceId, mounts);
-            console.log(`SMB mount secret updated for ${instanceId}: ${Object.keys(mounts).length} mount(s)`);
         } catch (error) {
             console.error(`Failed to write the SMB mount secret for ${instanceId}:`, error.name, error.message);
+            throw new Error(`Could not write the SMB mount secret for ${instanceId}: ${error.name}`);
         }
+        console.log(`SMB mount secret updated for ${instanceId}: ${Object.keys(mounts).length} mount(s)`);
     } else {
         await deleteMountSecret(instanceId);
     }
     const mountSecret = mountSecretArn
-        ? { arn: mountSecretArn, region: process.env.AWS_REGION, storageIds: new Set(Object.keys(mounts)) }
+        ? { arn: mountSecretArn, ...secretsManagerEndpoint(mountSecretArn), storageIds: new Set(Object.keys(mounts)) }
         : null;
 
     // Non-secret ONTAP share details for the script (share name, CIFS server).
@@ -582,9 +637,35 @@ async function getStorageForInstance(instanceId, workstation, isDomainJoined, wo
     }
 
     const loginScript = generateLoginScript(storageConfigs, isDomainJoined, mountSecret, ontapShares);
+    await assertStorageConfigCurrent(instanceId, workstation.storageConfig);
     await deployLoginScript(instanceId, loginScript, workstationRegion);
     
     return storageConfigs;
+}
+
+/**
+ * Thrown when the workstation's storageConfig changed while a run was
+ * building its script. Two saves start two runs that can overlap (for
+ * example an attach that is waiting for a deleted secret's name and a later
+ * detach), so the older run must not send its script last.
+ */
+class StaleStorageConfigError extends Error {}
+
+// JSON with sorted keys, so two reads of the same map compare equal.
+function canonicalJson(value) {
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+    if (value && typeof value === 'object') {
+        return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
+    }
+    return JSON.stringify(value === undefined ? null : value);
+}
+
+async function assertStorageConfigCurrent(instanceId, usedStorageConfig) {
+    const current = await dynamodb.send(new GetCommand({ TableName: WORKSTATION_TABLE_NAME, Key: { instanceId } }));
+    if (canonicalJson(current.Item?.storageConfig) !== canonicalJson(usedStorageConfig)) {
+        console.log(`Storage configuration for ${instanceId} changed during this run; not sending its script`);
+        throw new StaleStorageConfigError(`Storage configuration for ${instanceId} changed during the run`);
+    }
 }
 
 async function getStorageById(storageId) {
@@ -629,12 +710,188 @@ function generateMountCredentialReader(mountSecret) {
 $mountCredentials = $null`;
     }
     return `
-# Read this workstation's SMB mount credentials from Secrets Manager
+# Read this workstation's SMB mount credentials from Secrets Manager with the
+# instance role. Fastest first:
+#   1. a SigV4-signed GetSecretValue request with the instance role
+#      credentials from IMDSv2 (no AWS assemblies to load);
+#   2. the AWS SDK for .NET assemblies that ship inside the AWSPowerShell
+#      module, loaded directly;
+#   3. the AWS CLI;
+#   4. the modular AWS.Tools.SecretsManager module;
+#   5. the AWSPowerShell module (importing it takes minutes the first time).
+# The secret value stays in this process; only the ARN is on any command
+# line, and no credential, Authorization header or response body is logged.
 $mountCredentials = $null
-try {
-    $mountCredentials = (Get-SECSecretValue -SecretId ${psQuote(mountSecret.arn)} -Region ${psQuote(mountSecret.region)} -ErrorAction Stop).SecretString | ConvertFrom-Json
-} catch {
-    Add-Content -Path $logFile -Value "[$timestamp] ERROR: Could not read the SMB mount credentials: $($_.Exception.Message)"
+$secretString = $null
+$secretArn = ${psQuote(mountSecret.arn)}
+$secretRegion = ${psQuote(mountSecret.region)}
+$smHost = ${mountSecret.host ? psQuote(mountSecret.host) : '$null'}
+$readStart = Get-Date
+$readClient = $null
+
+function ConvertTo-HexString([byte[]]$bytes) { [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant() }
+function Get-Sha256Hex([string]$text) {
+    $alg = [Security.Cryptography.SHA256]::Create()
+    try { ConvertTo-HexString ($alg.ComputeHash([Text.Encoding]::UTF8.GetBytes($text))) } finally { $alg.Dispose() }
+}
+function Get-HmacSha256([byte[]]$key, [string]$text) {
+    $alg = [Security.Cryptography.HMACSHA256]::new($key)
+    try { , $alg.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) } finally { $alg.Dispose() }
+}
+function Get-SigV4Signature([string]$method, [string]$path, [string]$query, [hashtable]$headers, [string]$payload, [string]$amzDate, [string]$region, [string]$service, [string]$secretKey) {
+    $lf = [string][char]10
+    $lower = @{}
+    foreach ($name in $headers.Keys) { $lower[$name.ToLowerInvariant()] = ([string]$headers[$name]).Trim() }
+    $names = [string[]]@($lower.Keys)
+    [Array]::Sort($names, [StringComparer]::Ordinal)
+    $canonicalHeaders = ($names | ForEach-Object { $_ + ':' + $lower[$_] + $lf }) -join ''
+    $signedHeaders = $names -join ';'
+    $canonical = $method + $lf + $path + $lf + $query + $lf + $canonicalHeaders + $lf + $signedHeaders + $lf + (Get-Sha256Hex $payload)
+    $date = $amzDate.Substring(0, 8)
+    $scope = "$date/$region/$service/aws4_request"
+    $toSign = 'AWS4-HMAC-SHA256' + $lf + $amzDate + $lf + $scope + $lf + (Get-Sha256Hex $canonical)
+    $key = Get-HmacSha256 ([Text.Encoding]::UTF8.GetBytes("AWS4$secretKey")) $date
+    $key = Get-HmacSha256 $key $region
+    $key = Get-HmacSha256 $key $service
+    $key = Get-HmacSha256 $key 'aws4_request'
+    @{ Signature = (ConvertTo-HexString (Get-HmacSha256 $key $toSign)); SignedHeaders = $signedHeaders; Scope = $scope }
+}
+
+# 1. SigV4 with IMDSv2 role credentials. The signer is checked first against
+# the AWS SigV4 documentation example (IAM ListUsers, 2015-08-30).
+$sigV4Check = Get-SigV4Signature 'GET' '/' 'Action=ListUsers&Version=2010-05-08' @{
+    'content-type' = 'application/x-www-form-urlencoded; charset=utf-8'
+    'host'         = 'iam.amazonaws.com'
+    'x-amz-date'   = '20150830T123600Z'
+} '' '20150830T123600Z' 'us-east-1' 'iam' 'wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY' # pragma: allowlist secret (AWS documentation example key)
+if (-not $smHost) {
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] No signed-request endpoint for this secret's partition, trying the next client"
+} elseif ($sigV4Check.Signature -ne '5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7') { # pragma: allowlist secret (documented signature)
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] SigV4 self-test failed, trying the next client"
+} else {
+    $imdsCredentials = $null
+    $sigV4 = $null
+    $smAuthorization = $null
+    $imdsToken = $null
+    try {
+        $imds = 'http://169.254.169.254/latest'
+        $imdsToken = Invoke-RestMethod -Method Put -Uri "$imds/api/token" -Headers @{ 'X-aws-ec2-metadata-token-ttl-seconds' = '60' } -TimeoutSec 5
+        $imdsRole = ([string](Invoke-RestMethod -Uri "$imds/meta-data/iam/security-credentials/" -Headers @{ 'X-aws-ec2-metadata-token' = $imdsToken } -TimeoutSec 5)).Trim()
+        $imdsCredentials = Invoke-RestMethod -Uri "$imds/meta-data/iam/security-credentials/$imdsRole" -Headers @{ 'X-aws-ec2-metadata-token' = $imdsToken } -TimeoutSec 5
+        if ($imdsCredentials -is [string]) { $imdsCredentials = $imdsCredentials | ConvertFrom-Json }
+        $smBody = '{"SecretId":"' + $secretArn + '"}'
+        $amzDate = [DateTime]::UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'", [Globalization.CultureInfo]::InvariantCulture)
+        $sigV4 = Get-SigV4Signature 'POST' '/' '' @{
+            'host'                 = $smHost
+            'x-amz-date'           = $amzDate
+            'x-amz-security-token' = $imdsCredentials.Token
+            'x-amz-target'         = 'secretsmanager.GetSecretValue'
+        } $smBody $amzDate $secretRegion 'secretsmanager' $imdsCredentials.SecretAccessKey
+        $smAuthorization = "AWS4-HMAC-SHA256 Credential=$($imdsCredentials.AccessKeyId)/$($sigV4.Scope), SignedHeaders=$($sigV4.SignedHeaders), Signature=$($sigV4.Signature)"
+        $smRequest = @{
+            UseBasicParsing = $true
+            Method          = 'Post'
+            Uri             = "https://$smHost/"
+            TimeoutSec      = 15
+            ContentType     = 'application/x-amz-json-1.1'
+            Headers         = @{ 'X-Amz-Date' = $amzDate; 'X-Amz-Security-Token' = $imdsCredentials.Token; 'X-Amz-Target' = 'secretsmanager.GetSecretValue'; 'Authorization' = $smAuthorization }
+            Body            = [Text.Encoding]::UTF8.GetBytes($smBody)
+        }
+        $smResponse = Invoke-WebRequest @smRequest
+        $smResponseText = [Text.Encoding]::UTF8.GetString($smResponse.RawContentStream.ToArray())
+        $smResponse = $null
+        try { $secretString = ($smResponseText | ConvertFrom-Json).SecretString } catch { $secretString = $null }
+        $smResponseText = $null
+        if ($secretString) {
+            $readClient = 'SigV4 (instance role from IMDSv2)'
+        } else {
+            Add-Content -Path $logFile -Value "[$(Get-LogTime)] SigV4 GetSecretValue returned no secret, trying the next client"
+        }
+    } catch [System.Net.WebException] {
+        # Log only the HTTP status and AWS's error type, never the body.
+        $sigV4Status = 'no response'
+        $sigV4ErrorType = ''
+        if ($_.Exception.Response) {
+            $sigV4Status = [int]$_.Exception.Response.StatusCode
+            try { $sigV4ErrorType = ((New-Object IO.StreamReader($_.Exception.Response.GetResponseStream())).ReadToEnd() | ConvertFrom-Json).__type } catch { }
+        }
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] SigV4 request failed after $([int]((Get-Date) - $readStart).TotalMilliseconds) ms (HTTP $sigV4Status $sigV4ErrorType), trying the next client"
+    } catch {
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] SigV4 request failed after $([int]((Get-Date) - $readStart).TotalMilliseconds) ms ($($_.Exception.GetType().Name)), trying the next client"
+    } finally {
+        $imdsCredentials = $null; $sigV4 = $null; $smAuthorization = $null; $imdsToken = $null; $smRequest = $null
+    }
+}
+
+# 2. The AWS SDK for .NET assemblies from the AWSPowerShell folder on Amazon
+# Windows AMIs; otherwise ask PowerShell where the module is.
+$awsPowerShellBase = $null
+if (-not $secretString) {
+    if (\${env:ProgramFiles(x86)}) { $awsPowerShellBase = Join-Path \${env:ProgramFiles(x86)} 'AWS Tools\\PowerShell\\AWSPowerShell' }
+    if (-not ($awsPowerShellBase -and (Test-Path (Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll')))) {
+        $awsPowerShellBase = (Get-Module -ListAvailable -Name AWSPowerShell | Sort-Object Version -Descending | Select-Object -First 1).ModuleBase
+    }
+}
+if (-not $secretString -and $awsPowerShellBase -and (Test-Path (Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll'))) {
+    try {
+        # Load only what the call needs, without enumerating types (Add-Type
+        # does, and fails on dependencies it can't bind). The module's own
+        # resolver (registered by its import) loads SDK dependencies such as
+        # System.Text.Json from its folder whatever version is asked for;
+        # register it the same way.
+        [void][System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSPowerShell.dll'))
+        ([Amazon.PowerShell.Common.AWSModuleAssemblyInitializer]::new()).OnImport()
+        [void][System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSSDK.Core.dll'))
+        [void][System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll'))
+        $smClient = New-Object Amazon.SecretsManager.AmazonSecretsManagerClient([Amazon.RegionEndpoint]::GetBySystemName($secretRegion))
+        $smRequest = New-Object Amazon.SecretsManager.Model.GetSecretValueRequest
+        $smRequest.SecretId = $secretArn
+        $smTask = $smClient.GetSecretValueAsync($smRequest)
+        if (-not $smTask.Wait(15000)) { throw 'GetSecretValue did not finish within 15 s' }
+        $secretString = $smTask.Result.SecretString
+        $smClient.Dispose()
+        $readClient = 'AWS SDK for .NET (AWSPowerShell assemblies)'
+    } catch {
+        $loadError = $_.Exception
+        while ($loadError.InnerException -and -not ($loadError -is [System.Reflection.ReflectionTypeLoadException])) { $loadError = $loadError.InnerException }
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] Could not read the SMB mount credentials with the AWS SDK for .NET after $([int]((Get-Date) - $readStart).TotalMilliseconds) ms, trying the next client: $($loadError.GetType().Name): $($loadError.Message)"
+        if ($loadError -is [System.Reflection.ReflectionTypeLoadException]) {
+            $loadError.LoaderExceptions | Where-Object { $_ } | Select-Object -First 3 | ForEach-Object {
+                Add-Content -Path $logFile -Value "[$(Get-LogTime)]   Loader exception: $($_.Message)"
+            }
+        }
+    }
+}
+if (-not $secretString) {
+    try {
+        if (Get-Command aws.exe -ErrorAction SilentlyContinue) {
+            $readClient = 'AWS CLI'
+            $secretOutput = & aws.exe secretsmanager get-secret-value --secret-id $secretArn --region $secretRegion --query SecretString --output text
+            if ($LASTEXITCODE -ne 0) { throw "aws secretsmanager get-secret-value exited with code $LASTEXITCODE" }
+            $secretString = ($secretOutput | Out-String).Trim()
+            Remove-Variable -Name secretOutput
+        } elseif (Get-Module -ListAvailable -Name AWS.Tools.SecretsManager) {
+            $readClient = 'AWS.Tools.SecretsManager'
+            Import-Module AWS.Tools.SecretsManager -ErrorAction Stop
+            $secretString = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString
+        } else {
+            $readClient = 'AWSPowerShell'
+            Import-Module AWSPowerShell -ErrorAction Stop
+            $secretString = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString
+        }
+    } catch {
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Could not read the SMB mount credentials: $($_.Exception.Message)"
+    }
+}
+if ($secretString) {
+    # The parser's error message can quote its input, so it is not logged.
+    try { $mountCredentials = $secretString | ConvertFrom-Json } catch {
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: The SMB mount credentials are not valid JSON"
+    }
+    Remove-Variable -Name secretString
+}
+if ($mountCredentials) {
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Read the SMB mount credentials with $readClient in $([int]((Get-Date) - $readStart).TotalMilliseconds) ms"
 }`;
 }
 
@@ -676,38 +933,43 @@ function Get-MountCredential([string]$StorageId) {
     New-Object System.Management.Automation.PSCredential($entry.username, (ConvertTo-SecureString -String $entry.password -AsPlainText -Force))
 }
 
-# Log file
+# Log file. Each line gets the time it is written.
 $logFile = "C:\\Windows\\Temp\\fsx-mount-log.txt"
-$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-${generateMountCredentialReader(mountSecret)}
+function Get-LogTime { Get-Date -Format "yyyy-MM-dd HH:mm:ss" }
 
 try {
-    Add-Content -Path $logFile -Value "[$timestamp] Starting FSx mount for user: $env:USERNAME (Domain-joined: ${isDomainJoined})"
+    $mountErrors = 0
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Starting FSx mount for user: $env:USERNAME (Domain-joined: ${isDomainJoined})"
+${generateMountCredentialReader(mountSecret)}
     
     # Clear any existing FSx network drive mappings to prevent conflicts
-    Add-Content -Path $logFile -Value "[$timestamp] Clearing existing FSx network drive mappings"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Clearing existing FSx network drive mappings"
     $existingDrives = net use | Select-String "\\\\.*\\.(studio|fsx)\\." 
     foreach ($drive in $existingDrives) {
         $driveLetter = ($drive -split "\\s+")[1]
         if ($driveLetter -match "^[A-Z]:$") {
             net use $driveLetter /delete /y 2>$null
-            Add-Content -Path $logFile -Value "[$timestamp] Removed existing mapping: $driveLetter"
+            Add-Content -Path $logFile -Value "[$(Get-LogTime)] Removed existing mapping: $driveLetter"
         }
     }
     
     ${mountCommands}
     
-    Add-Content -Path $logFile -Value "[$timestamp] FSx mount completed successfully for user: $env:USERNAME"
+    if ($mountErrors -gt 0) {
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] FSx mount completed with errors ($mountErrors failed) for user: $env:USERNAME"
+    } else {
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] FSx mount completed successfully for user: $env:USERNAME"
+    }
     
     # Minimal refresh - just notify shell of drive changes (non-disruptive)
-    Add-Content -Path $logFile -Value "[$timestamp] Refreshing drive display"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Refreshing drive display"
     rundll32.exe shell32.dll,SHChangeNotify 0x8000000,0x1000,0,0
     
     Write-Host "FSx mount script completed. Check $logFile for details."
     
 } catch {
     $errorMsg = "FSx mount script failed: $_"
-    Add-Content -Path $logFile -Value "[$timestamp] ERROR: $errorMsg"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: $errorMsg"
     Write-Error $errorMsg
 } finally {
     Remove-Variable -Name mountCredentials, mountCredential -ErrorAction SilentlyContinue
@@ -744,14 +1006,15 @@ try {
         Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
         
         Write-Host "Successfully mounted ${storage.name} to ${driveLetter}: ($networkPath)"
-        Add-Content -Path $logFile -Value "[$timestamp] Successfully mounted ${storage.name} to ${driveLetter}:"
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] Successfully mounted ${storage.name} to ${driveLetter}:"
     } else {
         throw "net use failed with exit code $LASTEXITCODE"
     }
     
 } catch {
     Write-Warning "Failed to mount ${storage.name} to ${driveLetter}: $_"
-    Add-Content -Path $logFile -Value "[$timestamp] ERROR: Failed to mount ${storage.name}: $_"
+    $mountErrors++
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Failed to mount ${storage.name}: $_"
 }`;
 }
 
@@ -790,10 +1053,11 @@ try {
     Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
     
     Write-Host "Successfully mounted ${storage.name}${logSuffix} to ${driveLetter}: ($networkPath)"
-    Add-Content -Path $logFile -Value "[$timestamp] Successfully mounted ${storage.name}${logSuffix} to ${driveLetter}:"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Successfully mounted ${storage.name}${logSuffix} to ${driveLetter}:"
 } catch {
     Write-Warning "Failed to mount ${storage.name}${logSuffix} to ${driveLetter}: $($_.Exception.Message)"
-    Add-Content -Path $logFile -Value "[$timestamp] ERROR: Failed to mount ${storage.name}${logSuffix}: $($_.Exception.Message)"
+    $mountErrors++
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Failed to mount ${storage.name}${logSuffix}: $($_.Exception.Message)"
 } finally {
     Remove-Variable -Name mountCredential -ErrorAction SilentlyContinue
 }`;
@@ -804,7 +1068,8 @@ function generateStandaloneMountCommand(storage, driveLetter, fsxDnsName, shareN
         return `
 # Mount ${storage.name} to ${driveLetter}: (Standalone - CREDENTIALS NOT AVAILABLE)
 Write-Warning "Cannot mount ${storage.name} - AD credentials not configured for standalone workstation"
-Add-Content -Path $logFile -Value "[$timestamp] ERROR: Cannot mount ${storage.name} - AD credentials not available for standalone workstation"`;
+$mountErrors++
+Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Cannot mount ${storage.name} - AD credentials not available for standalone workstation"`;
     }
     return generateCredentialMountCommand(storage, driveLetter, `\\\\${fsxDnsName}\\${shareName}`,
         'Standalone - credentials from the workstation SMB mount secret', '');
@@ -824,7 +1089,8 @@ function generateFsxOntapMountCommand(storage, driveLetter, ontapShare, hasMount
         return `
 # Mount ${storage.name} to ${driveLetter}: (FSxN - SVM DNS NAME NOT AVAILABLE)
 Write-Warning "Cannot mount ${storage.name} - SVM DNS name not available"
-Add-Content -Path $logFile -Value "[$timestamp] ERROR: Cannot mount ${storage.name} - SVM DNS name not available"`;
+$mountErrors++
+Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Cannot mount ${storage.name} - SVM DNS name not available"`;
     }
     
     // If the workstation's SMB mount secret holds the ONTAP SMB user, use it;
@@ -862,14 +1128,15 @@ try {
         Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
         
         Write-Host "Successfully mounted ${storage.name} (FSxN) to ${driveLetter}: ($networkPath)"
-        Add-Content -Path $logFile -Value "[$timestamp] Successfully mounted ${storage.name} (FSxN) to ${driveLetter}:"
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] Successfully mounted ${storage.name} (FSxN) to ${driveLetter}:"
     } else {
         throw "net use failed with exit code $LASTEXITCODE - credentials may be required"
     }
     
 } catch {
     Write-Warning "Failed to mount ${storage.name} (FSxN) to ${driveLetter}: $_ - You may need to configure ONTAP credentials"
-    Add-Content -Path $logFile -Value "[$timestamp] ERROR: Failed to mount ${storage.name} (FSxN): $_ - ONTAP credentials may be required"
+    $mountErrors++
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Failed to mount ${storage.name} (FSxN): $_ - ONTAP credentials may be required"
 }`;
     }
 }
@@ -912,12 +1179,24 @@ async function deployLoginScript(instanceId, scriptContent, workstationRegion) {
                 `'@`,
                 '$scriptContent | Out-File $scriptFile -Encoding UTF8',
                 '',
-                '# Trigger the scheduled task to run immediately for current user',
+                '# Queue a start that arrives while the task is running, so the latest',
+                '# script always runs (the default ignores it), and run it at normal',
+                '# priority (schtasks creates tasks at 7, below normal with low I/O).',
+                '# Then start the task to mount for the signed-in user now; fail the',
+                '# command if it cannot start.',
                 'try {',
-                '    Start-ScheduledTask -TaskName "FSxMountScript" -ErrorAction SilentlyContinue',
-                '    Write-Host "Triggered FSx mount script to run immediately"',
+                '    $task = Get-ScheduledTask -TaskName "FSxMountScript" -ErrorAction Stop',
+                '    if ($task.Settings.MultipleInstances -ne "Queue" -or $task.Settings.Priority -ne 4) {',
+                '        $task.Settings.MultipleInstances = "Queue"',
+                '        $task.Settings.Priority = 4',
+                '        Set-ScheduledTask -InputObject $task -ErrorAction Stop | Out-Null',
+                '        Write-Host "Set the FSxMountScript task to queue new starts at priority 4"',
+                '    }',
+                '    Start-ScheduledTask -TaskName "FSxMountScript" -ErrorAction Stop',
+                '    Write-Host "Started the FSxMountScript task"',
                 '} catch {',
-                '    Write-Host "Could not trigger scheduled task (may not exist yet): $_"',
+                '    Write-Error "Could not start the FSxMountScript task: $($_.Exception.Message)"',
+                '    exit 1',
                 '}',
                 '',
                 'Write-Host "FSx login script deployed successfully to $scriptFile"'

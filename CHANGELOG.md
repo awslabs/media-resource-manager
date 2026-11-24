@@ -55,6 +55,27 @@ upgrade to that version; a version without it needs only a redeploy.
   `<Acronym>-ResourceAdmin-Password-Refresh-Failed` CloudWatch alarm, and a
   failed reset during deployment fails the deployment.
   ([#128](https://github.com/awslabs/media-resource-manager/issues/128))
+- On standalone Windows workstations, attaching storage a few seconds after
+  detaching it mounts the drive. The mount manager waits until the
+  workstation's previous SMB mount secret is fully removed before it writes
+  the new one, and if it can't write the secret it reports an error instead
+  of sending a logon script without credentials. On Windows workstations, a
+  mount requested while the previous one is still running now runs after it
+  instead of being skipped, so attaching and then detaching quickly ends
+  with the drive removed, and a Run Command that can't start the mount
+  reports a failure. If storage is attached or detached again while the
+  mount manager is still preparing a workstation's script, it starts over
+  from the current setting instead of sending the older script. The mount
+  log on the workstation (`C:\Windows\Temp\fsx-mount-log.txt`) shows the
+  time of each step and how long the credential read took, and says
+  "completed with errors" when a mount failed. The logon script reads its
+  credentials with a signed Secrets Manager request using the workstation's
+  instance role, which takes under a second instead of the minute or more it
+  took to load AWS Tools for PowerShell, and runs at normal priority. The
+  workstation needs a route to Secrets Manager in its own Region (a NAT
+  gateway or a Secrets Manager interface endpoint with private DNS), as the
+  existing credential reads do.
+  ([#131](https://github.com/awslabs/media-resource-manager/pull/131))
 
 ### Removed
 

@@ -25,7 +25,13 @@ const mockState: {
   storage: Record<string, any>;
   secretExists: boolean;
   failPutSecret: boolean;
-} = { workstation: null, storage: {}, secretExists: false, failPutSecret: false };
+  // CreateSecret calls that fail with "scheduled for deletion" after a delete
+  // (the name stays reserved while Secrets Manager removes the secret).
+  purgeAttempts: number;
+  pendingDeletion: number;
+  createFailure: string | null;
+  createdArn: string | null;
+} = { workstation: null, storage: {}, secretExists: false, failPutSecret: false, purgeAttempts: 0, pendingDeletion: 0, createFailure: null, createdArn: null };
 
 function mockCommand(kind: string) {
   return class {
@@ -107,15 +113,26 @@ jest.mock('@aws-sdk/client-secrets-manager', () => {
               }),
             };
           case 'CreateSecret':
+            if (mockState.createFailure) {
+              throw Object.assign(new Error(mockState.createFailure), { name: 'InvalidRequestException' });
+            }
+            if (mockState.pendingDeletion > 0) {
+              mockState.pendingDeletion--;
+              throw Object.assign(
+                new Error("You can't create this secret because a secret with this name is already scheduled for deletion."),
+                { name: 'InvalidRequestException' },
+              );
+            }
             if (mockState.secretExists) throw error('ResourceExistsException');
             mockState.secretExists = true;
-            return { ARN: SECRET_ARN };
+            return { ARN: mockState.createdArn ?? SECRET_ARN };
           case 'PutSecretValue':
             if (mockState.failPutSecret) throw error('AccessDeniedException');
-            return { ARN: SECRET_ARN };
+            return { ARN: mockState.createdArn ?? SECRET_ARN };
           case 'DeleteSecret':
             if (!mockState.secretExists) throw error('ResourceNotFoundException');
             mockState.secretExists = false;
+            mockState.pendingDeletion = mockState.purgeAttempts;
             return {};
           default:
             return {};
@@ -135,6 +152,7 @@ process.env.AWS_REGION = 'us-east-1';
 const { handler } = require('../lambda/fsx-smb-mount-manager/index.js');
 
 const logged: string[] = [];
+const delays: number[] = [];
 const calls = (kind: string) => mockCalls.filter((c) => c.kind === kind);
 const sentScript = () => {
   const sent = calls('SendCommand');
@@ -161,9 +179,20 @@ function workstation(joinDomain: boolean, storageIds: string[]) {
 beforeEach(() => {
   mockCalls.length = 0;
   logged.length = 0;
+  delays.length = 0;
   mockState.secretExists = false;
   mockState.failPutSecret = false;
+  mockState.purgeAttempts = 0;
+  mockState.pendingDeletion = 0;
+  mockState.createFailure = null;
+  mockState.createdArn = null;
   mockState.storage = { 'st-win': FSX_WINDOWS, 'st-ontap': FSX_ONTAP };
+  // Run retry back-offs at once and record their lengths.
+  jest.spyOn(global, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+    delays.push(ms ?? 0);
+    fn();
+    return 0;
+  }) as any);
   for (const level of ['log', 'warn', 'error'] as const) {
     jest.spyOn(console, level).mockImplementation((...args: unknown[]) => {
       logged.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
@@ -189,7 +218,9 @@ describe('standalone workstation with FSx for Windows', () => {
   test('the script reads the workstation secret and maps the drive with New-PSDrive -Persist', async () => {
     await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
     const script = sentScript();
-    expect(script).toContain(`Get-SECSecretValue -SecretId '${SECRET_ARN}' -Region 'us-east-1' -ErrorAction Stop`);
+    expect(script).toContain(`$secretArn = '${SECRET_ARN}'`);
+    expect(script).toContain("$secretRegion = 'us-east-1'"); // pragma: allowlist secret
+    expect(script).toContain('Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop');
     expect(script).toContain("Get-MountCredential 'st-win'");
     expect(script).toMatch(/New-PSDrive -Name "Z" -PSProvider FileSystem -Root \$networkPath -Credential \$mountCredential -Persist -Scope Global -ErrorAction Stop/);
     // New-SmbMapping bypasses the network provider, so Explorer does not show its drives.
@@ -254,21 +285,279 @@ describe('standalone workstation with FSx for Windows', () => {
     expect(calls('PutSecretValue')).toHaveLength(1);
   });
 
-  test('when the secret cannot be written the script mounts nothing and carries no password', async () => {
+  test('when the secret cannot be written the run fails and no script is sent', async () => {
     mockState.failPutSecret = true;
+    await expect(handler({ action: 'updateInstance', instanceId: INSTANCE_ID }))
+      .rejects.toThrow(`Could not write the SMB mount secret for ${INSTANCE_ID}: AccessDeniedException`);
+    expect(calls('SendCommand')).toHaveLength(0);
+  });
+
+  test('the secret is read with the fastest client present, and the read is timed in the log', async () => {
     await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
     const script = sentScript();
-    expectNoPassword(script);
-    expect(script).toContain('CREDENTIALS NOT AVAILABLE');
-    expect(script).not.toContain('Get-SECSecretValue');
+    const dotnet = script.indexOf("[System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll'))");
+    const sigV4 = script.indexOf('$smResponse = Invoke-WebRequest @smRequest');
+    expect(sigV4).toBeGreaterThan(-1);
+    expect(dotnet).toBeGreaterThan(sigV4);
+    const cli = script.indexOf('Get-Command aws.exe');
+    const modular = script.indexOf('Get-Module -ListAvailable -Name AWS.Tools.SecretsManager');
+    const monolithic = script.indexOf("$readClient = 'AWSPowerShell'");
+    expect(dotnet).toBeGreaterThan(-1);
+    expect(cli).toBeGreaterThan(dotnet);
+    expect(modular).toBeGreaterThan(cli);
+    expect(monolithic).toBeGreaterThan(modular);
+    // The .NET client uses the default (instance role) credentials and the secret's Region.
+    expect(script).toContain('New-Object Amazon.SecretsManager.AmazonSecretsManagerClient([Amazon.RegionEndpoint]::GetBySystemName($secretRegion))');
+    expect(script).toContain('$smRequest.SecretId = $secretArn');
+    expect(script).not.toMatch(/AmazonSecretsManagerClient\([^)]*(AccessKey|BasicAWSCredentials|SessionAWSCredentials)/);
+    // The CLI gets only the ARN and Region; the value goes to a variable, not a file.
+    expect(script).toContain('& aws.exe secretsmanager get-secret-value --secret-id $secretArn --region $secretRegion --query SecretString --output text');
+    expect(script).not.toMatch(/get-secret-value[^\n]*(>|Out-File|Set-Content)/);
+    expect(script).not.toMatch(/Add-Content[^\n]*(SecretString|\$mountCredentials\b|\$secretOutput)/);
+    expect(script).toContain('Read the SMB mount credentials with $readClient in');
+    expect(script).toContain('.TotalMilliseconds) ms"');
+  });
+
+  test('the script has the SDK assembly path and the AWSPowerShell module fallback', async () => {
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    const script = sentScript();
+    // Fast path: the AWSPowerShell folder on Amazon AMIs, else the newest installed module.
+    expect(script).toContain("Join-Path ${env:ProgramFiles(x86)} 'AWS Tools\\PowerShell\\AWSPowerShell'");
+    expect(script).toContain('Get-Module -ListAvailable -Name AWSPowerShell | Sort-Object Version -Descending | Select-Object -First 1).ModuleBase');
+    // Assemblies are loaded without type enumeration, after the module's own dependency resolver is registered.
+    expect(script).not.toContain('Add-Type -Path');
+    const resolver = script.indexOf('([Amazon.PowerShell.Common.AWSModuleAssemblyInitializer]::new()).OnImport()');
+    const core = script.indexOf("[System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSSDK.Core.dll'))");
+    const sm = script.indexOf("[System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll'))");
+    expect(script.indexOf("[System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSPowerShell.dll'))")).toBeGreaterThan(-1);
+    expect(resolver).toBeGreaterThan(-1);
+    expect(core).toBeGreaterThan(resolver);
+    expect(sm).toBeGreaterThan(core);
+    // The call is bounded, and its result is kept as a string until the one parse step.
+    expect(script).toContain("if (-not $smTask.Wait(15000)) { throw 'GetSecretValue did not finish within 15 s' }");
+    expect(script).toContain('$secretString = $smTask.Result.SecretString');
+    expect(script).toContain("$readClient = 'AWS SDK for .NET (AWSPowerShell assemblies)'");
+    // A failure logs its elapsed time, type and message, plus up to 3 loader exceptions, then tries the next client.
+    expect(script).toContain('Could not read the SMB mount credentials with the AWS SDK for .NET after $([int]((Get-Date) - $readStart).TotalMilliseconds) ms, trying the next client');
+    expect(script).toContain('$loadError.LoaderExceptions | Where-Object { $_ } | Select-Object -First 3');
+    // Last resort: import the module and use the cmdlet.
+    const fallback = script.indexOf("$readClient = 'AWSPowerShell'");
+    expect(fallback).toBeGreaterThan(script.indexOf("$readClient = 'AWS SDK for .NET"));
+    expect(script.slice(fallback)).toMatch(/^\$readClient = 'AWSPowerShell'\s*\n\s*Import-Module AWSPowerShell -ErrorAction Stop\s*\n\s*\$secretString = \(Get-SECSecretValue -SecretId \$secretArn/);
+  });
+
+  test('the secret is parsed once, and a parse error is logged without its message', async () => {
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    const script = sentScript();
+    expect(script.match(/\$secretString \| ConvertFrom-Json/g)).toHaveLength(1);
+    expect(script).toContain('try { $mountCredentials = $secretString | ConvertFrom-Json } catch {');
+    expect(script).toContain('ERROR: The SMB mount credentials are not valid JSON"');
+    expect(script).toContain('Remove-Variable -Name secretString');
+    expect(script).not.toMatch(/Add-Content[^\n]*\$secretString/);
+  });
+
+  test('the Run Command runs the mount task at normal priority (4) as well as queuing starts', async () => {
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    const command = sentScript();
+    expect(command).toContain('if ($task.Settings.MultipleInstances -ne "Queue" -or $task.Settings.Priority -ne 4) {');
+    expect(command).toContain('$task.Settings.Priority = 4');
+    expect(command.indexOf('$task.Settings.Priority = 4')).toBeLessThan(command.indexOf('Set-ScheduledTask -InputObject $task -ErrorAction Stop'));
+  });
+});
+
+describe('SigV4 read of the mount secret', () => {
+  beforeEach(() => {
+    mockState.workstation = workstation(false, ['st-win']);
+  });
+
+  const scriptFor = async (arn?: string) => {
+    if (arn) mockState.createdArn = arn;
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    return sentScript();
+  };
+
+  test('is the first client, after a self-test against the AWS SigV4 documentation example', async () => {
+    const script = await scriptFor();
+    const selfTest = script.indexOf("$sigV4Check = Get-SigV4Signature 'GET' '/' 'Action=ListUsers&Version=2010-05-08'");
+    expect(selfTest).toBeGreaterThan(-1);
+    expect(script).toContain("'x-amz-date'   = '20150830T123600Z'");
+    expect(script).toContain("elseif ($sigV4Check.Signature -ne '5d672d79c15b13162d9279b0855cfba6789a8edb4c82c400e06b5924a6f2b5d7') {"); // pragma: allowlist secret
+    expect(script).toContain('SigV4 self-test failed, trying the next client');
+    const request = script.indexOf('$smResponse = Invoke-WebRequest @smRequest');
+    expect(request).toBeGreaterThan(selfTest);
+    expect(script.indexOf("[System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSPowerShell.dll'))")).toBeGreaterThan(request);
+    // Later clients run only when the signed request got nothing.
+    expect(script).toContain('if (-not $secretString -and $awsPowerShellBase -and');
+    expect(script).toContain("$readClient = 'SigV4 (instance role from IMDSv2)'");
+  });
+
+  test('gets IMDSv2 role credentials with 5 s timeouts and signs a 15 s GetSecretValue call', async () => {
+    const script = await scriptFor();
+    expect(script).toContain(`$imdsToken = Invoke-RestMethod -Method Put -Uri "$imds/api/token" -Headers @{ 'X-aws-ec2-metadata-token-ttl-seconds' = '60' } -TimeoutSec 5`);
+    expect(script.match(/169\.254\.169\.254|\$imds\//g)!.length).toBeGreaterThanOrEqual(3);
+    expect(script.match(/Invoke-RestMethod [^\n]*-TimeoutSec 5/g)).toHaveLength(3);
+    expect(script).toContain('TimeoutSec      = 15');
+    expect(script).toContain("'x-amz-target'         = 'secretsmanager.GetSecretValue'");
+    expect(script).toContain("'x-amz-security-token' = $imdsCredentials.Token");
+    expect(script).toContain("$smBody = '{\"SecretId\":\"' + $secretArn + '\"}'");
+    // TLS certificate validation is left at its default.
+    expect(script).not.toMatch(/ServerCertificateValidationCallback|SkipCertificateCheck|CheckCertificateRevocationList/);
+  });
+
+  test('logs no credential, Authorization header, token or response body', async () => {
+    const script = await scriptFor();
+    const logLines = script.split('\n').filter((l) => l.includes('Add-Content'));
+    for (const line of logLines) {
+      expect(line).not.toMatch(/\$(imdsCredentials|smAuthorization|imdsToken|smResponseText|smResponse|sigV4|smRequest|secretString)\b/);
+    }
+    // Errors log the HTTP status and AWS's error type, or only the exception type.
+    expect(script).toContain('SigV4 request failed after $([int]((Get-Date) - $readStart).TotalMilliseconds) ms (HTTP $sigV4Status $sigV4ErrorType), trying the next client');
+    expect(script).toContain('SigV4 request failed after $([int]((Get-Date) - $readStart).TotalMilliseconds) ms ($($_.Exception.GetType().Name)), trying the next client');
+    expect(script).toContain('$imdsCredentials = $null; $sigV4 = $null; $smAuthorization = $null; $imdsToken = $null; $smRequest = $null');
+    expect(script).toContain('$smResponseText = $null');
+  });
+
+  test.each([
+    ['aws', 'us-east-1', 'secretsmanager.us-east-1.amazonaws.com'],
+    ['aws-cn', 'cn-north-1', 'secretsmanager.cn-north-1.amazonaws.com.cn'],
+    ['aws-us-gov', 'us-gov-west-1', 'secretsmanager.us-gov-west-1.amazonaws.com'],
+  ])('signs for the %s partition endpoint in the secret ARN Region', async (partition, region, host) => {
+    const script = await scriptFor(`arn:${partition}:secretsmanager:${region}:123456789012:secret:/MediaResourceManager/Workstation/${INSTANCE_ID}/SmbMount-AbCdEf`); // pragma: allowlist secret
+    expect(script).toContain(`$smHost = '${host}'`);
+    expect(script).toContain(`$secretRegion = '${region}'`);
+    expect(script).not.toMatch(/\$smHost = "secretsmanager/);
+  });
+
+  test('an unknown partition skips the signed request and keeps the SDK and module clients', async () => {
+    const script = await scriptFor(`arn:aws-iso:secretsmanager:us-iso-east-1:123456789012:secret:/MediaResourceManager/Workstation/${INSTANCE_ID}/SmbMount-AbCdEf`); // pragma: allowlist secret
+    expect(script).toContain('$smHost = $null');
+    expect(script).toContain("No signed-request endpoint for this secret's partition, trying the next client");
+    expect(script).toContain("$readClient = 'AWS SDK for .NET (AWSPowerShell assemblies)'");
+    expect(script).toContain("$readClient = 'AWSPowerShell'");
+  });
+
+  test('every log line gets the time it is written', async () => {
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    const script = sentScript();
+    expect(script).not.toContain('$timestamp');
+    const lines = script.split('\n').filter((l) => l.includes('Add-Content -Path $logFile'));
+    expect(lines.length).toBeGreaterThan(3);
+    for (const line of lines) expect(line).toContain('[$(Get-LogTime)]');
+    // The start line comes before the credential read.
+    expect(script.indexOf('Starting FSx mount')).toBeLessThan(script.indexOf('$readStart = Get-Date'));
+  });
+
+  test('the Run Command queues task starts and fails if the task cannot start', async () => {
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    const command = sentScript();
+    const queue = command.indexOf('$task.Settings.MultipleInstances = "Queue"');
+    const setTask = command.indexOf('Set-ScheduledTask -InputObject $task -ErrorAction Stop');
+    const start = command.indexOf('Start-ScheduledTask -TaskName "FSxMountScript" -ErrorAction Stop');
+    expect(command).toContain('Get-ScheduledTask -TaskName "FSxMountScript" -ErrorAction Stop');
+    expect(queue).toBeGreaterThan(-1);
+    expect(setTask).toBeGreaterThan(queue);
+    expect(start).toBeGreaterThan(setTask);
+    // The script file is written before the task is started.
+    expect(command.indexOf('$scriptContent | Out-File $scriptFile')).toBeLessThan(start);
+    expect(command).not.toMatch(/Start-ScheduledTask[^\n]*SilentlyContinue/);
+    expect(command).toContain('Write-Error "Could not start the FSxMountScript task: $($_.Exception.Message)"');
+    expect(command.slice(start)).toMatch(/catch \{[^}]*exit 1/);
+  });
+
+  test('the log says "completed with errors" when a mount failed', async () => {
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    const script = sentScript();
+    expect(script).toContain('$mountErrors = 0');
+    expect(script).toMatch(/\$mountErrors\+\+\s*\n\s*Add-Content -Path \$logFile -Value "\[\$\(Get-LogTime\)\] ERROR: Failed to mount Media/);
+    expect(script).toContain('if ($mountErrors -gt 0) {');
+    expect(script).toContain('FSx mount completed with errors ($mountErrors failed) for user: $env:USERNAME');
   });
 
   test('no log line carries a password', async () => {
     await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
     mockState.failPutSecret = true;
-    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    await expect(handler({ action: 'updateInstance', instanceId: INSTANCE_ID })).rejects.toThrow();
     expect(logged.length).toBeGreaterThan(0);
     for (const line of logged) expectNoPassword(line);
+  });
+});
+
+describe('attach, detach and attach again', () => {
+  const attached = () => workstation(false, ['st-win']);
+  const detached = () => ({ ...workstation(false, []), storageConfig: { 'st-win': { autoMount: false, driveLetter: 'Z' } } });
+
+  test('a re-attach while the deleted secret is still being removed waits, then writes the credentials', async () => {
+    mockState.purgeAttempts = 2;
+    mockState.workstation = attached();
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    mockState.workstation = detached();
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    expect(calls('DeleteSecret')).toHaveLength(1);
+    mockCalls.length = 0;
+
+    mockState.workstation = attached();
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    expect(calls('CreateSecret')).toHaveLength(3);
+    expect(delays).toEqual([1000, 2000]);
+    expect(calls('PutSecretValue')).toHaveLength(1);
+    const script = sentScript();
+    expect(script).toContain(`$secretArn = '${SECRET_ARN}'`);
+    expect(script).toContain("Get-MountCredential 'st-win'");
+    expect(script).not.toContain('CREDENTIALS NOT AVAILABLE');
+    expectNoPassword(script);
+  });
+
+  test('when the name stays reserved past the retries, the run fails and no script is sent', async () => {
+    mockState.pendingDeletion = 100;
+    mockState.workstation = attached();
+    await expect(handler({ action: 'updateInstance', instanceId: INSTANCE_ID }))
+      .rejects.toThrow(`Could not write the SMB mount secret for ${INSTANCE_ID}: InvalidRequestException`);
+    expect(calls('CreateSecret')).toHaveLength(5);
+    expect(delays).toEqual([1000, 2000, 4000, 8000]);
+    expect(calls('PutSecretValue')).toHaveLength(0);
+    expect(calls('SendCommand')).toHaveLength(0);
+  });
+
+  test('other CreateSecret errors are not retried', async () => {
+    mockState.createFailure = 'The parameter Name is not valid.';
+    mockState.workstation = attached();
+    await expect(handler({ action: 'updateInstance', instanceId: INSTANCE_ID }))
+      .rejects.toThrow('InvalidRequestException');
+    expect(calls('CreateSecret')).toHaveLength(1);
+    expect(delays).toEqual([]);
+    expect(calls('SendCommand')).toHaveLength(0);
+  });
+
+  test('an attach that is still waiting when a later detach is saved does not send its script', async () => {
+    // Attach run: the deleted secret's name is still reserved, so it waits.
+    // While it waits, the user detaches (the record changes).
+    mockState.workstation = attached();
+    mockState.pendingDeletion = 1;
+    mockState.secretExists = false;
+    (global.setTimeout as unknown as jest.Mock).mockImplementation(((fn: () => void, ms?: number) => {
+      delays.push(ms ?? 0);
+      mockState.workstation = detached();
+      fn();
+      return 0;
+    }) as any);
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+
+    expect(logged.some((l) => l.includes(`Storage configuration for ${INSTANCE_ID} changed during this run; not sending its script`))).toBe(true);
+    // The run starts over from the current (detached) record: the secret it
+    // wrote is deleted, and the only script sent mounts nothing.
+    expect(calls('PutSecretValue')).toHaveLength(1);
+    expect(calls('DeleteSecret')).toHaveLength(1);
+    const script = sentScript();
+    expect(script).not.toContain("Get-MountCredential '");
+    expect(script).not.toContain("$secretArn = '");
+    expect(mockState.secretExists).toBe(false);
+  });
+
+  test('an unchanged record sends the script once', async () => {
+    mockState.workstation = attached();
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    expect(calls('SendCommand')).toHaveLength(1);
+    expect(logged.some((l) => l.includes('changed during this run'))).toBe(false);
   });
 });
 
