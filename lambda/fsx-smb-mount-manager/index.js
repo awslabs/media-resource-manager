@@ -293,7 +293,7 @@ async function resolveJoinDomain(workstation, workstationRegion) {
     return joined;
 }
 
-async function updateInstanceMountScript(instanceId) {
+async function updateInstanceMountScript(instanceId, attempt = 0) {
     console.log(`Updating mount script for instance: ${instanceId}`);
     
     // Get workstation record to check domain status and platform
@@ -331,8 +331,18 @@ async function updateInstanceMountScript(instanceId) {
     const isDomainJoined = await resolveJoinDomain(workstation, workstationRegion);
     console.log(`Workstation ${instanceId} domain-joined: ${isDomainJoined}`);
     
-    // Get storage configuration for this instance
-    const storageConfigs = await getStorageForInstance(instanceId, workstation, isDomainJoined, workstationRegion);
+    // Get storage configuration for this instance. If it changed while this
+    // run was building the script, start over from the current record so the
+    // latest configuration (and its secret) is what the workstation gets.
+    let storageConfigs;
+    try {
+        storageConfigs = await getStorageForInstance(instanceId, workstation, isDomainJoined, workstationRegion);
+    } catch (error) {
+        if (error instanceof StaleStorageConfigError && attempt < 2) {
+            return updateInstanceMountScript(instanceId, attempt + 1);
+        }
+        throw error;
+    }
     
     return {
         success: true,
@@ -415,6 +425,7 @@ async function getStorageForInstance(instanceId, workstation, isDomainJoined, wo
         // Generate empty script to clear any existing mounts
         await deleteMountSecret(instanceId);
         const loginScript = generateLoginScript([], isDomainJoined, null, {});
+        await assertStorageConfigCurrent(instanceId, workstation.storageConfig);
         await deployLoginScript(instanceId, loginScript, workstationRegion);
         return [];
     }
@@ -606,9 +617,35 @@ async function getStorageForInstance(instanceId, workstation, isDomainJoined, wo
     }
 
     const loginScript = generateLoginScript(storageConfigs, isDomainJoined, mountSecret, ontapShares);
+    await assertStorageConfigCurrent(instanceId, workstation.storageConfig);
     await deployLoginScript(instanceId, loginScript, workstationRegion);
     
     return storageConfigs;
+}
+
+/**
+ * Thrown when the workstation's storageConfig changed while a run was
+ * building its script. Two saves start two runs that can overlap (for
+ * example an attach that is waiting for a deleted secret's name and a later
+ * detach), so the older run must not send its script last.
+ */
+class StaleStorageConfigError extends Error {}
+
+// JSON with sorted keys, so two reads of the same map compare equal.
+function canonicalJson(value) {
+    if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+    if (value && typeof value === 'object') {
+        return `{${Object.keys(value).sort().map((k) => `${JSON.stringify(k)}:${canonicalJson(value[k])}`).join(',')}}`;
+    }
+    return JSON.stringify(value === undefined ? null : value);
+}
+
+async function assertStorageConfigCurrent(instanceId, usedStorageConfig) {
+    const current = await dynamodb.send(new GetCommand({ TableName: WORKSTATION_TABLE_NAME, Key: { instanceId } }));
+    if (canonicalJson(current.Item?.storageConfig) !== canonicalJson(usedStorageConfig)) {
+        console.log(`Storage configuration for ${instanceId} changed during this run; not sending its script`);
+        throw new StaleStorageConfigError(`Storage configuration for ${instanceId} changed during the run`);
+    }
 }
 
 async function getStorageById(storageId) {
@@ -654,31 +691,56 @@ $mountCredentials = $null`;
     }
     return `
 # Read this workstation's SMB mount credentials from Secrets Manager with the
-# instance role. Use the fastest client present: the modular
-# AWS.Tools.SecretsManager module, then the AWS CLI, then the AWSPowerShell
-# module (the only one on some AMIs, and slow to load the first time).
+# instance role. Fastest first:
+#   1. the AWS SDK for .NET assemblies that ship inside the AWSPowerShell
+#      module, loaded directly (importing the whole module takes minutes the
+#      first time);
+#   2. the AWS CLI;
+#   3. the modular AWS.Tools.SecretsManager module;
+#   4. the AWSPowerShell module.
+# The secret value stays in this process; only the ARN is on any command line.
 $mountCredentials = $null
 $secretArn = ${psQuote(mountSecret.arn)}
 $secretRegion = ${psQuote(mountSecret.region)}
 $readStart = Get-Date
-try {
-    if (Get-Module -ListAvailable -Name AWS.Tools.SecretsManager) {
-        $readClient = 'AWS.Tools.SecretsManager'
-        Import-Module AWS.Tools.SecretsManager -ErrorAction Stop
-        $mountCredentials = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString | ConvertFrom-Json
-    } elseif (Get-Command aws.exe -ErrorAction SilentlyContinue) {
-        $readClient = 'AWS CLI'
-        $secretOutput = & aws.exe secretsmanager get-secret-value --secret-id $secretArn --region $secretRegion --query SecretString --output text
-        if ($LASTEXITCODE -ne 0) { throw "aws secretsmanager get-secret-value exited with code $LASTEXITCODE" }
-        $mountCredentials = ($secretOutput | Out-String).Trim() | ConvertFrom-Json
-        Remove-Variable -Name secretOutput
-    } else {
-        $readClient = 'AWSPowerShell'
-        $mountCredentials = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString | ConvertFrom-Json
+$readClient = $null
+$awsPowerShell = Get-Module -ListAvailable -Name AWSPowerShell | Sort-Object Version -Descending | Select-Object -First 1
+if ($awsPowerShell -and (Test-Path (Join-Path $awsPowerShell.ModuleBase 'AWSSDK.SecretsManager.dll'))) {
+    try {
+        Add-Type -Path (Join-Path $awsPowerShell.ModuleBase 'AWSSDK.Core.dll') -ErrorAction Stop
+        Add-Type -Path (Join-Path $awsPowerShell.ModuleBase 'AWSSDK.SecretsManager.dll') -ErrorAction Stop
+        $smClient = New-Object Amazon.SecretsManager.AmazonSecretsManagerClient([Amazon.RegionEndpoint]::GetBySystemName($secretRegion))
+        $smRequest = New-Object Amazon.SecretsManager.Model.GetSecretValueRequest
+        $smRequest.SecretId = $secretArn
+        $mountCredentials = $smClient.GetSecretValueAsync($smRequest).GetAwaiter().GetResult().SecretString | ConvertFrom-Json
+        $smClient.Dispose()
+        $readClient = 'AWS SDK for .NET (AWSPowerShell assemblies)'
+    } catch {
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] Could not read the SMB mount credentials with the AWS SDK for .NET, trying the next client: $($_.Exception.Message)"
     }
-    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Read the SMB mount credentials with $readClient in $([int]((Get-Date) - $readStart).TotalSeconds) s"
-} catch {
-    Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Could not read the SMB mount credentials: $($_.Exception.Message)"
+}
+if (-not $mountCredentials) {
+    try {
+        if (Get-Command aws.exe -ErrorAction SilentlyContinue) {
+            $readClient = 'AWS CLI'
+            $secretOutput = & aws.exe secretsmanager get-secret-value --secret-id $secretArn --region $secretRegion --query SecretString --output text
+            if ($LASTEXITCODE -ne 0) { throw "aws secretsmanager get-secret-value exited with code $LASTEXITCODE" }
+            $mountCredentials = ($secretOutput | Out-String).Trim() | ConvertFrom-Json
+            Remove-Variable -Name secretOutput
+        } elseif (Get-Module -ListAvailable -Name AWS.Tools.SecretsManager) {
+            $readClient = 'AWS.Tools.SecretsManager'
+            Import-Module AWS.Tools.SecretsManager -ErrorAction Stop
+            $mountCredentials = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString | ConvertFrom-Json
+        } else {
+            $readClient = 'AWSPowerShell'
+            $mountCredentials = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString | ConvertFrom-Json
+        }
+    } catch {
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Could not read the SMB mount credentials: $($_.Exception.Message)"
+    }
+}
+if ($mountCredentials) {
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Read the SMB mount credentials with $readClient in $([math]::Round(((Get-Date) - $readStart).TotalSeconds, 1)) s"
 }`;
 }
 

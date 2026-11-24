@@ -293,15 +293,22 @@ describe('standalone workstation with FSx for Windows', () => {
   test('the secret is read with the fastest client present, and the read is timed in the log', async () => {
     await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
     const script = sentScript();
-    const modular = script.indexOf('Get-Module -ListAvailable -Name AWS.Tools.SecretsManager');
+    const dotnet = script.indexOf("Add-Type -Path (Join-Path $awsPowerShell.ModuleBase 'AWSSDK.SecretsManager.dll') -ErrorAction Stop");
     const cli = script.indexOf('Get-Command aws.exe');
+    const modular = script.indexOf('Get-Module -ListAvailable -Name AWS.Tools.SecretsManager');
     const monolithic = script.indexOf("$readClient = 'AWSPowerShell'");
-    expect(modular).toBeGreaterThan(-1);
-    expect(cli).toBeGreaterThan(modular);
-    expect(monolithic).toBeGreaterThan(cli);
+    expect(dotnet).toBeGreaterThan(-1);
+    expect(cli).toBeGreaterThan(dotnet);
+    expect(modular).toBeGreaterThan(cli);
+    expect(monolithic).toBeGreaterThan(modular);
+    // The .NET client uses the default (instance role) credentials and the secret's Region.
+    expect(script).toContain('New-Object Amazon.SecretsManager.AmazonSecretsManagerClient([Amazon.RegionEndpoint]::GetBySystemName($secretRegion))');
+    expect(script).toContain('$smRequest.SecretId = $secretArn');
+    expect(script).not.toMatch(/AmazonSecretsManagerClient\([^)]*(AccessKey|BasicAWSCredentials|SessionAWSCredentials)/);
     // The CLI gets only the ARN and Region; the value goes to a variable, not a file.
     expect(script).toContain('& aws.exe secretsmanager get-secret-value --secret-id $secretArn --region $secretRegion --query SecretString --output text');
     expect(script).not.toMatch(/get-secret-value[^\n]*(>|Out-File|Set-Content)/);
+    expect(script).not.toMatch(/Add-Content[^\n]*(SecretString|\$mountCredentials\b|\$secretOutput)/);
     expect(script).toContain('Read the SMB mount credentials with $readClient in');
   });
 
@@ -395,6 +402,38 @@ describe('attach, detach and attach again', () => {
     expect(calls('CreateSecret')).toHaveLength(1);
     expect(delays).toEqual([]);
     expect(calls('SendCommand')).toHaveLength(0);
+  });
+
+  test('an attach that is still waiting when a later detach is saved does not send its script', async () => {
+    // Attach run: the deleted secret's name is still reserved, so it waits.
+    // While it waits, the user detaches (the record changes).
+    mockState.workstation = attached();
+    mockState.pendingDeletion = 1;
+    mockState.secretExists = false;
+    (global.setTimeout as unknown as jest.Mock).mockImplementation(((fn: () => void, ms?: number) => {
+      delays.push(ms ?? 0);
+      mockState.workstation = detached();
+      fn();
+      return 0;
+    }) as any);
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+
+    expect(logged.some((l) => l.includes(`Storage configuration for ${INSTANCE_ID} changed during this run; not sending its script`))).toBe(true);
+    // The run starts over from the current (detached) record: the secret it
+    // wrote is deleted, and the only script sent mounts nothing.
+    expect(calls('PutSecretValue')).toHaveLength(1);
+    expect(calls('DeleteSecret')).toHaveLength(1);
+    const script = sentScript();
+    expect(script).not.toContain("Get-MountCredential '");
+    expect(script).not.toContain("$secretArn = '");
+    expect(mockState.secretExists).toBe(false);
+  });
+
+  test('an unchanged record sends the script once', async () => {
+    mockState.workstation = attached();
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    expect(calls('SendCommand')).toHaveLength(1);
+    expect(logged.some((l) => l.includes('changed during this run'))).toBe(false);
   });
 });
 
