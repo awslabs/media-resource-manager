@@ -12,6 +12,13 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Upgrade steps
+
+- No action needed for the `ResourceAdmin` password fix below. With
+  `AdMode=managed`, the first deploy of this version sets the `ResourceAdmin`
+  password to the value stored in its Secrets Manager secret. The value does
+  not change, so nothing that uses the secret needs updating.
+
 ### Added
 
 - [Upgrading](docs/UPGRADING.md), a step-by-step guide to upgrading an
@@ -26,6 +33,20 @@ upgrade to that version; a version without it needs only a redeploy.
 - The unused `GET /auth/validate` route and its `validate-jwt` Lambda.
   Protected routes validate tokens with the API's JWT authorizer.
   ([#121](https://github.com/awslabs/media-resource-manager/pull/121))
+
+### Fixed
+
+- With `AdMode=managed`, MRM keeps the `ResourceAdmin` password from
+  expiring. AWS Managed Microsoft AD expires passwords after the directory's
+  maximum password age (42 days by default), and an expired `ResourceAdmin`
+  password stopped FSx for Windows File Server storage creation,
+  `ResourceAdmin` sign-in, SMB mounts and DataSync SMB locations. MRM now sets
+  the password to its stored value on the first deploy of this version and
+  every 30 days after that, through the AWS Directory Service API. A failed
+  scheduled reset raises the
+  `<Acronym>-ResourceAdmin-Password-Refresh-Failed` CloudWatch alarm, and a
+  failed reset during deployment fails the deployment.
+  ([#128](https://github.com/awslabs/media-resource-manager/issues/128))
 
 ### Security
 
