@@ -18,6 +18,16 @@ upgrade to that version; a version without it needs only a redeploy.
   Protected routes validate tokens with the API's JWT authorizer.
   ([#121](https://github.com/awslabs/media-resource-manager/pull/121))
 
+### Fixed
+
+- The pipeline template's `AdMode` parameter defaults to empty, which keeps
+  the mode in the stored deployment config, like the other optional pipeline
+  parameters. A new install still gets `managed`. A pipeline stack that set
+  `connector` through `MRM_PARAM_OVERRIDES` keeps it when the stack is
+  updated with the new template. If your pipeline stack already has
+  `AdMode=managed` set and the deployment runs in connector mode, set
+  `AdMode` to `connector` or leave it empty when you update the stack.
+
 ### Security
 
 - `POST /auth/ldap` validates the sign-in request (a JSON body with a string

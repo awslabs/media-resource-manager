@@ -279,3 +279,37 @@ describe('deploy-pipeline.yaml: gateway settings', () => {
     for (const name of names) expect(() => parameter(name)).not.toThrow();
   });
 });
+
+describe('deploy-pipeline.yaml: AdMode', () => {
+  const stored = (adMode: string) => JSON.stringify(EXAMPLE.map(({ ParameterKey, ParameterValue }) => ({
+    ParameterKey,
+    ParameterValue: ParameterKey === 'AdMode' ? adMode : ParameterValue,
+  })));
+
+  test('defaults to empty, so a stack update does not change the stored mode', () => {
+    const lines = parameter('AdMode').map(l => l.trim());
+    expect(lines).toContain("Default: ''");
+    expect(lines.slice(lines.indexOf('AllowedValues:') + 1, lines.indexOf('AllowedValues:') + 4))
+      .toEqual(["- ''", '- managed', '- connector']);
+    const envLine = TEMPLATE_LINES.indexOf('          - Name: MRM_AD_MODE');
+    expect(TEMPLATE_LINES[envLine + 1].trim()).toBe('Value: !Ref AdMode');
+  });
+
+  test('an empty AdMode keeps a stored connector mode', () => {
+    const run = runBlock(OVERRIDES_BLOCK, { parametersJson: stored('connector'), env: { MRM_AD_MODE: '' } });
+    expect(run.status).toBe(0);
+    expect(valueOf(readParams(run), 'AdMode')).toBe('connector');
+  });
+
+  test('an explicit AdMode replaces the stored mode', () => {
+    const run = runBlock(OVERRIDES_BLOCK, { parametersJson: stored('connector'), env: { MRM_AD_MODE: 'managed' } });
+    expect(run.status).toBe(0);
+    expect(valueOf(readParams(run), 'AdMode')).toBe('managed');
+  });
+
+  test('a new install with an empty AdMode seeds managed', () => {
+    const run = runBlock(SEED_BLOCK, { env: { MRM_AD_MODE: '' } });
+    expect(run.status).toBe(0);
+    expect(valueOf(JSON.parse(run.stored!), 'AdMode')).toBe('managed');
+  });
+});
