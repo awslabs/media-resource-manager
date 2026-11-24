@@ -25,7 +25,12 @@ const mockState: {
   storage: Record<string, any>;
   secretExists: boolean;
   failPutSecret: boolean;
-} = { workstation: null, storage: {}, secretExists: false, failPutSecret: false };
+  // CreateSecret calls that fail with "scheduled for deletion" after a delete
+  // (the name stays reserved while Secrets Manager removes the secret).
+  purgeAttempts: number;
+  pendingDeletion: number;
+  createFailure: string | null;
+} = { workstation: null, storage: {}, secretExists: false, failPutSecret: false, purgeAttempts: 0, pendingDeletion: 0, createFailure: null };
 
 function mockCommand(kind: string) {
   return class {
@@ -107,6 +112,16 @@ jest.mock('@aws-sdk/client-secrets-manager', () => {
               }),
             };
           case 'CreateSecret':
+            if (mockState.createFailure) {
+              throw Object.assign(new Error(mockState.createFailure), { name: 'InvalidRequestException' });
+            }
+            if (mockState.pendingDeletion > 0) {
+              mockState.pendingDeletion--;
+              throw Object.assign(
+                new Error("You can't create this secret because a secret with this name is already scheduled for deletion."),
+                { name: 'InvalidRequestException' },
+              );
+            }
             if (mockState.secretExists) throw error('ResourceExistsException');
             mockState.secretExists = true;
             return { ARN: SECRET_ARN };
@@ -116,6 +131,7 @@ jest.mock('@aws-sdk/client-secrets-manager', () => {
           case 'DeleteSecret':
             if (!mockState.secretExists) throw error('ResourceNotFoundException');
             mockState.secretExists = false;
+            mockState.pendingDeletion = mockState.purgeAttempts;
             return {};
           default:
             return {};
@@ -135,6 +151,7 @@ process.env.AWS_REGION = 'us-east-1';
 const { handler } = require('../lambda/fsx-smb-mount-manager/index.js');
 
 const logged: string[] = [];
+const delays: number[] = [];
 const calls = (kind: string) => mockCalls.filter((c) => c.kind === kind);
 const sentScript = () => {
   const sent = calls('SendCommand');
@@ -161,9 +178,19 @@ function workstation(joinDomain: boolean, storageIds: string[]) {
 beforeEach(() => {
   mockCalls.length = 0;
   logged.length = 0;
+  delays.length = 0;
   mockState.secretExists = false;
   mockState.failPutSecret = false;
+  mockState.purgeAttempts = 0;
+  mockState.pendingDeletion = 0;
+  mockState.createFailure = null;
   mockState.storage = { 'st-win': FSX_WINDOWS, 'st-ontap': FSX_ONTAP };
+  // Run retry back-offs at once and record their lengths.
+  jest.spyOn(global, 'setTimeout').mockImplementation(((fn: () => void, ms?: number) => {
+    delays.push(ms ?? 0);
+    fn();
+    return 0;
+  }) as any);
   for (const level of ['log', 'warn', 'error'] as const) {
     jest.spyOn(console, level).mockImplementation((...args: unknown[]) => {
       logged.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
@@ -189,7 +216,9 @@ describe('standalone workstation with FSx for Windows', () => {
   test('the script reads the workstation secret and maps the drive with New-PSDrive -Persist', async () => {
     await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
     const script = sentScript();
-    expect(script).toContain(`Get-SECSecretValue -SecretId '${SECRET_ARN}' -Region 'us-east-1' -ErrorAction Stop`);
+    expect(script).toContain(`$secretArn = '${SECRET_ARN}'`);
+    expect(script).toContain("$secretRegion = 'us-east-1'"); // pragma: allowlist secret
+    expect(script).toContain('Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop');
     expect(script).toContain("Get-MountCredential 'st-win'");
     expect(script).toMatch(/New-PSDrive -Name "Z" -PSProvider FileSystem -Root \$networkPath -Credential \$mountCredential -Persist -Scope Global -ErrorAction Stop/);
     // New-SmbMapping bypasses the network provider, so Explorer does not show its drives.
@@ -254,21 +283,92 @@ describe('standalone workstation with FSx for Windows', () => {
     expect(calls('PutSecretValue')).toHaveLength(1);
   });
 
-  test('when the secret cannot be written the script mounts nothing and carries no password', async () => {
+  test('when the secret cannot be written the run fails and no script is sent', async () => {
     mockState.failPutSecret = true;
+    await expect(handler({ action: 'updateInstance', instanceId: INSTANCE_ID }))
+      .rejects.toThrow(`Could not write the SMB mount secret for ${INSTANCE_ID}: AccessDeniedException`);
+    expect(calls('SendCommand')).toHaveLength(0);
+  });
+
+  test('the secret is read with the fastest client present, and the read is timed in the log', async () => {
     await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
     const script = sentScript();
-    expectNoPassword(script);
-    expect(script).toContain('CREDENTIALS NOT AVAILABLE');
-    expect(script).not.toContain('Get-SECSecretValue');
+    const modular = script.indexOf('Get-Module -ListAvailable -Name AWS.Tools.SecretsManager');
+    const cli = script.indexOf('Get-Command aws.exe');
+    const monolithic = script.indexOf("$readClient = 'AWSPowerShell'");
+    expect(modular).toBeGreaterThan(-1);
+    expect(cli).toBeGreaterThan(modular);
+    expect(monolithic).toBeGreaterThan(cli);
+    // The CLI gets only the ARN and Region; the value goes to a variable, not a file.
+    expect(script).toContain('& aws.exe secretsmanager get-secret-value --secret-id $secretArn --region $secretRegion --query SecretString --output text');
+    expect(script).not.toMatch(/get-secret-value[^\n]*(>|Out-File|Set-Content)/);
+    expect(script).toContain('Read the SMB mount credentials with $readClient in');
+  });
+
+  test('every log line gets the time it is written', async () => {
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    const script = sentScript();
+    expect(script).not.toContain('$timestamp');
+    const lines = script.split('\n').filter((l) => l.includes('Add-Content -Path $logFile'));
+    expect(lines.length).toBeGreaterThan(3);
+    for (const line of lines) expect(line).toContain('[$(Get-LogTime)]');
+    // The start line comes before the credential read.
+    expect(script.indexOf('Starting FSx mount')).toBeLessThan(script.indexOf('$readStart = Get-Date'));
   });
 
   test('no log line carries a password', async () => {
     await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
     mockState.failPutSecret = true;
-    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    await expect(handler({ action: 'updateInstance', instanceId: INSTANCE_ID })).rejects.toThrow();
     expect(logged.length).toBeGreaterThan(0);
     for (const line of logged) expectNoPassword(line);
+  });
+});
+
+describe('attach, detach and attach again', () => {
+  const attached = () => workstation(false, ['st-win']);
+  const detached = () => ({ ...workstation(false, []), storageConfig: { 'st-win': { autoMount: false, driveLetter: 'Z' } } });
+
+  test('a re-attach while the deleted secret is still being removed waits, then writes the credentials', async () => {
+    mockState.purgeAttempts = 2;
+    mockState.workstation = attached();
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    mockState.workstation = detached();
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    expect(calls('DeleteSecret')).toHaveLength(1);
+    mockCalls.length = 0;
+
+    mockState.workstation = attached();
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    expect(calls('CreateSecret')).toHaveLength(3);
+    expect(delays).toEqual([1000, 2000]);
+    expect(calls('PutSecretValue')).toHaveLength(1);
+    const script = sentScript();
+    expect(script).toContain(`$secretArn = '${SECRET_ARN}'`);
+    expect(script).toContain("Get-MountCredential 'st-win'");
+    expect(script).not.toContain('CREDENTIALS NOT AVAILABLE');
+    expectNoPassword(script);
+  });
+
+  test('when the name stays reserved past the retries, the run fails and no script is sent', async () => {
+    mockState.pendingDeletion = 100;
+    mockState.workstation = attached();
+    await expect(handler({ action: 'updateInstance', instanceId: INSTANCE_ID }))
+      .rejects.toThrow(`Could not write the SMB mount secret for ${INSTANCE_ID}: InvalidRequestException`);
+    expect(calls('CreateSecret')).toHaveLength(6);
+    expect(delays).toEqual([1000, 2000, 4000, 8000, 15000]);
+    expect(calls('PutSecretValue')).toHaveLength(0);
+    expect(calls('SendCommand')).toHaveLength(0);
+  });
+
+  test('other CreateSecret errors are not retried', async () => {
+    mockState.createFailure = 'The parameter Name is not valid.';
+    mockState.workstation = attached();
+    await expect(handler({ action: 'updateInstance', instanceId: INSTANCE_ID }))
+      .rejects.toThrow('InvalidRequestException');
+    expect(calls('CreateSecret')).toHaveLength(1);
+    expect(delays).toEqual([]);
+    expect(calls('SendCommand')).toHaveLength(0);
   });
 });
 

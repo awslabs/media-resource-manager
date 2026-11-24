@@ -64,6 +64,7 @@ jest.mock('@aws-sdk/client-ssm', () => ({
       const values: Record<string, string> = {
         '/MediaResourceManager/Identity/ActiveDirectoryDomainName': 'studio.example.internal',
         '/MediaResourceManager/Identity/AdServiceAccountSecretArn': 'ad-secret', // pragma: allowlist secret
+        '/MediaResourceManager/DCV/InstanceRoleArn': 'arn:aws:iam::123456789012:role/Mrm-Dcv-WorkstationInstanceRole',
       };
       if (!(cmd.input.Name in values)) throw Object.assign(new Error('ParameterNotFound'), { name: 'ParameterNotFound' });
       return { Parameter: { Value: values[cmd.input.Name] } };
@@ -92,9 +93,17 @@ jest.mock('@aws-sdk/client-fsx', () => ({
 
 jest.mock('@aws-sdk/client-secrets-manager', () => ({
   GetSecretValueCommand: mockCommand('GetSecretValue'),
+  CreateSecretCommand: mockCommand('CreateSecret'),
+  PutResourcePolicyCommand: mockCommand('PutResourcePolicy'),
+  PutSecretValueCommand: mockCommand('PutSecretValue'),
+  DeleteSecretCommand: mockCommand('DeleteSecret'),
   SecretsManagerClient: class {
     async send(cmd: Call) {
       mockCalls.push(cmd);
+      if (['CreateSecret', 'PutSecretValue'].includes(cmd.kind)) {
+        return { ARN: 'arn:aws:secretsmanager:us-east-1:123456789012:secret:smb-mount-AbCdEf' }; // pragma: allowlist secret
+      }
+      if (cmd.kind !== 'GetSecretValue') return {};
       return { SecretString: JSON.stringify({ username: 'svc-mrm', password: AD_PASSWORD }) };
     }
   },
