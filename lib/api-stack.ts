@@ -722,12 +722,17 @@ export class ApiStack extends cdk.Stack {
         STORAGE_TABLE_NAME: props.storageTable.tableName,
         WORKSTATION_TABLE_NAME: props.workstationTable.tableName,
         PASCAL_CASE_NAME: props.pascalCaseName,
+        // Join Domain default the console uses when it creates a Windows
+        // workstation; used for records that predate the joinDomain field.
+        DEFAULT_WINDOWS_JOIN_DOMAIN: props.useCognitoAuth === false ? 'true' : 'false',
       }
     });
 
     // Grant permissions for FSx SMB mount manager
     props.storageTable.grantReadData(fsxSmbMountManagerFunction);
     props.workstationTable.grantReadData(fsxSmbMountManagerFunction);
+    // Records joinDomain on workstation records that predate the field.
+    props.workstationTable.grant(fsxSmbMountManagerFunction, 'dynamodb:UpdateItem');
     
     // Grant KMS permissions if tables use customer-managed encryption
     if (props.dataEncryptionKey) {

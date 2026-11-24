@@ -12,6 +12,15 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Upgrade steps
+
+- With AD sign-in (`useCognitoAuth=false`), domain-joined Windows workstations
+  mount FSx for Windows storage with the signed-in user's AD identity. Before
+  you upgrade, check that the users, or an AD group they belong to, have share
+  and NTFS permissions on each FSx for Windows file share. See
+  [#130](https://github.com/awslabs/media-resource-manager/issues/130) for
+  how to grant them.
+
 ### Added
 
 - [Upgrading](docs/UPGRADING.md), a step-by-step guide to upgrading an
@@ -20,6 +29,17 @@ upgrade to that version; a version without it needs only a redeploy.
   The README's upgrade notes moved there, and the user guide now says when a
   regional hub **Update** replaces the hub's DCV Connection Gateway.
   ([#126](https://github.com/awslabs/media-resource-manager/pull/126))
+
+### Fixed
+
+- Windows workstation records store the **Join Domain** setting
+  (`joinDomain`). The FSx SMB mount manager and the workstation start
+  workflow use it to choose integrated authentication and the domain-joined
+  start path. For records created by earlier versions, the mount manager
+  reads the instance's computer name from SSM and stores the answer;
+  otherwise both use the console's Join Domain default for the deployment's
+  sign-in mode.
+  ([#123](https://github.com/awslabs/media-resource-manager/pull/123))
 
 ### Removed
 

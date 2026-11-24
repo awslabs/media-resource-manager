@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, ScanCommand, GetCommand } = require('@aws-sdk/lib-dynamodb');
-const { SSMClient, SendCommandCommand, GetParameterCommand } = require('@aws-sdk/client-ssm');
+const { DynamoDBDocumentClient, ScanCommand, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
+const { SSMClient, SendCommandCommand, GetParameterCommand, DescribeInstanceInformationCommand } = require('@aws-sdk/client-ssm');
 const { EC2Client, DescribeInstancesCommand } = require('@aws-sdk/client-ec2');
 const {
     SecretsManagerClient,
@@ -219,6 +219,60 @@ exports.handler = async (event) => {
     }
 };
 
+/**
+ * Whether a Windows workstation is joined to the domain.
+ *
+ * New records store joinDomain. Records created before that have neither
+ * joinDomain nor domainId: for those, compare the computer name SSM reports
+ * for the instance with the AD domain name, and store the answer. If that is
+ * not possible, use the deployment's creation default
+ * (DEFAULT_WINDOWS_JOIN_DOMAIN: false with Cognito sign-in, where the console
+ * creates standalone workstations, and true with AD sign-in, where it
+ * creates domain-joined ones).
+ */
+async function resolveJoinDomain(workstation, workstationRegion) {
+    if (typeof workstation.joinDomain === 'boolean') return workstation.joinDomain;
+    if (workstation.domainId) return true;
+
+    let joined = null;
+    try {
+        const domainParam = await ssmPrimary.send(new GetParameterCommand({
+            Name: `/${PASCAL_CASE_NAME}/Identity/ActiveDirectoryDomainName`
+        }));
+        const domain = String(domainParam.Parameter?.Value || '').trim().toLowerCase();
+        const info = await getSSMClient(workstationRegion).send(new DescribeInstanceInformationCommand({
+            Filters: [{ Key: 'InstanceIds', Values: [workstation.instanceId] }]
+        }));
+        const computerName = info.InstanceInformationList?.[0]?.ComputerName;
+        if (domain && computerName) {
+            joined = String(computerName).trim().toLowerCase().endsWith(`.${domain}`);
+        }
+    } catch (error) {
+        console.warn(`Could not look up domain membership for ${workstation.instanceId}:`, error.name, error.message);
+    }
+
+    if (joined === null) {
+        const fallback = process.env.DEFAULT_WINDOWS_JOIN_DOMAIN === 'true';
+        console.warn(`joinDomain not recorded for ${workstation.instanceId} and not determinable; using the deployment default (${fallback})`);
+        return fallback;
+    }
+
+    // Record the answer so later mounts and starts use it.
+    try {
+        await dynamodb.send(new UpdateCommand({
+            TableName: WORKSTATION_TABLE_NAME,
+            Key: { instanceId: workstation.instanceId },
+            UpdateExpression: 'SET joinDomain = :joinDomain',
+            ConditionExpression: 'attribute_exists(instanceId) AND attribute_not_exists(joinDomain)',
+            ExpressionAttributeValues: { ':joinDomain': joined }
+        }));
+        console.log(`Recorded joinDomain=${joined} for ${workstation.instanceId} from its computer name`);
+    } catch (error) {
+        console.warn(`Could not record joinDomain for ${workstation.instanceId}:`, error.name, error.message);
+    }
+    return joined;
+}
+
 async function updateInstanceMountScript(instanceId) {
     console.log(`Updating mount script for instance: ${instanceId}`);
     
@@ -254,8 +308,7 @@ async function updateInstanceMountScript(instanceId) {
     }
     
     // Determine if workstation is domain-joined
-    // Check joinDomain field first, then fall back to checking domainId
-    const isDomainJoined = workstation.joinDomain !== false && (workstation.domainId || workstation.joinDomain === true);
+    const isDomainJoined = await resolveJoinDomain(workstation, workstationRegion);
     console.log(`Workstation ${instanceId} domain-joined: ${isDomainJoined}`);
     
     // Get storage configuration for this instance

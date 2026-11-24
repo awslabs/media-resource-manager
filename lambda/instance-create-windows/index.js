@@ -233,6 +233,10 @@ exports.handler = async (event) => {
             subnetId: subnetId,
             instanceStartTime: currentTime,
             createdAt: currentTime,
+            // Same rule as the creation state machine's branch: only an
+            // explicit false takes the standalone path. Read by the FSx SMB
+            // mount manager and by start-instance.
+            joinDomain: event.joinDomain !== false,
             ...(domainId && { domainId }),
             ...(pipelineId && pipelineId !== '' && { pipelineId })
         };
