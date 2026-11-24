@@ -733,6 +733,7 @@ if (-not $mountCredentials) {
             $mountCredentials = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString | ConvertFrom-Json
         } else {
             $readClient = 'AWSPowerShell'
+            Import-Module AWSPowerShell -ErrorAction Stop
             $mountCredentials = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString | ConvertFrom-Json
         }
     } catch {
@@ -740,7 +741,7 @@ if (-not $mountCredentials) {
     }
 }
 if ($mountCredentials) {
-    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Read the SMB mount credentials with $readClient in $([math]::Round(((Get-Date) - $readStart).TotalSeconds, 1)) s"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Read the SMB mount credentials with $readClient in $([int]((Get-Date) - $readStart).TotalMilliseconds) ms"
 }`;
 }
 

@@ -310,6 +310,24 @@ describe('standalone workstation with FSx for Windows', () => {
     expect(script).not.toMatch(/get-secret-value[^\n]*(>|Out-File|Set-Content)/);
     expect(script).not.toMatch(/Add-Content[^\n]*(SecretString|\$mountCredentials\b|\$secretOutput)/);
     expect(script).toContain('Read the SMB mount credentials with $readClient in');
+    expect(script).toContain('.TotalMilliseconds) ms"');
+  });
+
+  test('the script has the SDK assembly path and the AWSPowerShell module fallback', async () => {
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    const script = sentScript();
+    // Fast path: the SDK assemblies from the newest installed AWSPowerShell module.
+    expect(script).toContain('Get-Module -ListAvailable -Name AWSPowerShell | Sort-Object Version -Descending | Select-Object -First 1');
+    expect(script).toContain("Add-Type -Path (Join-Path $awsPowerShell.ModuleBase 'AWSSDK.Core.dll') -ErrorAction Stop");
+    expect(script).toContain("Add-Type -Path (Join-Path $awsPowerShell.ModuleBase 'AWSSDK.SecretsManager.dll') -ErrorAction Stop");
+    expect(script).toContain('$smClient.GetSecretValueAsync($smRequest).GetAwaiter().GetResult().SecretString | ConvertFrom-Json');
+    expect(script).toContain("$readClient = 'AWS SDK for .NET (AWSPowerShell assemblies)'");
+    // A failed assembly load or read is logged (message only) and the next client is tried.
+    expect(script).toContain('Could not read the SMB mount credentials with the AWS SDK for .NET, trying the next client');
+    // Last resort: import the module and use the cmdlet.
+    const fallback = script.indexOf("$readClient = 'AWSPowerShell'");
+    expect(fallback).toBeGreaterThan(script.indexOf("$readClient = 'AWS SDK for .NET"));
+    expect(script.slice(fallback)).toMatch(/^\$readClient = 'AWSPowerShell'\s*\n\s*Import-Module AWSPowerShell -ErrorAction Stop\s*\n\s*\$mountCredentials = \(Get-SECSecretValue -SecretId \$secretArn/);
   });
 
   test('every log line gets the time it is written', async () => {
