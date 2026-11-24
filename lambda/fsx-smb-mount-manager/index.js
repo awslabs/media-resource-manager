@@ -90,6 +90,14 @@ function mountSecretName(instanceId) {
     return `/${PASCAL_CASE_NAME}/Workstation/${instanceId}/SmbMount`;
 }
 
+// About 30 s in all; the mount manager's timeout is 10 minutes.
+const CREATE_SECRET_RETRY_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isScheduledForDeletion(error) {
+    return error.name === 'InvalidRequestException' && /scheduled for deletion/i.test(error.message || '');
+}
+
 /** IAM role ARN patterns of the primary and regional hub workstation roles. */
 async function workstationRoleArnPatterns() {
     const param = await ssmPrimary.send(new GetParameterCommand({
@@ -140,20 +148,32 @@ function mountSecretPolicy(instanceId, roleArnPatterns) {
  * Create or update the workstation's SMB mount secret and return its ARN.
  * A new secret starts with an empty value; the credentials are written only
  * after the resource policy is in place.
+ *
+ * A detach force-deletes the secret, and Secrets Manager removes it
+ * asynchronously. Until it is gone, CreateSecret with the same name fails
+ * with InvalidRequestException ("scheduled for deletion"), so an attach soon
+ * after a detach retries until the name is free.
  */
 async function putMountSecret(instanceId, mounts) {
     assertInstanceId(instanceId);
     const policy = JSON.stringify(mountSecretPolicy(instanceId, await workstationRoleArnPatterns()));
     let secretId = mountSecretName(instanceId);
-    try {
-        const created = await secretsManager.send(new CreateSecretCommand({
-            Name: secretId,
-            Description: `SMB mount credentials for workstation ${instanceId}, read by the workstation at logon`,
-            SecretString: '{}',
-        }));
-        secretId = created.ARN;
-    } catch (error) {
-        if (error.name !== 'ResourceExistsException') throw error;
+    for (let attempt = 0; ; attempt++) {
+        try {
+            const created = await secretsManager.send(new CreateSecretCommand({
+                Name: secretId,
+                Description: `SMB mount credentials for workstation ${instanceId}, read by the workstation at logon`,
+                SecretString: '{}',
+            }));
+            secretId = created.ARN;
+            break;
+        } catch (error) {
+            if (error.name === 'ResourceExistsException') break;
+            const delay = CREATE_SECRET_RETRY_DELAYS_MS[attempt];
+            if (!isScheduledForDeletion(error) || delay === undefined) throw error;
+            console.log(`SMB mount secret for ${instanceId} is still being deleted; retrying in ${delay / 1000} s`);
+            await sleep(delay);
+        }
     }
     await secretsManager.send(new PutResourcePolicyCommand({
         SecretId: secretId,
@@ -562,12 +582,16 @@ async function getStorageForInstance(instanceId, workstation, isDomainJoined, wo
 
     let mountSecretArn = null;
     if (Object.keys(mounts).length > 0) {
+        // If the secret can't be written, fail the run rather than send a
+        // script whose mounts have no credentials. The workstation keeps its
+        // current script, and the async invocation is retried.
         try {
             mountSecretArn = await putMountSecret(instanceId, mounts);
-            console.log(`SMB mount secret updated for ${instanceId}: ${Object.keys(mounts).length} mount(s)`);
         } catch (error) {
             console.error(`Failed to write the SMB mount secret for ${instanceId}:`, error.name, error.message);
+            throw new Error(`Could not write the SMB mount secret for ${instanceId}: ${error.name}`);
         }
+        console.log(`SMB mount secret updated for ${instanceId}: ${Object.keys(mounts).length} mount(s)`);
     } else {
         await deleteMountSecret(instanceId);
     }
@@ -629,12 +653,32 @@ function generateMountCredentialReader(mountSecret) {
 $mountCredentials = $null`;
     }
     return `
-# Read this workstation's SMB mount credentials from Secrets Manager
+# Read this workstation's SMB mount credentials from Secrets Manager with the
+# instance role. Use the fastest client present: the modular
+# AWS.Tools.SecretsManager module, then the AWS CLI, then the AWSPowerShell
+# module (the only one on some AMIs, and slow to load the first time).
 $mountCredentials = $null
+$secretArn = ${psQuote(mountSecret.arn)}
+$secretRegion = ${psQuote(mountSecret.region)}
+$readStart = Get-Date
 try {
-    $mountCredentials = (Get-SECSecretValue -SecretId ${psQuote(mountSecret.arn)} -Region ${psQuote(mountSecret.region)} -ErrorAction Stop).SecretString | ConvertFrom-Json
+    if (Get-Module -ListAvailable -Name AWS.Tools.SecretsManager) {
+        $readClient = 'AWS.Tools.SecretsManager'
+        Import-Module AWS.Tools.SecretsManager -ErrorAction Stop
+        $mountCredentials = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString | ConvertFrom-Json
+    } elseif (Get-Command aws.exe -ErrorAction SilentlyContinue) {
+        $readClient = 'AWS CLI'
+        $secretOutput = & aws.exe secretsmanager get-secret-value --secret-id $secretArn --region $secretRegion --query SecretString --output text
+        if ($LASTEXITCODE -ne 0) { throw "aws secretsmanager get-secret-value exited with code $LASTEXITCODE" }
+        $mountCredentials = ($secretOutput | Out-String).Trim() | ConvertFrom-Json
+        Remove-Variable -Name secretOutput
+    } else {
+        $readClient = 'AWSPowerShell'
+        $mountCredentials = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString | ConvertFrom-Json
+    }
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Read the SMB mount credentials with $readClient in $([int]((Get-Date) - $readStart).TotalSeconds) s"
 } catch {
-    Add-Content -Path $logFile -Value "[$timestamp] ERROR: Could not read the SMB mount credentials: $($_.Exception.Message)"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Could not read the SMB mount credentials: $($_.Exception.Message)"
 }`;
 }
 
@@ -676,38 +720,38 @@ function Get-MountCredential([string]$StorageId) {
     New-Object System.Management.Automation.PSCredential($entry.username, (ConvertTo-SecureString -String $entry.password -AsPlainText -Force))
 }
 
-# Log file
+# Log file. Each line gets the time it is written.
 $logFile = "C:\\Windows\\Temp\\fsx-mount-log.txt"
-$timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-${generateMountCredentialReader(mountSecret)}
+function Get-LogTime { Get-Date -Format "yyyy-MM-dd HH:mm:ss" }
 
 try {
-    Add-Content -Path $logFile -Value "[$timestamp] Starting FSx mount for user: $env:USERNAME (Domain-joined: ${isDomainJoined})"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Starting FSx mount for user: $env:USERNAME (Domain-joined: ${isDomainJoined})"
+${generateMountCredentialReader(mountSecret)}
     
     # Clear any existing FSx network drive mappings to prevent conflicts
-    Add-Content -Path $logFile -Value "[$timestamp] Clearing existing FSx network drive mappings"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Clearing existing FSx network drive mappings"
     $existingDrives = net use | Select-String "\\\\.*\\.(studio|fsx)\\." 
     foreach ($drive in $existingDrives) {
         $driveLetter = ($drive -split "\\s+")[1]
         if ($driveLetter -match "^[A-Z]:$") {
             net use $driveLetter /delete /y 2>$null
-            Add-Content -Path $logFile -Value "[$timestamp] Removed existing mapping: $driveLetter"
+            Add-Content -Path $logFile -Value "[$(Get-LogTime)] Removed existing mapping: $driveLetter"
         }
     }
     
     ${mountCommands}
     
-    Add-Content -Path $logFile -Value "[$timestamp] FSx mount completed successfully for user: $env:USERNAME"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] FSx mount completed successfully for user: $env:USERNAME"
     
     # Minimal refresh - just notify shell of drive changes (non-disruptive)
-    Add-Content -Path $logFile -Value "[$timestamp] Refreshing drive display"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Refreshing drive display"
     rundll32.exe shell32.dll,SHChangeNotify 0x8000000,0x1000,0,0
     
     Write-Host "FSx mount script completed. Check $logFile for details."
     
 } catch {
     $errorMsg = "FSx mount script failed: $_"
-    Add-Content -Path $logFile -Value "[$timestamp] ERROR: $errorMsg"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: $errorMsg"
     Write-Error $errorMsg
 } finally {
     Remove-Variable -Name mountCredentials, mountCredential -ErrorAction SilentlyContinue
@@ -744,14 +788,14 @@ try {
         Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
         
         Write-Host "Successfully mounted ${storage.name} to ${driveLetter}: ($networkPath)"
-        Add-Content -Path $logFile -Value "[$timestamp] Successfully mounted ${storage.name} to ${driveLetter}:"
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] Successfully mounted ${storage.name} to ${driveLetter}:"
     } else {
         throw "net use failed with exit code $LASTEXITCODE"
     }
     
 } catch {
     Write-Warning "Failed to mount ${storage.name} to ${driveLetter}: $_"
-    Add-Content -Path $logFile -Value "[$timestamp] ERROR: Failed to mount ${storage.name}: $_"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Failed to mount ${storage.name}: $_"
 }`;
 }
 
@@ -790,10 +834,10 @@ try {
     Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
     
     Write-Host "Successfully mounted ${storage.name}${logSuffix} to ${driveLetter}: ($networkPath)"
-    Add-Content -Path $logFile -Value "[$timestamp] Successfully mounted ${storage.name}${logSuffix} to ${driveLetter}:"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] Successfully mounted ${storage.name}${logSuffix} to ${driveLetter}:"
 } catch {
     Write-Warning "Failed to mount ${storage.name}${logSuffix} to ${driveLetter}: $($_.Exception.Message)"
-    Add-Content -Path $logFile -Value "[$timestamp] ERROR: Failed to mount ${storage.name}${logSuffix}: $($_.Exception.Message)"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Failed to mount ${storage.name}${logSuffix}: $($_.Exception.Message)"
 } finally {
     Remove-Variable -Name mountCredential -ErrorAction SilentlyContinue
 }`;
@@ -804,7 +848,7 @@ function generateStandaloneMountCommand(storage, driveLetter, fsxDnsName, shareN
         return `
 # Mount ${storage.name} to ${driveLetter}: (Standalone - CREDENTIALS NOT AVAILABLE)
 Write-Warning "Cannot mount ${storage.name} - AD credentials not configured for standalone workstation"
-Add-Content -Path $logFile -Value "[$timestamp] ERROR: Cannot mount ${storage.name} - AD credentials not available for standalone workstation"`;
+Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Cannot mount ${storage.name} - AD credentials not available for standalone workstation"`;
     }
     return generateCredentialMountCommand(storage, driveLetter, `\\\\${fsxDnsName}\\${shareName}`,
         'Standalone - credentials from the workstation SMB mount secret', '');
@@ -824,7 +868,7 @@ function generateFsxOntapMountCommand(storage, driveLetter, ontapShare, hasMount
         return `
 # Mount ${storage.name} to ${driveLetter}: (FSxN - SVM DNS NAME NOT AVAILABLE)
 Write-Warning "Cannot mount ${storage.name} - SVM DNS name not available"
-Add-Content -Path $logFile -Value "[$timestamp] ERROR: Cannot mount ${storage.name} - SVM DNS name not available"`;
+Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Cannot mount ${storage.name} - SVM DNS name not available"`;
     }
     
     // If the workstation's SMB mount secret holds the ONTAP SMB user, use it;
@@ -862,14 +906,14 @@ try {
         Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
         
         Write-Host "Successfully mounted ${storage.name} (FSxN) to ${driveLetter}: ($networkPath)"
-        Add-Content -Path $logFile -Value "[$timestamp] Successfully mounted ${storage.name} (FSxN) to ${driveLetter}:"
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] Successfully mounted ${storage.name} (FSxN) to ${driveLetter}:"
     } else {
         throw "net use failed with exit code $LASTEXITCODE - credentials may be required"
     }
     
 } catch {
     Write-Warning "Failed to mount ${storage.name} (FSxN) to ${driveLetter}: $_ - You may need to configure ONTAP credentials"
-    Add-Content -Path $logFile -Value "[$timestamp] ERROR: Failed to mount ${storage.name} (FSxN): $_ - ONTAP credentials may be required"
+    Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Failed to mount ${storage.name} (FSxN): $_ - ONTAP credentials may be required"
 }`;
     }
 }
