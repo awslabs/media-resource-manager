@@ -293,7 +293,7 @@ describe('standalone workstation with FSx for Windows', () => {
   test('the secret is read with the fastest client present, and the read is timed in the log', async () => {
     await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
     const script = sentScript();
-    const dotnet = script.indexOf("Add-Type -Path (Join-Path $awsPowerShell.ModuleBase 'AWSSDK.SecretsManager.dll') -ErrorAction Stop");
+    const dotnet = script.indexOf("[System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll'))");
     const cli = script.indexOf('Get-Command aws.exe');
     const modular = script.indexOf('Get-Module -ListAvailable -Name AWS.Tools.SecretsManager');
     const monolithic = script.indexOf("$readClient = 'AWSPowerShell'");
@@ -316,18 +316,39 @@ describe('standalone workstation with FSx for Windows', () => {
   test('the script has the SDK assembly path and the AWSPowerShell module fallback', async () => {
     await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
     const script = sentScript();
-    // Fast path: the SDK assemblies from the newest installed AWSPowerShell module.
-    expect(script).toContain('Get-Module -ListAvailable -Name AWSPowerShell | Sort-Object Version -Descending | Select-Object -First 1');
-    expect(script).toContain("Add-Type -Path (Join-Path $awsPowerShell.ModuleBase 'AWSSDK.Core.dll') -ErrorAction Stop");
-    expect(script).toContain("Add-Type -Path (Join-Path $awsPowerShell.ModuleBase 'AWSSDK.SecretsManager.dll') -ErrorAction Stop");
-    expect(script).toContain('$smClient.GetSecretValueAsync($smRequest).GetAwaiter().GetResult().SecretString | ConvertFrom-Json');
+    // Fast path: the AWSPowerShell folder on Amazon AMIs, else the newest installed module.
+    expect(script).toContain("Join-Path ${env:ProgramFiles(x86)} 'AWS Tools\\PowerShell\\AWSPowerShell'");
+    expect(script).toContain('Get-Module -ListAvailable -Name AWSPowerShell | Sort-Object Version -Descending | Select-Object -First 1).ModuleBase');
+    // Assemblies are loaded without type enumeration, after the module's own dependency resolver is registered.
+    expect(script).not.toContain('Add-Type -Path');
+    const resolver = script.indexOf('([Amazon.PowerShell.Common.AWSModuleAssemblyInitializer]::new()).OnImport()');
+    const core = script.indexOf("[System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSSDK.Core.dll'))");
+    const sm = script.indexOf("[System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll'))");
+    expect(script.indexOf("[System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSPowerShell.dll'))")).toBeGreaterThan(-1);
+    expect(resolver).toBeGreaterThan(-1);
+    expect(core).toBeGreaterThan(resolver);
+    expect(sm).toBeGreaterThan(core);
+    // The call is bounded, and its result is kept as a string until the one parse step.
+    expect(script).toContain("if (-not $smTask.Wait(15000)) { throw 'GetSecretValue did not finish within 15 s' }");
+    expect(script).toContain('$secretString = $smTask.Result.SecretString');
     expect(script).toContain("$readClient = 'AWS SDK for .NET (AWSPowerShell assemblies)'");
-    // A failed assembly load or read is logged (message only) and the next client is tried.
-    expect(script).toContain('Could not read the SMB mount credentials with the AWS SDK for .NET, trying the next client');
+    // A failure logs its elapsed time, type and message, plus up to 3 loader exceptions, then tries the next client.
+    expect(script).toContain('Could not read the SMB mount credentials with the AWS SDK for .NET after $([int]((Get-Date) - $readStart).TotalMilliseconds) ms, trying the next client');
+    expect(script).toContain('$loadError.LoaderExceptions | Where-Object { $_ } | Select-Object -First 3');
     // Last resort: import the module and use the cmdlet.
     const fallback = script.indexOf("$readClient = 'AWSPowerShell'");
     expect(fallback).toBeGreaterThan(script.indexOf("$readClient = 'AWS SDK for .NET"));
-    expect(script.slice(fallback)).toMatch(/^\$readClient = 'AWSPowerShell'\s*\n\s*Import-Module AWSPowerShell -ErrorAction Stop\s*\n\s*\$mountCredentials = \(Get-SECSecretValue -SecretId \$secretArn/);
+    expect(script.slice(fallback)).toMatch(/^\$readClient = 'AWSPowerShell'\s*\n\s*Import-Module AWSPowerShell -ErrorAction Stop\s*\n\s*\$secretString = \(Get-SECSecretValue -SecretId \$secretArn/);
+  });
+
+  test('the secret is parsed once, and a parse error is logged without its message', async () => {
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    const script = sentScript();
+    expect(script.match(/ConvertFrom-Json/g)).toHaveLength(1);
+    expect(script).toContain('try { $mountCredentials = $secretString | ConvertFrom-Json } catch {');
+    expect(script).toContain('ERROR: The SMB mount credentials are not valid JSON"');
+    expect(script).toContain('Remove-Variable -Name secretString');
+    expect(script).not.toMatch(/Add-Content[^\n]*\$secretString/);
   });
 
   test('every log line gets the time it is written', async () => {

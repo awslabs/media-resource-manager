@@ -700,45 +700,74 @@ $mountCredentials = $null`;
 #   4. the AWSPowerShell module.
 # The secret value stays in this process; only the ARN is on any command line.
 $mountCredentials = $null
+$secretString = $null
 $secretArn = ${psQuote(mountSecret.arn)}
 $secretRegion = ${psQuote(mountSecret.region)}
 $readStart = Get-Date
 $readClient = $null
-$awsPowerShell = Get-Module -ListAvailable -Name AWSPowerShell | Sort-Object Version -Descending | Select-Object -First 1
-if ($awsPowerShell -and (Test-Path (Join-Path $awsPowerShell.ModuleBase 'AWSSDK.SecretsManager.dll'))) {
+# The AWSPowerShell folder on Amazon Windows AMIs; otherwise ask PowerShell.
+$awsPowerShellBase = $null
+if (\${env:ProgramFiles(x86)}) { $awsPowerShellBase = Join-Path \${env:ProgramFiles(x86)} 'AWS Tools\\PowerShell\\AWSPowerShell' }
+if (-not ($awsPowerShellBase -and (Test-Path (Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll')))) {
+    $awsPowerShellBase = (Get-Module -ListAvailable -Name AWSPowerShell | Sort-Object Version -Descending | Select-Object -First 1).ModuleBase
+}
+if ($awsPowerShellBase -and (Test-Path (Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll'))) {
     try {
-        Add-Type -Path (Join-Path $awsPowerShell.ModuleBase 'AWSSDK.Core.dll') -ErrorAction Stop
-        Add-Type -Path (Join-Path $awsPowerShell.ModuleBase 'AWSSDK.SecretsManager.dll') -ErrorAction Stop
+        # Load only what the call needs, without enumerating types (Add-Type
+        # does, and fails on dependencies it can't bind). The module's own
+        # resolver (registered by its import) loads SDK dependencies such as
+        # System.Text.Json from its folder whatever version is asked for;
+        # register it the same way.
+        [void][System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSPowerShell.dll'))
+        ([Amazon.PowerShell.Common.AWSModuleAssemblyInitializer]::new()).OnImport()
+        [void][System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSSDK.Core.dll'))
+        [void][System.Reflection.Assembly]::LoadFrom((Join-Path $awsPowerShellBase 'AWSSDK.SecretsManager.dll'))
         $smClient = New-Object Amazon.SecretsManager.AmazonSecretsManagerClient([Amazon.RegionEndpoint]::GetBySystemName($secretRegion))
         $smRequest = New-Object Amazon.SecretsManager.Model.GetSecretValueRequest
         $smRequest.SecretId = $secretArn
-        $mountCredentials = $smClient.GetSecretValueAsync($smRequest).GetAwaiter().GetResult().SecretString | ConvertFrom-Json
+        $smTask = $smClient.GetSecretValueAsync($smRequest)
+        if (-not $smTask.Wait(15000)) { throw 'GetSecretValue did not finish within 15 s' }
+        $secretString = $smTask.Result.SecretString
         $smClient.Dispose()
         $readClient = 'AWS SDK for .NET (AWSPowerShell assemblies)'
     } catch {
-        Add-Content -Path $logFile -Value "[$(Get-LogTime)] Could not read the SMB mount credentials with the AWS SDK for .NET, trying the next client: $($_.Exception.Message)"
+        $loadError = $_.Exception
+        while ($loadError.InnerException -and -not ($loadError -is [System.Reflection.ReflectionTypeLoadException])) { $loadError = $loadError.InnerException }
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] Could not read the SMB mount credentials with the AWS SDK for .NET after $([int]((Get-Date) - $readStart).TotalMilliseconds) ms, trying the next client: $($loadError.GetType().Name): $($loadError.Message)"
+        if ($loadError -is [System.Reflection.ReflectionTypeLoadException]) {
+            $loadError.LoaderExceptions | Where-Object { $_ } | Select-Object -First 3 | ForEach-Object {
+                Add-Content -Path $logFile -Value "[$(Get-LogTime)]   Loader exception: $($_.Message)"
+            }
+        }
     }
 }
-if (-not $mountCredentials) {
+if (-not $secretString) {
     try {
         if (Get-Command aws.exe -ErrorAction SilentlyContinue) {
             $readClient = 'AWS CLI'
             $secretOutput = & aws.exe secretsmanager get-secret-value --secret-id $secretArn --region $secretRegion --query SecretString --output text
             if ($LASTEXITCODE -ne 0) { throw "aws secretsmanager get-secret-value exited with code $LASTEXITCODE" }
-            $mountCredentials = ($secretOutput | Out-String).Trim() | ConvertFrom-Json
+            $secretString = ($secretOutput | Out-String).Trim()
             Remove-Variable -Name secretOutput
         } elseif (Get-Module -ListAvailable -Name AWS.Tools.SecretsManager) {
             $readClient = 'AWS.Tools.SecretsManager'
             Import-Module AWS.Tools.SecretsManager -ErrorAction Stop
-            $mountCredentials = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString | ConvertFrom-Json
+            $secretString = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString
         } else {
             $readClient = 'AWSPowerShell'
             Import-Module AWSPowerShell -ErrorAction Stop
-            $mountCredentials = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString | ConvertFrom-Json
+            $secretString = (Get-SECSecretValue -SecretId $secretArn -Region $secretRegion -ErrorAction Stop).SecretString
         }
     } catch {
         Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: Could not read the SMB mount credentials: $($_.Exception.Message)"
     }
+}
+if ($secretString) {
+    # The parser's error message can quote its input, so it is not logged.
+    try { $mountCredentials = $secretString | ConvertFrom-Json } catch {
+        Add-Content -Path $logFile -Value "[$(Get-LogTime)] ERROR: The SMB mount credentials are not valid JSON"
+    }
+    Remove-Variable -Name secretString
 }
 if ($mountCredentials) {
     Add-Content -Path $logFile -Value "[$(Get-LogTime)] Read the SMB mount credentials with $readClient in $([int]((Get-Date) - $readStart).TotalMilliseconds) ms"
