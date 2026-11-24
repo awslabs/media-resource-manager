@@ -39,8 +39,8 @@ global_settings:
     # Secrets Manager ARN reference (not a secret value, just a pointer to where secrets are stored)
     - rule_id: 'SECRET-SECRET-KEYWORD'
       path: 'lambda/generate-regional-hub-template/index.js'
-      line_start: 3984
-      line_end: 3984
+      line_start: 3992
+      line_end: 3992
       reason: 'SecretArn property with value "none" — CloudFormation response placeholder when no secret exists'
 
     # Base64 hash used as CDK CustomResource cache key (deterministic, not a secret)
@@ -73,6 +73,15 @@ global_settings:
     - rule_id: 'generic-api-key'
       path: 'ssm-documents/linux-phase1-base-install.js'
       reason: 'Fingerprint of the public AWS CLI signing key (AWS_CLI_KEY_FPR) matches the generic API key pattern — not a secret'
+
+    # The DCV session manager wait test fakes the broker and SSM with
+    # placeholder values. Scoped to the test file and rule, not to lines.
+    - rule_id: 'B105'
+      path: 'test/python/test_dcv_session_manager_session_wait.py'
+      reason: 'Placeholder access token string returned by the fake broker OAuth endpoint in a unit test stub — not a credential'
+    - rule_id: 'SECRET-SECRET-KEYWORD'
+      path: 'test/python/test_dcv_session_manager_session_wait.py'
+      reason: 'Placeholder client password returned by the fake SSM GetParameter in a unit test stub — not a credential'
 
     # scripts/fetch-dcv-web-sdk.sh pins the fingerprint of the public NICE GPG
     # key and the SHA-256 of the Amazon DCV Web Client SDK archive it verifies.
