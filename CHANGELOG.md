@@ -24,6 +24,7 @@ upgrade to that version; a version without it needs only a redeploy.
   upgrade, without a hard refresh. `index.html` and `config.json` are served
   with `Cache-Control: no-cache`, and the hashed bundles under `assets/` with
   a one-year immutable `Cache-Control`.
+  ([#124](https://github.com/awslabs/media-resource-manager/pull/124))
 
 ### Security
 
