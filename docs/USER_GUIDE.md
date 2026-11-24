@@ -432,7 +432,7 @@ To update a hub:
 
 The update rebuilds the hub's CloudFormation template from the current code and updates its stack. Workstations in the region keep running, and the DCV Session Manager instance isn't replaced.
 
-The DCV Connection Gateway instance is replaced only when the update changes the gateway's launch template, for example its setup script or the security groups attached to it; the release notes say when a release does. The hub then starts a new gateway, waits about 5 minutes for it to start, and terminates the old one. Active DCV sessions in that region disconnect when the old gateway stops, and users reconnect from the console. Plan such updates outside working hours. When the launch template doesn't change, the gateway keeps running and sessions aren't interrupted.
+The DCV Connection Gateway instance is replaced only when the update changes the gateway's launch template, for example its setup script or the security groups attached to it; the release notes say when a release does. The gateway also uses the latest Amazon Linux 2023 image, which the hub looks up on each update, so an update after a newer image is published replaces the gateway even when MRM's code hasn't changed. The hub then starts a new gateway, waits about 5 minutes for it to start, and terminates the old one. Active DCV sessions in that region disconnect when the old gateway stops, and users reconnect from the console. Plan such updates outside working hours. When the launch template doesn't change, the gateway keeps running and sessions aren't interrupted.
 
 If the update fails, the status shows **Update failed** with the reason, and you can click **Update** again.
 
