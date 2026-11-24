@@ -18,6 +18,7 @@ upgrade to that version; a version without it needs only a redeploy.
   installation to a new release: the pipeline template from the release tag,
   a change set preview, the build, regional hub updates, checks and rollback.
   The README's upgrade notes moved there.
+  ([#126](https://github.com/awslabs/media-resource-manager/pull/126))
 
 ### Removed
 
