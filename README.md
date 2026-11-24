@@ -14,6 +14,7 @@ A comprehensive AWS-native workstation management solution that enables Media & 
   - [Configuration](#configuration)
   - [Post-Deployment Setup](#post-deployment-setup)
   - [Authentication](#authentication)
+  - [Upgrading](docs/UPGRADING.md)
 - [Architecture & Features](#architecture-overview)
   - [Architecture Overview](#architecture-overview)
   - [Features](#features)
@@ -395,15 +396,7 @@ aws codebuild start-build --project-name <project-name>
 
 Pipeline parameters seed the initial config. After the first build, config is stored in SSM under the PascalCase name derived from `ProductName` and is the source of truth for all subsequent builds. There are three ways to update configuration:
 
-> **Upgrading from an earlier version?** If your pipeline stack was deployed before all parameters were available (e.g., `FrontendUrl`, `DcvDomainName`), update the stack with the latest template to expose them:
-> ```bash
-> aws cloudformation deploy \
->   --template-file scripts/deploy-pipeline.yaml \
->   --s3-bucket <your-bucket> \
->   --stack-name MRM-DeployPipeline \
->   --capabilities CAPABILITY_NAMED_IAM
-> ```
-> This adds the new parameters with safe defaults. Your existing SSM config is preserved. No rebuild needed unless you want to change values.
+> **Upgrading to a new release?** Follow [Upgrading](docs/UPGRADING.md): update the pipeline stack with the release's template and tag, review the change set, then follow the build and update regional hubs.
 
 **Option A: Update the pipeline stack (recommended for persistent changes via console)**
 
@@ -675,11 +668,7 @@ Creating exclusions needs `ExclusionsAllowed: allowed` in `describe-vpc-block-pu
 
 Regional hubs weren't tested with BPA.
 
-**Upgrading an existing installation:**
-
-- Starting with v1.5.0, browser sessions go through a CloudFront VPC origin by default (`DcvBrowserPath=cloudfront`), including installations that never set `DcvBrowserPath`. With BPA on, create the exclusions for the two `PrivateSubnetIds` subnets before you upgrade, or set `DcvBrowserPath=direct` to keep the previous browser path. Without them, the VPC origin can't be created and the `<ACRONYM>-Dcv-Infrastructure` update fails.
-- If you deployed into an existing VPC with several private subnets per Availability Zone and passed `PrivateSubnetIds` and `PublicSubnetIds` through `MRM_PARAM_OVERRIDES`, set the same subnets, in the same order, as the pipeline stack's `PrivateSubnetIds` and `PublicSubnetIds` parameters. Changing them replaces the Managed Microsoft AD directory. With the same subnets, the upgrade replaces one resource: the DynamoDB gateway endpoint in `<ACRONYM>-Infrastructure`, which is now attached to the private subnets' route tables. The previous endpoint wasn't attached to any route table, so DynamoDB access isn't interrupted. Nothing else in the VPC changes: the directory, interface endpoints, load balancers, subnets and route tables stay as they are.
-- After you update the pipeline stack, check that a build started. A stack update may not start one; if no build starts, start one yourself (`aws codebuild start-build --project-name <project-name>`).
+**Upgrading an existing installation:** see [Notes for specific upgrades](docs/UPGRADING.md#notes-for-specific-upgrades) in the upgrade guide, which covers BPA exclusions for the CloudFront VPC origin and installs that set their subnets through `MRM_PARAM_OVERRIDES`.
 
 **Planned improvements:** [#106](https://github.com/awslabs/media-resource-manager/issues/106) (an optional `CreateBpaExclusions` parameter that creates these exclusions, also in regional hubs) and [#107](https://github.com/awslabs/media-resource-manager/issues/107) (an internal-only gateway for users on VPN, Direct Connect or Transit Gateway, which works with BPA on and no exclusions).
 

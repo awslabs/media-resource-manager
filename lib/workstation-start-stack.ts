@@ -27,6 +27,8 @@ export interface WorkstationStartStackProps extends cdk.StackProps {
   dataEncryptionKey?: kms.IKey;
   vpc: ec2.IVpc;
   workstationSecurityGroup: ec2.ISecurityGroup;
+  /** False when users sign in with AD; sets the Join Domain default for old records. */
+  useCognitoAuth?: boolean;
 }
 
 export class WorkstationStartStack extends cdk.Stack {
@@ -47,6 +49,9 @@ export class WorkstationStartStack extends cdk.Stack {
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/start-instance')),
       environment: {
         WORKSTATION_TABLE_NAME: props.workstationTableName,
+        // Join Domain default the console uses when it creates a Windows
+        // workstation; used for records that predate the joinDomain field.
+        DEFAULT_WINDOWS_JOIN_DOMAIN: props.useCognitoAuth === false ? 'true' : 'false',
       },
       timeout: cdk.Duration.minutes(2),
     });
