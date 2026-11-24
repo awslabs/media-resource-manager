@@ -5,7 +5,14 @@ const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
 const { DynamoDBDocumentClient, ScanCommand, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
 const { SSMClient, SendCommandCommand, GetParameterCommand, DescribeInstanceInformationCommand } = require('@aws-sdk/client-ssm');
 const { EC2Client, DescribeInstancesCommand } = require('@aws-sdk/client-ec2');
-const { SecretsManagerClient, GetSecretValueCommand } = require('@aws-sdk/client-secrets-manager');
+const {
+    SecretsManagerClient,
+    GetSecretValueCommand,
+    CreateSecretCommand,
+    PutSecretValueCommand,
+    PutResourcePolicyCommand,
+    DeleteSecretCommand,
+} = require('@aws-sdk/client-secrets-manager');
 const { FSxClient, DescribeStorageVirtualMachinesCommand } = require('@aws-sdk/client-fsx');
 const { requireAdmin } = require('../shared/authz');
 const { redactForLog } = require('../shared/log-redact');
@@ -63,6 +70,117 @@ function getFSxClient(region) {
 const STORAGE_TABLE_NAME = process.env.STORAGE_TABLE_NAME;
 const WORKSTATION_TABLE_NAME = process.env.WORKSTATION_TABLE_NAME;
 const PASCAL_CASE_NAME = process.env.PASCAL_CASE_NAME || 'MediaResourceManager';
+const ACRONYM = process.env.ACRONYM || '';
+
+const INSTANCE_ID_PATTERN = /^i-[0-9a-f]{8,17}$/;
+
+function assertInstanceId(instanceId) {
+    if (typeof instanceId !== 'string' || !INSTANCE_ID_PATTERN.test(instanceId)) {
+        throw new Error('Invalid instanceId');
+    }
+}
+
+// ==================== Per-workstation SMB mount secret ====================
+// Standalone Windows workstations (and any workstation with FSx for ONTAP
+// SMB storage) read the credentials their mounts need from their own secret
+// at logon: /<ProductName>/Workstation/<instanceId>/SmbMount in the primary
+// Region. The logon script and the Run Command carry only the secret ARN.
+
+function mountSecretName(instanceId) {
+    return `/${PASCAL_CASE_NAME}/Workstation/${instanceId}/SmbMount`;
+}
+
+/** IAM role ARN patterns of the primary and regional hub workstation roles. */
+async function workstationRoleArnPatterns() {
+    const param = await ssmPrimary.send(new GetParameterCommand({
+        Name: `/${PASCAL_CASE_NAME}/DCV/InstanceRoleArn`
+    }));
+    const primaryRoleArn = param.Parameter.Value;
+    const account = primaryRoleArn.split(':')[4];
+    const patterns = [
+        primaryRoleArn,
+        `arn:aws:iam::${account}:role/${PASCAL_CASE_NAME}-Regional-Workstation-Role`,
+        `arn:aws:iam::${account}:role/${PASCAL_CASE_NAME}-Regional-Workstation-Role-*`,
+    ];
+    if (ACRONYM) patterns.push(`arn:aws:iam::${account}:role/${ACRONYM}-Regional-Workstation-Role-*`);
+    return patterns;
+}
+
+/**
+ * Resource policy for a workstation's SMB mount secret: GetSecretValue is
+ * denied to every caller except a workstation role session for this
+ * instance. An EC2 instance role session's aws:userid is
+ * "<role-id>:<instance-id>".
+ */
+function mountSecretPolicy(instanceId, roleArnPatterns) {
+    return {
+        Version: '2012-10-17',
+        Statement: [
+            {
+                Sid: 'ReadOnlyFromThisWorkstation',
+                Effect: 'Deny',
+                Principal: '*',
+                Action: 'secretsmanager:GetSecretValue',
+                Resource: '*',
+                Condition: { StringNotLike: { 'aws:userid': `*:${instanceId}` } },
+            },
+            {
+                Sid: 'ReadOnlyWithAWorkstationRole',
+                Effect: 'Deny',
+                Principal: '*',
+                Action: 'secretsmanager:GetSecretValue',
+                Resource: '*',
+                Condition: { ArnNotLike: { 'aws:PrincipalArn': roleArnPatterns } },
+            },
+        ],
+    };
+}
+
+/**
+ * Create or update the workstation's SMB mount secret and return its ARN.
+ * A new secret starts with an empty value; the credentials are written only
+ * after the resource policy is in place.
+ */
+async function putMountSecret(instanceId, mounts) {
+    assertInstanceId(instanceId);
+    const policy = JSON.stringify(mountSecretPolicy(instanceId, await workstationRoleArnPatterns()));
+    let secretId = mountSecretName(instanceId);
+    try {
+        const created = await secretsManager.send(new CreateSecretCommand({
+            Name: secretId,
+            Description: `SMB mount credentials for workstation ${instanceId}, read by the workstation at logon`,
+            SecretString: '{}',
+        }));
+        secretId = created.ARN;
+    } catch (error) {
+        if (error.name !== 'ResourceExistsException') throw error;
+    }
+    await secretsManager.send(new PutResourcePolicyCommand({
+        SecretId: secretId,
+        ResourcePolicy: policy,
+        BlockPublicPolicy: true,
+    }));
+    const put = await secretsManager.send(new PutSecretValueCommand({
+        SecretId: secretId,
+        SecretString: JSON.stringify({ version: 1, mounts }),
+    }));
+    return put.ARN;
+}
+
+/** Delete the workstation's SMB mount secret if it exists. */
+async function deleteMountSecret(instanceId) {
+    assertInstanceId(instanceId);
+    try {
+        await secretsManager.send(new DeleteSecretCommand({
+            SecretId: mountSecretName(instanceId),
+            ForceDeleteWithoutRecovery: true,
+        }));
+        console.log(`SMB mount secret deleted for ${instanceId}`);
+    } catch (error) {
+        if (error.name === 'ResourceNotFoundException') return;
+        console.error(`Failed to delete the SMB mount secret for ${instanceId}:`, error.name, error.message);
+    }
+}
 
 exports.handler = async (event) => {
     console.log('FSx Mount Manager Event:', JSON.stringify(redactForLog(event), null, 2));
@@ -81,7 +199,12 @@ exports.handler = async (event) => {
         
         switch (action) {
             case 'updateInstance':
+                assertInstanceId(instanceId);
                 return await updateInstanceMountScript(instanceId);
+            case 'removeInstance':
+                // Workstation deleted: remove its SMB mount secret.
+                await deleteMountSecret(instanceId);
+                return { success: true, instanceId };
             case 'updateStorage':
                 return await updateStorageMountScripts(storageId);
             case 'updateAll':
@@ -270,7 +393,8 @@ async function updateAllMountScripts() {
 async function getStorageForInstance(instanceId, workstation, isDomainJoined, workstationRegion) {
     if (!workstation.storageConfig) {
         // Generate empty script to clear any existing mounts
-        const loginScript = generateLoginScript([], isDomainJoined, null, null);
+        await deleteMountSecret(instanceId);
+        const loginScript = generateLoginScript([], isDomainJoined, null, {});
         await deployLoginScript(instanceId, loginScript, workstationRegion);
         return [];
     }
@@ -385,7 +509,7 @@ async function getStorageForInstance(instanceId, workstation, isDomainJoined, wo
 
             console.log(`Retrieved AD credentials for non-domain workstation: ${credentials.username}@${domainName}`);
         } catch (error) {
-            console.error('Failed to retrieve AD credentials for non-domain workstation:', error);
+            console.error('Failed to retrieve AD credentials for non-domain workstation:', error.name, error.message);
         }
     }
     
@@ -404,7 +528,9 @@ async function getStorageForInstance(instanceId, workstation, isDomainJoined, wo
             }));
             const ontapCreds = JSON.parse(ontapSecretResponse.SecretString);
             
-            // Use smbUser and smbPassword if available (set by configure-ontap-cifs Lambda)
+            // Use smbUser and smbPassword if available (set by configure-ontap-cifs Lambda).
+            // Only the SMB user goes to the workstation; the ONTAP admin
+            // credentials in the same secret never do.
             if (ontapCreds.smbUser && ontapCreds.smbPassword) {
                 ontapCredentialsMap[storage.storageId] = {
                     username: ontapCreds.smbUser,
@@ -421,8 +547,41 @@ async function getStorageForInstance(instanceId, workstation, isDomainJoined, wo
         }
     }
     
-    // Generate and deploy script - pass the credentials map for FSxN
-    const loginScript = generateLoginScript(storageConfigs, isDomainJoined, credentials, domainName, ontapCredentialsMap);
+    // Collect the credentials this workstation's mounts need. They go into the
+    // workstation's own SMB mount secret; the logon script carries only the
+    // secret ARN and reads it at logon.
+    const mounts = {};
+    for (const storage of storageConfigs) {
+        if (storage.type === 'fsx-ontap') {
+            const ontap = ontapCredentialsMap[storage.storageId];
+            if (ontap) mounts[storage.storageId] = { username: ontap.username, password: ontap.password };
+        } else if (!isDomainJoined && credentials && domainName) {
+            mounts[storage.storageId] = { username: `${domainName}\\${credentials.username}`, password: credentials.password };
+        }
+    }
+
+    let mountSecretArn = null;
+    if (Object.keys(mounts).length > 0) {
+        try {
+            mountSecretArn = await putMountSecret(instanceId, mounts);
+            console.log(`SMB mount secret updated for ${instanceId}: ${Object.keys(mounts).length} mount(s)`);
+        } catch (error) {
+            console.error(`Failed to write the SMB mount secret for ${instanceId}:`, error.name, error.message);
+        }
+    } else {
+        await deleteMountSecret(instanceId);
+    }
+    const mountSecret = mountSecretArn
+        ? { arn: mountSecretArn, region: process.env.AWS_REGION, storageIds: new Set(Object.keys(mounts)) }
+        : null;
+
+    // Non-secret ONTAP share details for the script (share name, CIFS server).
+    const ontapShares = {};
+    for (const [storageId, ontap] of Object.entries(ontapCredentialsMap)) {
+        ontapShares[storageId] = { shareName: ontap.shareName, cifsServerName: ontap.cifsServerName };
+    }
+
+    const loginScript = generateLoginScript(storageConfigs, isDomainJoined, mountSecret, ontapShares);
     await deployLoginScript(instanceId, loginScript, workstationRegion);
     
     return storageConfigs;
@@ -454,15 +613,39 @@ async function getAllWorkstationInstances() {
     return result.Items || [];
 }
 
-function generateLoginScript(storageConfig, isDomainJoined, credentials, domainName, ontapCredentialsMap = {}) {
+/** Quote a value as a PowerShell single-quoted string literal. */
+function psQuote(value) {
+    return `'${String(value).replace(/'/g, "''")}'`;
+}
+
+/**
+ * Script lines that read this workstation's SMB mount secret at logon and
+ * define Get-MountCredential, which returns a PSCredential for one storage.
+ * The script holds only the secret ARN; the credentials stay in memory.
+ */
+function generateMountCredentialReader(mountSecret) {
+    if (!mountSecret) {
+        return `
+$mountCredentials = $null`;
+    }
+    return `
+# Read this workstation's SMB mount credentials from Secrets Manager
+$mountCredentials = $null
+try {
+    $mountCredentials = (Get-SECSecretValue -SecretId ${psQuote(mountSecret.arn)} -Region ${psQuote(mountSecret.region)} -ErrorAction Stop).SecretString | ConvertFrom-Json
+} catch {
+    Add-Content -Path $logFile -Value "[$timestamp] ERROR: Could not read the SMB mount credentials: $($_.Exception.Message)"
+}`;
+}
+
+function generateLoginScript(storageConfig, isDomainJoined, mountSecret, ontapShares = {}) {
+    const hasMountCredential = (storageId) => !!(mountSecret && mountSecret.storageIds.has(storageId));
     const mountCommands = storageConfig.map(storage => {
         const driveLetter = storage.driveLetter || 'Z';
         
         // Handle FSxN storage type
         if (storage.type === 'fsx-ontap') {
-            // Get credentials for this specific storage
-            const ontapCredentials = ontapCredentialsMap[storage.storageId] || null;
-            return generateFsxOntapMountCommand(storage, driveLetter, ontapCredentials);
+            return generateFsxOntapMountCommand(storage, driveLetter, ontapShares[storage.storageId] || null, hasMountCredential(storage.storageId));
         }
         
         // Handle FSx Windows storage type
@@ -473,8 +656,8 @@ function generateLoginScript(storageConfig, isDomainJoined, credentials, domainN
             // Domain-joined: use integrated Windows authentication
             return generateDomainJoinedMountCommand(storage, driveLetter, fsxDnsName, shareName);
         } else {
-            // Non-domain-joined: use explicit credentials
-            return generateStandaloneMountCommand(storage, driveLetter, fsxDnsName, shareName, credentials, domainName);
+            // Non-domain-joined: credentials from the workstation's SMB mount secret
+            return generateStandaloneMountCommand(storage, driveLetter, fsxDnsName, shareName, hasMountCredential(storage.storageId));
         }
     }).join('\n');
 
@@ -486,9 +669,17 @@ function generateLoginScript(storageConfig, isDomainJoined, credentials, domainN
 # Set execution policy for this session
 Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
 
+function Get-MountCredential([string]$StorageId) {
+    if (-not $mountCredentials) { throw "SMB mount credentials are not available" }
+    $entry = $mountCredentials.mounts.$StorageId
+    if (-not $entry -or -not $entry.username -or -not $entry.password) { throw "No SMB mount credentials for storage $StorageId" }
+    New-Object System.Management.Automation.PSCredential($entry.username, (ConvertTo-SecureString -String $entry.password -AsPlainText -Force))
+}
+
 # Log file
 $logFile = "C:\\Windows\\Temp\\fsx-mount-log.txt"
 $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+${generateMountCredentialReader(mountSecret)}
 
 try {
     Add-Content -Path $logFile -Value "[$timestamp] Starting FSx mount for user: $env:USERNAME (Domain-joined: ${isDomainJoined})"
@@ -518,6 +709,8 @@ try {
     $errorMsg = "FSx mount script failed: $_"
     Add-Content -Path $logFile -Value "[$timestamp] ERROR: $errorMsg"
     Write-Error $errorMsg
+} finally {
+    Remove-Variable -Name mountCredentials, mountCredential -ErrorAction SilentlyContinue
 }
 `;
 }
@@ -546,7 +739,7 @@ try {
         Set-ItemProperty -Path $regPath -Name "DeferFlags" -Value 4 -Type DWord
         
         # Set custom label for network drive in Explorer
-        $labelPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\##$($networkPath.Replace('\\', '#'))"
+        $labelPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\$($networkPath.Replace('\\', '#'))"
         if (!(Test-Path $labelPath)) { New-Item -Path $labelPath -Force | Out-Null }
         Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
         
@@ -562,72 +755,70 @@ try {
 }`;
 }
 
-function generateStandaloneMountCommand(storage, driveLetter, fsxDnsName, shareName, credentials, domainName) {
-    if (!credentials || !domainName) {
+/**
+ * Mount one share with the credential for this storage from the
+ * workstation's SMB mount secret. New-PSDrive -Persist maps the drive through
+ * the Windows network provider (as net use does), so File Explorer shows it;
+ * it runs in-process with the PSCredential, so no child process receives the
+ * password as an argument, and no credential is saved.
+ */
+function generateCredentialMountCommand(storage, driveLetter, networkPath, modeLabel, logSuffix) {
+    return `
+# Mount ${storage.name} to ${driveLetter}: (${modeLabel})
+try {
+    $networkPath = "${networkPath}"
+    $mountCredential = Get-MountCredential ${psQuote(storage.storageId)}
+    
+    # Remove existing mapping if it exists
+    net use ${driveLetter}: /delete /y 2>$null
+    
+    New-PSDrive -Name "${driveLetter}" -PSProvider FileSystem -Root $networkPath -Credential $mountCredential -Persist -Scope Global -ErrorAction Stop | Out-Null
+    
+    # Fix "Disconnected Network Drive" display issue with comprehensive registry fix
+    $regPath = "HKCU:\\Network\\${driveLetter}"
+    if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+    Set-ItemProperty -Path $regPath -Name "RemotePath" -Value "$networkPath"
+    Set-ItemProperty -Path $regPath -Name "UserName" -Value $mountCredential.UserName
+    Set-ItemProperty -Path $regPath -Name "ProviderName" -Value "Microsoft Windows Network"
+    Set-ItemProperty -Path $regPath -Name "ProviderType" -Value 0x20000 -Type DWord
+    Set-ItemProperty -Path $regPath -Name "ConnectionType" -Value 1 -Type DWord
+    Set-ItemProperty -Path $regPath -Name "DeferFlags" -Value 4 -Type DWord
+    
+    # Set custom label for network drive in Explorer
+    $labelPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\$($networkPath.Replace('\\', '#'))"
+    if (!(Test-Path $labelPath)) { New-Item -Path $labelPath -Force | Out-Null }
+    Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
+    
+    Write-Host "Successfully mounted ${storage.name}${logSuffix} to ${driveLetter}: ($networkPath)"
+    Add-Content -Path $logFile -Value "[$timestamp] Successfully mounted ${storage.name}${logSuffix} to ${driveLetter}:"
+} catch {
+    Write-Warning "Failed to mount ${storage.name}${logSuffix} to ${driveLetter}: $($_.Exception.Message)"
+    Add-Content -Path $logFile -Value "[$timestamp] ERROR: Failed to mount ${storage.name}${logSuffix}: $($_.Exception.Message)"
+} finally {
+    Remove-Variable -Name mountCredential -ErrorAction SilentlyContinue
+}`;
+}
+
+function generateStandaloneMountCommand(storage, driveLetter, fsxDnsName, shareName, hasMountCredential) {
+    if (!hasMountCredential) {
         return `
 # Mount ${storage.name} to ${driveLetter}: (Standalone - CREDENTIALS NOT AVAILABLE)
 Write-Warning "Cannot mount ${storage.name} - AD credentials not configured for standalone workstation"
 Add-Content -Path $logFile -Value "[$timestamp] ERROR: Cannot mount ${storage.name} - AD credentials not available for standalone workstation"`;
     }
-    
-    // For standalone workstations, we need to use explicit credentials
-    // The credentials are embedded in the script - this is stored securely on the workstation
-    const username = `${domainName}\\${credentials.username}`;
-    
-    // Escape password for PowerShell single-quoted string
-    // In single-quoted strings, only single quotes need escaping (by doubling them)
-    const escapedPassword = credentials.password.replace(/'/g, "''");
-    
-    return `
-# Mount ${storage.name} to ${driveLetter}: (Standalone - using explicit credentials)
-try {
-    $networkPath = "\\\\${fsxDnsName}\\${shareName}"
-    $username = "${username}"
-    $password = '${escapedPassword}'
-    
-    # Remove existing mapping if it exists
-    net use ${driveLetter}: /delete /y 2>$null
-    
-    # Mount using net use with explicit credentials
-    $result = net use ${driveLetter}: "$networkPath" /user:$username $password /persistent:yes
-    
-    if ($LASTEXITCODE -eq 0) {
-        # Fix "Disconnected Network Drive" display issue with comprehensive registry fix
-        $regPath = "HKCU:\\Network\\${driveLetter}"
-        if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-        Set-ItemProperty -Path $regPath -Name "RemotePath" -Value "$networkPath"
-        Set-ItemProperty -Path $regPath -Name "UserName" -Value "$username"
-        Set-ItemProperty -Path $regPath -Name "ProviderName" -Value "Microsoft Windows Network"
-        Set-ItemProperty -Path $regPath -Name "ProviderType" -Value 0x20000 -Type DWord
-        Set-ItemProperty -Path $regPath -Name "ConnectionType" -Value 1 -Type DWord
-        Set-ItemProperty -Path $regPath -Name "DeferFlags" -Value 4 -Type DWord
-        
-        # Set custom label for network drive in Explorer
-        $labelPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\##$($networkPath.Replace('\\', '#'))"
-        if (!(Test-Path $labelPath)) { New-Item -Path $labelPath -Force | Out-Null }
-        Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
-        
-        Write-Host "Successfully mounted ${storage.name} to ${driveLetter}: ($networkPath) using explicit credentials"
-        Add-Content -Path $logFile -Value "[$timestamp] Successfully mounted ${storage.name} to ${driveLetter}: (standalone mode)"
-    } else {
-        throw "net use failed with exit code $LASTEXITCODE"
-    }
-    
-} catch {
-    Write-Warning "Failed to mount ${storage.name} to ${driveLetter}: $_"
-    Add-Content -Path $logFile -Value "[$timestamp] ERROR: Failed to mount ${storage.name}: $_"
-}`;
+    return generateCredentialMountCommand(storage, driveLetter, `\\\\${fsxDnsName}\\${shareName}`,
+        'Standalone - credentials from the workstation SMB mount secret', '');
 }
 
 /**
  * Generate mount command for FSx for NetApp ONTAP (SMB on Windows)
  * FSxN uses SVM DNS name and share name for mounting
  */
-function generateFsxOntapMountCommand(storage, driveLetter, ontapCredentials) {
+function generateFsxOntapMountCommand(storage, driveLetter, ontapShare, hasMountCredential) {
     // FSxN mount path: \\svm-dns-name\share-name
     const svmDnsName = storage.svmDnsName || storage.fsxDnsName;
-    // Use share name from credentials (set by configure-ontap-cifs), or fall back to vol1
-    const shareName = ontapCredentials?.shareName || storage.shareName || 'vol1';
+    // Use share name from the ONTAP secret (set by configure-ontap-cifs), or fall back to vol1
+    const shareName = ontapShare?.shareName || storage.shareName || 'vol1';
     
     if (!svmDnsName) {
         return `
@@ -636,49 +827,11 @@ Write-Warning "Cannot mount ${storage.name} - SVM DNS name not available"
 Add-Content -Path $logFile -Value "[$timestamp] ERROR: Cannot mount ${storage.name} - SVM DNS name not available"`;
     }
     
-    // If we have ONTAP credentials, use them; otherwise try without credentials (guest access)
-    if (ontapCredentials && ontapCredentials.username && ontapCredentials.password) {
-        const escapedPassword = ontapCredentials.password.replace(/'/g, "''");
-        
-        return `
-# Mount ${storage.name} to ${driveLetter}: (FSxN - using ONTAP local user)
-try {
-    $networkPath = "\\\\${svmDnsName}\\${shareName}"
-    $username = "${ontapCredentials.username}"
-    $password = '${escapedPassword}'
-    
-    # Remove existing mapping if it exists
-    net use ${driveLetter}: /delete /y 2>$null
-    
-    # Mount using net use with ONTAP local user credentials
-    $result = net use ${driveLetter}: "$networkPath" /user:$username $password /persistent:yes
-    
-    if ($LASTEXITCODE -eq 0) {
-        # Fix "Disconnected Network Drive" display issue
-        $regPath = "HKCU:\\Network\\${driveLetter}"
-        if (!(Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
-        Set-ItemProperty -Path $regPath -Name "RemotePath" -Value "$networkPath"
-        Set-ItemProperty -Path $regPath -Name "UserName" -Value "$username"
-        Set-ItemProperty -Path $regPath -Name "ProviderName" -Value "Microsoft Windows Network"
-        Set-ItemProperty -Path $regPath -Name "ProviderType" -Value 0x20000 -Type DWord
-        Set-ItemProperty -Path $regPath -Name "ConnectionType" -Value 1 -Type DWord
-        Set-ItemProperty -Path $regPath -Name "DeferFlags" -Value 4 -Type DWord
-        
-        # Set custom label for network drive in Explorer
-        $labelPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\##$($networkPath.Replace('\\', '#'))"
-        if (!(Test-Path $labelPath)) { New-Item -Path $labelPath -Force | Out-Null }
-        Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
-        
-        Write-Host "Successfully mounted ${storage.name} (FSxN) to ${driveLetter}: ($networkPath)"
-        Add-Content -Path $logFile -Value "[$timestamp] Successfully mounted ${storage.name} (FSxN) to ${driveLetter}:"
-    } else {
-        throw "net use failed with exit code $LASTEXITCODE"
-    }
-    
-} catch {
-    Write-Warning "Failed to mount ${storage.name} (FSxN) to ${driveLetter}: $_"
-    Add-Content -Path $logFile -Value "[$timestamp] ERROR: Failed to mount ${storage.name} (FSxN): $_"
-}`;
+    // If the workstation's SMB mount secret holds the ONTAP SMB user, use it;
+    // otherwise try without credentials (guest access)
+    if (hasMountCredential) {
+        return generateCredentialMountCommand(storage, driveLetter, `\\\\${svmDnsName}\\${shareName}`,
+            'FSxN - ONTAP SMB user from the workstation SMB mount secret', ' (FSxN)');
     } else {
         // Try without credentials - may work if guest access is enabled or user is prompted
         return `
@@ -704,7 +857,7 @@ try {
         Set-ItemProperty -Path $regPath -Name "DeferFlags" -Value 4 -Type DWord
         
         # Set custom label for network drive in Explorer
-        $labelPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\##$($networkPath.Replace('\\', '#'))"
+        $labelPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\$($networkPath.Replace('\\', '#'))"
         if (!(Test-Path $labelPath)) { New-Item -Path $labelPath -Force | Out-Null }
         Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
         

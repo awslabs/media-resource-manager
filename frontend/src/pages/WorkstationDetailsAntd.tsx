@@ -38,6 +38,7 @@ import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
 import { nativeClientUrl, parseNativeClientTransport, DEFAULT_NATIVE_CLIENT_TRANSPORT } from '../utils/dcvClient';
+import { postCreateSession, sessionNameFor, STARTING_SESSION_MESSAGE } from '../utils/dcvViewer';
 import { useDcvClientPrompt } from '../components/DcvClientPrompt';
 
 const { Title, Text, Link } = Typography;
@@ -264,21 +265,8 @@ const WorkstationDetailsAntd: React.FC<WorkstationDetailsAntdProps> = ({
     if (!instanceId) return;
     setConnecting(true);
     try {
-      const token = getAuthToken();
-      if (!token) throw new Error('No current user');
-
-      const response = await apiCall('/dcv', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          action: 'create-session',
-          serverId: instanceId,
-          sessionName: `${user.firstName || ''} ${user.lastName || ''}`.trim() || user.email?.split('@')[0] || 'User',
-          sessionType: 'console',
-        }),
+      const response = await postCreateSession(instanceId, sessionNameFor(user), {
+        onStarting: () => setAlert({ type: 'info', message: STARTING_SESSION_MESSAGE }),
       });
 
       if (!response.ok) {

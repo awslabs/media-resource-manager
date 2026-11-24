@@ -123,3 +123,86 @@ describe('API stack resource count (#59)', () => {
     }
   });
 });
+
+describe('FSx SMB mount manager permissions', () => {
+  let statements: any[];
+  let environment: Record<string, unknown>;
+  beforeAll(() => {
+    const template = synth();
+    const resources = template.toJSON().Resources as Record<string, any>;
+    const [fnId, fn] = Object.entries(resources).find(([id, r]) =>
+      r.Type === 'AWS::Lambda::Function' && id.startsWith('FsxMountManagerFunction'))!;
+    environment = fn.Properties.Environment.Variables;
+    const roleRef = JSON.stringify(fn.Properties.Role['Fn::GetAtt'][0]);
+    statements = Object.values(resources)
+      .filter(r => r.Type === 'AWS::IAM::Policy' && JSON.stringify(r.Properties.Roles).includes(roleRef))
+      .flatMap(r => r.Properties.PolicyDocument.Statement);
+    expect(fnId).toBeDefined();
+  }, 120000);
+
+  test('can write, but not read, the per-workstation SMB mount secrets', () => {
+    const smb = statements.filter(s => JSON.stringify(s.Resource).includes('SmbMount'));
+    expect(smb).toHaveLength(1);
+    expect([...smb[0].Action].sort()).toEqual([
+      'secretsmanager:CreateSecret',
+      'secretsmanager:DeleteSecret',
+      'secretsmanager:DescribeSecret',
+      'secretsmanager:PutResourcePolicy',
+      'secretsmanager:PutSecretValue',
+    ]);
+    expect(flat(smb[0].Resource)).toContain('/MediaResourceManager/Workstation/*/SmbMount');
+    expect(flat(smb[0].Resource)).not.toContain('secret:*');
+  });
+
+  test('gets the acronym for the regional workstation role names', () => {
+    expect(environment.ACRONYM).toBe('MRM');
+  });
+});
+
+describe('API stack /auth routes', () => {
+  let resources: Record<string, any>;
+  beforeAll(() => {
+    resources = synth().toJSON().Resources as Record<string, any>;
+  }, 120000);
+
+  const byType = (type: string) => Object.entries(resources).filter(([, r]) => r.Type === type);
+  const authId = () => {
+    const auth = byType('AWS::ApiGateway::Resource').find(([, r]) => r.Properties.PathPart === 'auth');
+    expect(auth).toBeDefined();
+    return auth![0];
+  };
+  const childrenOfAuth = () => byType('AWS::ApiGateway::Resource')
+    .filter(([, r]) => flat(r.Properties.ParentId) === flat({ Ref: authId() }));
+
+  test('/auth has only the ldap resource', () => {
+    expect(childrenOfAuth().map(([, r]) => r.Properties.PathPart)).toEqual(['ldap']);
+  });
+
+  test('no validate-jwt function is deployed', () => {
+    const names = byType('AWS::Lambda::Function').map(([, r]) => flat(r.Properties.FunctionName ?? ''));
+    expect(names.some(n => n.includes('ldap-auth'))).toBe(true);
+    expect(names.some(n => n.includes('validate-jwt'))).toBe(false);
+  });
+
+  test('POST /auth/ldap stays reachable before sign-in', () => {
+    const [ldapId] = childrenOfAuth()[0];
+    const methods = byType('AWS::ApiGateway::Method')
+      .filter(([, r]) => flat(r.Properties.ResourceId) === flat({ Ref: ldapId }) && r.Properties.HttpMethod === 'POST');
+    expect(methods).toHaveLength(1);
+    expect(methods[0][1].Properties.AuthorizationType).toBe('NONE');
+  });
+
+  test('the stage throttles POST /auth/ldap', () => {
+    const stages = byType('AWS::ApiGateway::Stage');
+    expect(stages).toHaveLength(1);
+    const settings = stages[0][1].Properties.MethodSettings as any[];
+    expect(settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        ResourcePath: '/~1auth~1ldap',
+        HttpMethod: 'POST',
+        ThrottlingRateLimit: 10,
+        ThrottlingBurstLimit: 20,
+      }),
+    ]));
+  });
+});
