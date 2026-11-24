@@ -200,7 +200,9 @@ every release has:
 - **Upgrade notes**: always say plainly whether an operator needs to do
   anything, even when the answer is "No action needed; redeploy." Call out
   any regional hub update, and list any new or changed setting with its
-  default.
+  default. Link the upgrade guide,
+  [docs/UPGRADING.md](https://github.com/awslabs/media-resource-manager/blob/main/docs/UPGRADING.md),
+  for the steps, and add only what this release needs on top of them.
 - **Follow-ups**: one line of the issue numbers filed for work left out.
 - **Full changelog**: the compare link,
   `https://github.com/awslabs/media-resource-manager/compare/vA.B.C...vX.Y.Z`.

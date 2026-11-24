@@ -12,6 +12,13 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Added
+
+- [Upgrading](docs/UPGRADING.md), a step-by-step guide to upgrading an
+  installation to a new release: the pipeline template from the release tag,
+  a change set preview, the build, regional hub updates, checks and rollback.
+  The README's upgrade notes moved there.
+
 ### Removed
 
 - The unused `GET /auth/validate` route and its `validate-jwt` Lambda.
