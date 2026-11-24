@@ -316,6 +316,32 @@ describe('standalone workstation with FSx for Windows', () => {
     expect(script.indexOf('Starting FSx mount')).toBeLessThan(script.indexOf('$readStart = Get-Date'));
   });
 
+  test('the Run Command queues task starts and fails if the task cannot start', async () => {
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    const command = sentScript();
+    const queue = command.indexOf('$task.Settings.MultipleInstances = "Queue"');
+    const setTask = command.indexOf('Set-ScheduledTask -InputObject $task -ErrorAction Stop');
+    const start = command.indexOf('Start-ScheduledTask -TaskName "FSxMountScript" -ErrorAction Stop');
+    expect(command).toContain('Get-ScheduledTask -TaskName "FSxMountScript" -ErrorAction Stop');
+    expect(queue).toBeGreaterThan(-1);
+    expect(setTask).toBeGreaterThan(queue);
+    expect(start).toBeGreaterThan(setTask);
+    // The script file is written before the task is started.
+    expect(command.indexOf('$scriptContent | Out-File $scriptFile')).toBeLessThan(start);
+    expect(command).not.toMatch(/Start-ScheduledTask[^\n]*SilentlyContinue/);
+    expect(command).toContain('Write-Error "Could not start the FSxMountScript task: $($_.Exception.Message)"');
+    expect(command.slice(start)).toMatch(/catch \{[^}]*exit 1/);
+  });
+
+  test('the log says "completed with errors" when a mount failed', async () => {
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    const script = sentScript();
+    expect(script).toContain('$mountErrors = 0');
+    expect(script).toMatch(/\$mountErrors\+\+\s*\n\s*Add-Content -Path \$logFile -Value "\[\$\(Get-LogTime\)\] ERROR: Failed to mount Media/);
+    expect(script).toContain('if ($mountErrors -gt 0) {');
+    expect(script).toContain('FSx mount completed with errors ($mountErrors failed) for user: $env:USERNAME');
+  });
+
   test('no log line carries a password', async () => {
     await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
     mockState.failPutSecret = true;
@@ -355,8 +381,8 @@ describe('attach, detach and attach again', () => {
     mockState.workstation = attached();
     await expect(handler({ action: 'updateInstance', instanceId: INSTANCE_ID }))
       .rejects.toThrow(`Could not write the SMB mount secret for ${INSTANCE_ID}: InvalidRequestException`);
-    expect(calls('CreateSecret')).toHaveLength(6);
-    expect(delays).toEqual([1000, 2000, 4000, 8000, 15000]);
+    expect(calls('CreateSecret')).toHaveLength(5);
+    expect(delays).toEqual([1000, 2000, 4000, 8000]);
     expect(calls('PutSecretValue')).toHaveLength(0);
     expect(calls('SendCommand')).toHaveLength(0);
   });
