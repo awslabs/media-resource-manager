@@ -27,6 +27,7 @@ upgrade to that version; a version without it needs only a redeploy.
   updated with the new template. If your pipeline stack already has
   `AdMode=managed` set and the deployment runs in connector mode, set
   `AdMode` to `connector` or leave it empty when you update the stack.
+  ([#125](https://github.com/awslabs/media-resource-manager/pull/125))
 
 ### Security
 
