@@ -5,7 +5,8 @@
  * FSx SMB mount manager: the credentials a workstation's SMB mounts need go
  * into that workstation's own secret, pinned to it by a resource policy. The
  * Run Command and the logon script carry only the secret ARN, and the script
- * mounts with New-SmbMapping. The AWS SDK clients are mocked.
+ * maps the drive with New-PSDrive -Persist and a PSCredential. The AWS SDK
+ * clients are mocked.
  */
 
 export {};
@@ -185,12 +186,24 @@ describe('standalone workstation with FSx for Windows', () => {
     expect(script).not.toMatch(/\$password\b/);
   });
 
-  test('the script reads the workstation secret and mounts with New-SmbMapping', async () => {
+  test('the script reads the workstation secret and maps the drive with New-PSDrive -Persist', async () => {
     await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
     const script = sentScript();
     expect(script).toContain(`Get-SECSecretValue -SecretId '${SECRET_ARN}' -Region 'us-east-1' -ErrorAction Stop`);
     expect(script).toContain("Get-MountCredential 'st-win'");
-    expect(script).toMatch(/New-SmbMapping -LocalPath "Z:" -RemotePath \$networkPath -UserName \$mountCredential\.UserName -Password \$mountCredential\.GetNetworkCredential\(\)\.Password -Persistent \$true -ErrorAction Stop/);
+    expect(script).toMatch(/New-PSDrive -Name "Z" -PSProvider FileSystem -Root \$networkPath -Credential \$mountCredential -Persist -Scope Global -ErrorAction Stop/);
+    // New-SmbMapping bypasses the network provider, so Explorer does not show its drives.
+    expect(script).not.toContain('New-SmbMapping');
+    expect(script).not.toContain('GetNetworkCredential');
+    expect(script).not.toMatch(/net use [^\n]*\/user:/);
+  });
+
+  test('the drive label goes to the MountPoints2 key Explorer reads (##server#share)', async () => {
+    await handler({ action: 'updateInstance', instanceId: INSTANCE_ID });
+    const script = sentScript();
+    // $networkPath is \\server\share; replacing \ with # gives ##server#share.
+    expect(script).toContain("Explorer\\MountPoints2\\$($networkPath.Replace('\\', '#'))");
+    expect(script).not.toContain('MountPoints2\\##');
     expect(script).toContain('New-Object System.Management.Automation.PSCredential');
     expect(script).toContain('Remove-Variable -Name mountCredentials, mountCredential');
   });
@@ -270,7 +283,7 @@ describe('domain-joined workstation', () => {
     const script = sentScript();
     expectNoPassword(script);
     expect(script).toContain('Domain-joined - using integrated auth');
-    expect(script).not.toContain('New-SmbMapping');
+    expect(script).not.toContain('New-PSDrive');
   });
 
   test('FSx for ONTAP gets only the SMB user, never the ONTAP admin credentials', async () => {

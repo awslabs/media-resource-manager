@@ -686,7 +686,7 @@ try {
         Set-ItemProperty -Path $regPath -Name "DeferFlags" -Value 4 -Type DWord
         
         # Set custom label for network drive in Explorer
-        $labelPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\##$($networkPath.Replace('\\', '#'))"
+        $labelPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\$($networkPath.Replace('\\', '#'))"
         if (!(Test-Path $labelPath)) { New-Item -Path $labelPath -Force | Out-Null }
         Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
         
@@ -704,8 +704,10 @@ try {
 
 /**
  * Mount one share with the credential for this storage from the
- * workstation's SMB mount secret. New-SmbMapping runs in-process, so no child
- * process receives the password as an argument; no credential is saved.
+ * workstation's SMB mount secret. New-PSDrive -Persist maps the drive through
+ * the Windows network provider (as net use does), so File Explorer shows it;
+ * it runs in-process with the PSCredential, so no child process receives the
+ * password as an argument, and no credential is saved.
  */
 function generateCredentialMountCommand(storage, driveLetter, networkPath, modeLabel, logSuffix) {
     return `
@@ -717,7 +719,7 @@ try {
     # Remove existing mapping if it exists
     net use ${driveLetter}: /delete /y 2>$null
     
-    New-SmbMapping -LocalPath "${driveLetter}:" -RemotePath $networkPath -UserName $mountCredential.UserName -Password $mountCredential.GetNetworkCredential().Password -Persistent $true -ErrorAction Stop | Out-Null
+    New-PSDrive -Name "${driveLetter}" -PSProvider FileSystem -Root $networkPath -Credential $mountCredential -Persist -Scope Global -ErrorAction Stop | Out-Null
     
     # Fix "Disconnected Network Drive" display issue with comprehensive registry fix
     $regPath = "HKCU:\\Network\\${driveLetter}"
@@ -730,7 +732,7 @@ try {
     Set-ItemProperty -Path $regPath -Name "DeferFlags" -Value 4 -Type DWord
     
     # Set custom label for network drive in Explorer
-    $labelPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\##$($networkPath.Replace('\\', '#'))"
+    $labelPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\$($networkPath.Replace('\\', '#'))"
     if (!(Test-Path $labelPath)) { New-Item -Path $labelPath -Force | Out-Null }
     Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
     
@@ -802,7 +804,7 @@ try {
         Set-ItemProperty -Path $regPath -Name "DeferFlags" -Value 4 -Type DWord
         
         # Set custom label for network drive in Explorer
-        $labelPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\##$($networkPath.Replace('\\', '#'))"
+        $labelPath = "HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2\\$($networkPath.Replace('\\', '#'))"
         if (!(Test-Path $labelPath)) { New-Item -Path $labelPath -Force | Out-Null }
         Set-ItemProperty -Path $labelPath -Name "_LabelFromReg" -Value "${storage.name}"
         
