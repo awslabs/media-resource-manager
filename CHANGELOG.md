@@ -18,6 +18,12 @@ upgrade to that version; a version without it needs only a redeploy.
   `AdMode=managed`, the first deploy of this version sets the `ResourceAdmin`
   password to the value stored in its Secrets Manager secret. The value does
   not change, so nothing that uses the secret needs updating.
+- With AD sign-in (`useCognitoAuth=false`), domain-joined Windows workstations
+  mount FSx for Windows storage with the signed-in user's AD identity. Before
+  you upgrade, check that the users, or an AD group they belong to, have share
+  and NTFS permissions on each FSx for Windows file share. See
+  [#130](https://github.com/awslabs/media-resource-manager/issues/130) for
+  how to grant them.
 
 ### Added
 
@@ -28,14 +34,16 @@ upgrade to that version; a version without it needs only a redeploy.
   regional hub **Update** replaces the hub's DCV Connection Gateway.
   ([#126](https://github.com/awslabs/media-resource-manager/pull/126))
 
-### Removed
-
-- The unused `GET /auth/validate` route and its `validate-jwt` Lambda.
-  Protected routes validate tokens with the API's JWT authorizer.
-  ([#121](https://github.com/awslabs/media-resource-manager/pull/121))
-
 ### Fixed
 
+- Windows workstation records store the **Join Domain** setting
+  (`joinDomain`). The FSx SMB mount manager and the workstation start
+  workflow use it to choose integrated authentication and the domain-joined
+  start path. For records created by earlier versions, the mount manager
+  reads the instance's computer name from SSM and stores the answer;
+  otherwise both use the console's Join Domain default for the deployment's
+  sign-in mode.
+  ([#123](https://github.com/awslabs/media-resource-manager/pull/123))
 - With `AdMode=managed`, MRM keeps the `ResourceAdmin` password from
   expiring. AWS Managed Microsoft AD expires passwords after the directory's
   maximum password age (42 days by default), and an expired `ResourceAdmin`
@@ -47,6 +55,12 @@ upgrade to that version; a version without it needs only a redeploy.
   `<Acronym>-ResourceAdmin-Password-Refresh-Failed` CloudWatch alarm, and a
   failed reset during deployment fails the deployment.
   ([#128](https://github.com/awslabs/media-resource-manager/issues/128))
+
+### Removed
+
+- The unused `GET /auth/validate` route and its `validate-jwt` Lambda.
+  Protected routes validate tokens with the API's JWT authorizer.
+  ([#121](https://github.com/awslabs/media-resource-manager/pull/121))
 
 ### Security
 
