@@ -48,10 +48,15 @@ upgrade to that version; a version without it needs only a redeploy.
   mount requested while the previous one is still running now runs after it
   instead of being skipped, so attaching and then detaching quickly ends
   with the drive removed, and a Run Command that can't start the mount
-  reports a failure. The mount log on the workstation
-  (`C:\Windows\Temp\fsx-mount-log.txt`) shows the time of each step and
-  says "completed with errors" when a mount failed, and the logon script
-  reads its credentials with the fastest AWS client installed.
+  reports a failure. If storage is attached or detached again while the
+  mount manager is still preparing a workstation's script, it starts over
+  from the current setting instead of sending the older script. The mount
+  log on the workstation (`C:\Windows\Temp\fsx-mount-log.txt`) shows the
+  time of each step and how long the credential read took, and says
+  "completed with errors" when a mount failed. The logon script reads its
+  credentials through the AWS SDK for .NET assemblies already installed with
+  AWS Tools for PowerShell, which takes seconds instead of the minutes the
+  first load of the full module can take.
   ([#131](https://github.com/awslabs/media-resource-manager/pull/131))
 
 ### Removed
