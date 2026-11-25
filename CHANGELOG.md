@@ -139,6 +139,11 @@ upgrade to that version; a version without it needs only a redeploy.
   needed. A default route the analyzer cannot verify, such as a virtual
   private gateway, gets a warning.
   ([#135](https://github.com/awslabs/media-resource-manager/pull/135))
+- On Windows, `scripts/analyze-vpc.ps1` analyzes an existing VPC's subnets
+  and NACLs. Its subnet and NACL checks read the VPC data they are given
+  (they failed with `SyntaxError: ... is not valid JSON`), and the analyzer
+  stops `deploy.ps1` with an error when a step fails instead of exiting 0.
+  ([#135](https://github.com/awslabs/media-resource-manager/pull/135))
 
 ### Removed
 

@@ -50,7 +50,9 @@ function Analyze-Vpc {
     # Use node to analyze and display subnet info
     $analysisScript = @"
 const fs = require('fs');
-const subnets = JSON.parse(process.argv[1]);
+// JSON comes through the environment, not argv: PowerShell passes each line of
+// the aws output as its own argument, and argv[1] is this script's path.
+const subnets = JSON.parse(process.env.MRM_SUBNETS_JSON);
 
 // Group subnets by AZ
 const byAz = {};
@@ -119,12 +121,18 @@ if (hasMultiplePrivatePerAz || hasMultiplePublicPerAz) {
     $tempScript = [System.IO.Path]::GetTempFileName() + ".js"
     Set-Content -Path $tempScript -Value $analysisScript -Encoding UTF8
 
-    node $tempScript $subnetsJson
+    $env:MRM_SUBNETS_JSON = ($subnetsJson -join "`n")
+    node $tempScript | Out-Host
     $nodeExit = $LASTEXITCODE
+    Remove-Item Env:MRM_SUBNETS_JSON -ErrorAction SilentlyContinue
     Remove-Item $tempScript -ErrorAction SilentlyContinue
 
     if ($nodeExit -eq 2) {
         return 2
+    }
+    if ($nodeExit -ne 0) {
+        Write-Err "Could not analyze the subnets of VPC $VpcId (see above)"
+        exit 1
     }
 
     # For simple VPCs, auto-save subnet IDs
@@ -153,7 +161,8 @@ function Check-NaclUdpRules {
     }
 
     $checkScript = @"
-const nacls = JSON.parse(process.argv[1]);
+// JSON comes through the environment (see the subnet analysis script)
+const nacls = JSON.parse(process.env.MRM_NACLS_JSON);
 let hasIssue = false;
 
 for (const nacl of nacls) {
@@ -184,7 +193,12 @@ if (!hasIssue) {
 
     $tempScript = [System.IO.Path]::GetTempFileName() + ".js"
     Set-Content -Path $tempScript -Value $checkScript -Encoding UTF8
-    node $tempScript $naclsJson
+    $env:MRM_NACLS_JSON = ($naclsJson -join "`n")
+    node $tempScript | Out-Host
+    $nodeExit = $LASTEXITCODE
+    Remove-Item Env:MRM_NACLS_JSON -ErrorAction SilentlyContinue
+    # Informational, as in analyze-vpc.sh: a failed check warns and the deploy continues
+    if ($nodeExit -ne 0) { Write-Warn "Could not check the NACL rules (see above)" }
     Remove-Item $tempScript -ErrorAction SilentlyContinue
 }
 
@@ -220,8 +234,13 @@ fs.writeFileSync('selected-subnets.json', JSON.stringify(result, null, 2));
 
     $tempScript = [System.IO.Path]::GetTempFileName() + ".js"
     Set-Content -Path $tempScript -Value $saveScript -Encoding UTF8
-    node $tempScript
+    node $tempScript | Out-Host
+    $nodeExit = $LASTEXITCODE
     Remove-Item $tempScript -ErrorAction SilentlyContinue
+    if ($nodeExit -ne 0) {
+        Write-Err "Could not save the subnet selection (see above)"
+        exit 1
+    }
 
     # Now update parameters.json
     Update-Parameters -VpcId $VpcId -VpcCidr $vpcCidr
@@ -322,7 +341,12 @@ selectSubnets().catch(console.error);
     $tempScript = [System.IO.Path]::GetTempFileName() + ".js"
     Set-Content -Path $tempScript -Value $selectScript -Encoding UTF8
     node $tempScript
+    $nodeExit = $LASTEXITCODE
     Remove-Item $tempScript -ErrorAction SilentlyContinue
+    if ($nodeExit -ne 0) {
+        Write-Err "Subnet selection failed (see above)"
+        exit 1
+    }
 }
 
 # Check that each selected private subnet has outbound internet access, as
@@ -438,7 +462,7 @@ function Update-Parameters {
 
     if (-not (Test-Path "selected-subnets.json")) {
         Write-Err "No subnet selection found"
-        return
+        exit 1
     }
 
     $selected = Get-Content "selected-subnets.json" | ConvertFrom-Json
@@ -497,8 +521,13 @@ console.log('parameters.json updated successfully');
 
     $tempScript = [System.IO.Path]::GetTempFileName() + ".js"
     Set-Content -Path $tempScript -Value $updateScript -Encoding UTF8
-    node $tempScript
+    node $tempScript | Out-Host
+    $nodeExit = $LASTEXITCODE
     Remove-Item $tempScript -ErrorAction SilentlyContinue
+    if ($nodeExit -ne 0) {
+        Write-Err "Could not update parameters.json (see above)"
+        exit 1
+    }
 
     Write-Ok "Subnet configuration saved to parameters.json"
     Write-Host ""
@@ -530,7 +559,9 @@ if ($CheckEgress) {
     exit 0
 }
 
-$result = Analyze-Vpc -VpcId $vpcId
+# The return value is the last item of the function's output
+$result = Analyze-Vpc -VpcId $vpcId | Select-Object -Last 1
+if ($result -ne 0 -and $result -ne 2) { exit 1 }
 
 if ($result -eq 2) {
     Select-Subnets -VpcId $vpcId
