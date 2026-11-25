@@ -331,16 +331,29 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
       const token = getAuthToken();
       if (!token) throw new Error('No current user');
 
-      await Promise.all(
-        selectedResources.map((r) =>
-          apiCall(`storage/${r.storageId}`, {
+      const results = await Promise.all(
+        selectedResources.map(async (r) => {
+          const response = await apiCall(`storage/${r.storageId}`, {
             method: 'DELETE',
             headers: { Authorization: `Bearer ${token}` },
-          })
-        )
+          });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.error || `Failed to delete ${r.name || r.storageId}`);
+          return body;
+        })
       );
 
-      setAlert({ type: 'info', message: `Deletion started for ${selectedResources.length} resource(s). This may take 5-10 minutes.` });
+      // A started stack deletion has status 'deleting'; a record removed
+      // directly returns its own message (for example, storage MRM didn't create).
+      const started = results.filter((b) => b.status === 'deleting').length;
+      const messages = [...new Set(results.filter((b) => b.status !== 'deleting').map((b) => b.message).filter(Boolean))];
+      setAlert({
+        type: 'info',
+        message: [
+          started ? `Deletion started for ${started} resource(s). This may take 5-10 minutes.` : '',
+          ...messages,
+        ].filter(Boolean).join(' '),
+      });
       setShowDeleteModal(false);
       setSelectedRowKeys([]);
       fetchData();

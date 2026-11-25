@@ -47,6 +47,18 @@ upgrade to that version; a version without it needs only a redeploy.
   number stays unused. Before, each failed attempt used up a number, so
   hostnames skipped numbers.
   ([#5](https://github.com/awslabs/media-resource-manager/issues/5))
+- Deleting a storage resource whose record has no MRM storage stack works.
+  When `cloudFormationStackName` is empty or doesn't start with
+  `<Acronym>-Storage-` (for example `N/A` on a record for a file system MRM
+  didn't create), MRM removes the record and the DataSync tasks and
+  locations it created for that storage, and leaves the file system as it
+  is. **Storage** says that only the MRM record was removed. Before, the
+  delete returned HTTP 500 and the record stayed. MRM now checks a storage
+  stack before it removes the DataSync tasks and locations, so a delete that
+  fails or is refused leaves them in place. **Storage** shows the error when
+  a delete fails.
+  ([#149](https://github.com/awslabs/media-resource-manager/pull/149),
+  [#143](https://github.com/awslabs/media-resource-manager/issues/143))
 
 ### Security
 

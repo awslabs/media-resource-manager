@@ -473,6 +473,9 @@ export class StorageStack extends cdk.Stack {
         // SSM parameter path for DataSync table name - Lambda reads at runtime
         // This avoids synth-time dependency on the DataSync stack
         DATASYNC_TABLE_SSM_PATH: `/${props.pascalCaseName}/DataSync/TableName`,
+        // Storage stacks are named <ACRONYM>-Storage-<storageId>; a record with
+        // another stack name has no stack for MRM to delete.
+        ACRONYM: props.acronym,
       },
     });
 
