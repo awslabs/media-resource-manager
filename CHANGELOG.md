@@ -24,6 +24,29 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ### Fixed
 
+- Deleting a regional hub is refused while workstations remain in its
+  Region. The API returns 409 with the count, for example "Terminate the 2
+  workstations in us-west-2 before deleting its regional hub.", and lists
+  the workstations by hostname and instance ID (up to 20, then "and N
+  more"). The hub stays as it is, and no workstation is deleted. Records of
+  terminated workstations and failed creates don't count. The delete dialog
+  on **Regions** shows each Region's workstation count, lists the
+  workstations after a refused delete, and says to snapshot or copy any data
+  you need from them, then terminate them before deleting the hub. Before,
+  the delete started, and the hub stack's VPC, subnets and security group
+  couldn't be removed while those workstations still used them.
+  ([#147](https://github.com/awslabs/media-resource-manager/pull/147),
+  [#145](https://github.com/awslabs/media-resource-manager/issues/145))
+- A workstation launch that fails for lack of capacity doesn't use up a
+  hostname number. Windows and Linux creates keep the number they reserved
+  when they retry in the next subnet, and give it back to the counter when
+  the last subnet fails or the launch fails with another error. macOS
+  creates try every subnet with one number and give it back when no
+  instance launches. A number goes back only while it's still the newest
+  one; if another workstation has taken a later number in the meantime, the
+  number stays unused. Before, each failed attempt used up a number, so
+  hostnames skipped numbers.
+  ([#5](https://github.com/awslabs/media-resource-manager/issues/5))
 - With Cognito sign-in, the console keeps an active user signed in past the
   1-hour ID token lifetime. It keeps the Cognito refresh token in the tab's
   `sessionStorage`, next to the ID token, and gets a new ID token 5 minutes
