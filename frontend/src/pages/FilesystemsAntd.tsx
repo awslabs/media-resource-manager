@@ -38,6 +38,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import type { MenuProps } from 'antd';
 import AppLayoutAntd from '../components/AppLayoutAntd';
+import { FinalBackupDetails, FinalBackupNotice } from '../components/FinalBackupDetails';
 import { getAuthToken } from '../utils/auth';
 import { apiCall } from '../utils/api';
 import { listStorageS3Buckets, getStorageConfig, getStoragePricing, S3Bucket, StorageConfig, StoragePricing } from '../utils/storageApi';
@@ -88,7 +89,7 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
   const [primaryRegion, setPrimaryRegion] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
-  const [alert, setAlert] = useState<{ type: 'success' | 'error' | 'info' | 'warning'; message: string } | null>(null);
+  const [alert, setAlert] = useState<{ type: 'success' | 'error' | 'info' | 'warning'; message: string; description?: React.ReactNode } | null>(null);
 
   // Modal states
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -331,7 +332,7 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
       const token = getAuthToken();
       if (!token) throw new Error('No current user');
 
-      await Promise.all(
+      const responses = await Promise.all(
         selectedResources.map((r) =>
           apiCall(`storage/${r.storageId}`, {
             method: 'DELETE',
@@ -339,8 +340,19 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
           })
         )
       );
+      // FSx for Windows file systems and FSx for ONTAP volumes leave a final backup
+      const finalBackups: FinalBackupNotice[] = [];
+      for (const res of responses) {
+        const body = res.ok ? await res.json().catch(() => null) : null;
+        if (body?.finalBackup) finalBackups.push(body.finalBackup);
+      }
 
-      setAlert({ type: 'info', message: `Deletion started for ${selectedResources.length} resource(s). This may take 5-10 minutes.` });
+      const started = `Deletion started for ${selectedResources.length} resource(s). This may take 5-10 minutes.`;
+      setAlert(
+        finalBackups.length
+          ? { type: 'warning', message: started, description: <FinalBackupDetails notices={finalBackups} /> }
+          : { type: 'info', message: started }
+      );
       setShowDeleteModal(false);
       setSelectedRowKeys([]);
       fetchData();
@@ -627,6 +639,7 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
           <Alert
             type={alert.type}
             message={alert.message}
+            description={alert.description}
             closable
             onClose={() => setAlert(null)}
             style={{ marginBottom: 16 }}
@@ -1127,6 +1140,11 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
           <Alert
             type="warning"
             message="This will delete the storage resources and their associated AWS resources. This action cannot be undone."
+            description={
+              selectedResources.some((r) => r.type === 'fsx-windows' || r.type === 'fsx-ontap')
+                ? 'FSx keeps a final backup of each deleted FSx for Windows file system and FSx for ONTAP volume, and bills it for its storage until you delete it.'
+                : undefined
+            }
             style={{ marginBottom: 16 }}
           />
           <p>Are you sure you want to delete {selectedResources.length} storage resource(s)?</p>

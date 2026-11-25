@@ -12,6 +12,16 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Fixed
+
+- Deleting FSx for Windows File Server storage or an FSx for ONTAP volume
+  from **Storage** says that FSx keeps a final backup until it's deleted. The
+  delete dialog mentions it, and after the delete the API response and the
+  **Storage** page give the file system or volume ID, its Region and the
+  commands to find and delete the backup. See
+  [Deleting Storage](docs/USER_GUIDE.md#deleting-storage).
+  ([#118](https://github.com/awslabs/media-resource-manager/issues/118))
+
 ## [1.6.0] - 2026-11-25
 
 Fixes for SMB storage on Windows workstations, the `ResourceAdmin` password
