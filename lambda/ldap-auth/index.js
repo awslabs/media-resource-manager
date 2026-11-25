@@ -58,11 +58,13 @@ async function upsertUserRecord({ username, email, firstName, lastName, isAdmin 
         ':emptyMap': {},
       },
     }));
-    console.log(`JIT user record upserted for ${username} (isAdmin=${!!isAdmin})`);
+    // Sign-in names are personal data, so log lines in this Lambda never
+    // include them.
+    console.log(`JIT user record upserted (isAdmin=${!!isAdmin})`);
   } catch (err) {
     // Never fail auth on cache write. Downstream impact is only that the
     // user does not appear in the admin listing until their next sign-in.
-    console.warn(`JIT user upsert failed for ${username}: ${err.name} ${err.message}`);
+    console.warn(`JIT user upsert failed: ${err.name} ${err.message}`);
   }
 }
 
@@ -120,7 +122,7 @@ async function authenticateWithLDAP(username, password) {
           }
           
           return new Promise((resolve) => {
-            console.log('Starting LDAP authentication for:', username);
+            console.log('Starting LDAP authentication');
             
             const client = ldap.createClient({
               url: `ldap://${domainName}:389`,
@@ -371,7 +373,7 @@ async function authenticateWithLDAP(username, password) {
         exports.handler = async (event) => {
           const request = parseSignInRequest(event || {});
           if (request) {
-            console.log('Direct LDAP Auth request for user:', request.username);
+            console.log('Direct LDAP Auth request received');
           } else {
             console.log('Direct LDAP Auth request rejected: invalid request body');
           }
