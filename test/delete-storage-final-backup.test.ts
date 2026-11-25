@@ -92,6 +92,7 @@ beforeEach(() => {
   process.env.STORAGE_TABLE_NAME = 'mrm-storage';
   process.env.STORAGE_DELETION_STATE_MACHINE_ARN = 'arn:aws:states:us-east-1:123456789012:stateMachine:delete';
   delete process.env.DATASYNC_TABLE_SSM_PATH;
+  delete process.env.ACRONYM;
   jest.spyOn(console, 'log').mockImplementation(() => undefined);
   jest.spyOn(console, 'warn').mockImplementation(() => undefined);
   jest.spyOn(console, 'error').mockImplementation(() => undefined);
@@ -150,7 +151,9 @@ describe('delete-storage final backup notice', () => {
     ['Mountpoint for S3', { type: 'mountpoint-s3', status: 'available' }, 'CREATE_COMPLETE'],
     ['a rolled-back FSx create', { type: 'fsx-windows', status: 'failed', cloudFormationStackName: 'MRM-Storage-st-1', fsxFileSystemId: 'N/A' }, 'ROLLBACK_COMPLETE'],
     ['an FSx record whose stack is gone', { type: 'fsx-ontap', status: 'failed', cloudFormationStackName: 'MRM-Storage-st-1', volumeId: 'fsvol-0bbb' }, null],
+    ['a record for a file system MRM did not create', { type: 'fsx-windows', status: 'available', cloudFormationStackName: 'N/A', fsxFileSystemId: 'fs-0abc' }, 'CREATE_COMPLETE'],
   ])('%s gets no notice', async (_name, record, stackStatus) => {
+    process.env.ACRONYM = 'MRM';
     mockStackStatus = stackStatus;
     mockStorage = { storageId: 'st-1', region: 'us-east-1', ...record };
     const { statusCode, body } = await del();

@@ -419,10 +419,13 @@ Storage can be attached when creating a workstation or added later:
 1. Select one or more storage resources, then choose **Actions** → **Delete**
 2. Confirm. Deleting FSx storage takes 5-10 minutes.
 
-When you delete an FSx for Windows File Server file system or an FSx for ONTAP
-volume, a final backup will be kept until you delete it. FSx bills backups for
-their storage. Automatic backups are deleted with the file system; backups you
-made yourself stay too.
+For a record of a file system that MRM didn't create, MRM removes only its
+record and leaves the file system as it is.
+
+When MRM deletes an FSx for Windows File Server file system or an FSx for
+ONTAP volume, a final backup will be kept until you delete it. FSx bills
+backups for their storage. Automatic backups are deleted with the file
+system; backups you made yourself stay too.
 
 After the delete, the **Storage** page shows the file system or volume ID, its
 Region and the commands to find and delete the backup. FSx takes the backup

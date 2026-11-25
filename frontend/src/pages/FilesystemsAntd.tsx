@@ -332,27 +332,32 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
       const token = getAuthToken();
       if (!token) throw new Error('No current user');
 
-      const responses = await Promise.all(
-        selectedResources.map((r) =>
-          apiCall(`storage/${r.storageId}`, {
+      const results = await Promise.all(
+        selectedResources.map(async (r) => {
+          const response = await apiCall(`storage/${r.storageId}`, {
             method: 'DELETE',
             headers: { Authorization: `Bearer ${token}` },
-          })
-        )
+          });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.error || `Failed to delete ${r.name || r.storageId}`);
+          return body;
+        })
       );
-      // FSx for Windows file systems and FSx for ONTAP volumes leave a final backup
-      const finalBackups: FinalBackupNotice[] = [];
-      for (const res of responses) {
-        const body = res.ok ? await res.json().catch(() => null) : null;
-        if (body?.finalBackup) finalBackups.push(body.finalBackup);
-      }
 
-      const started = `Deletion started for ${selectedResources.length} resource(s). This may take 5-10 minutes.`;
-      setAlert(
-        finalBackups.length
-          ? { type: 'info', message: started, description: <FinalBackupDetails notices={finalBackups} /> }
-          : { type: 'info', message: started }
-      );
+      // A started stack deletion has status 'deleting'; a record removed
+      // directly returns its own message (for example, storage MRM didn't create).
+      const started = results.filter((b) => b.status === 'deleting').length;
+      const messages = [...new Set(results.filter((b) => b.status !== 'deleting').map((b) => b.message).filter(Boolean))];
+      // FSx for Windows file systems and FSx for ONTAP volumes leave a final backup
+      const finalBackups: FinalBackupNotice[] = results.map((b) => b.finalBackup).filter(Boolean);
+      setAlert({
+        type: 'info',
+        message: [
+          started ? `Deletion started for ${started} resource(s). This may take 5-10 minutes.` : '',
+          ...messages,
+        ].filter(Boolean).join(' '),
+        description: finalBackups.length ? <FinalBackupDetails notices={finalBackups} /> : undefined,
+      });
       setShowDeleteModal(false);
       setSelectedRowKeys([]);
       fetchData();
@@ -1144,7 +1149,7 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
           />
           {selectedResources.some((r) => r.type === 'fsx-windows' || r.type === 'fsx-ontap') && (
             <p data-testid="final-backup-note">
-              A final backup will be kept of each FSx for Windows file system and FSx for ONTAP volume you delete,
+              A final backup will be kept of each FSx for Windows file system and FSx for ONTAP volume that MRM deletes,
               until you delete the backup.
             </p>
           )}

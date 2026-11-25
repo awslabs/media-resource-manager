@@ -82,7 +82,38 @@ async function generateHostname() {
     const hostname = `${hostnamePrefix}${paddedNumber}`;
 
     console.log(`Generated hostname: ${hostname} (number: ${hostnameNumber})`);
-    return { hostname, hostnameNumber };
+    return { hostname, hostnameNumber, prefix: hostnamePrefix };
+}
+
+/**
+ * Give a hostname number back when no workstation got it, so the next create
+ * uses it (#5). Only the newest number can go back: if another create has
+ * taken a later one since, the counter has moved on and the number is skipped.
+ */
+async function releaseHostname(reservation) {
+    if (!reservation || !reservation.prefix || !reservation.hostnameNumber) return;
+    const number = reservation.hostnameNumber;
+    try {
+        await dynamodb.send(new UpdateCommand({
+            TableName: process.env.HOSTNAME_COUNTER_TABLE_NAME,
+            Key: { prefix: reservation.prefix },
+            UpdateExpression: 'SET #counter = :previous, lastUpdated = :now',
+            ConditionExpression: '#counter = :number',
+            ExpressionAttributeNames: { '#counter': 'counter' },
+            ExpressionAttributeValues: {
+                ':number': number,
+                ':previous': number - 1,
+                ':now': new Date().toISOString()
+            }
+        }));
+        console.log(`Released unused hostname number ${number} (${reservation.hostname})`);
+    } catch (error) {
+        if (error.name === 'ConditionalCheckFailedException') {
+            console.log(`Hostname number ${number} not released: a later number is already in use`);
+        } else {
+            console.warn(`Could not release hostname number ${number}:`, error.message);
+        }
+    }
 }
 
 /**
@@ -411,13 +442,15 @@ exports.handler = async (event) => {
         throw new Error('No subnet found. Available: ' + subnetMappings.map(s => s.az).join(', '));
     }
 
-    // Generate unique hostname
+    // Generate unique hostname. This invocation tries every subnet itself, so
+    // the number is reserved once and given back if no instance launches (#5).
     let hostname = null;
     let hostnameNumber = null;
+    let reservation = null;
     try {
-        const hostnameResult = await generateHostname();
-        hostname = hostnameResult.hostname;
-        hostnameNumber = hostnameResult.hostnameNumber;
+        reservation = await generateHostname();
+        hostname = reservation.hostname;
+        hostnameNumber = reservation.hostnameNumber;
     } catch (error) {
         console.warn('Failed to generate hostname, will use fallback:', error.message);
     }
@@ -622,6 +655,7 @@ exports.handler = async (event) => {
             `Tried AZs: ${subnetsToTry.map(s => s.az).join(', ')}. ` +
             `This may be due to AWS capacity constraints in the region or service quota limits. ` +
             `Original error: ${lastError?.message || 'Unknown error'}`;
+        await releaseHostname(reservation);
         throw new Error(errorMsg);
     }
 
