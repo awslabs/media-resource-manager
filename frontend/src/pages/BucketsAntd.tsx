@@ -50,6 +50,7 @@ import {
 import { Upload as S3Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { fromCognitoIdentityPool } from '@aws-sdk/credential-providers';
+import { getFreshAuthToken } from '../utils/auth';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 
 const { Text, Paragraph } = Typography;
@@ -128,8 +129,14 @@ const BucketsAntd: React.FC<BucketsAntdProps> = ({
           credentials: fromCognitoIdentityPool({
             clientConfig: { region: config.region },
             identityPoolId: config.identityPoolId,
+            // A provider, so credentials renewed after a session refresh use
+            // the current ID token (#85).
             logins: {
-              [`cognito-idp.${config.region}.amazonaws.com/${config.cognitoUserPoolId}`]: idToken,
+              [`cognito-idp.${config.region}.amazonaws.com/${config.cognitoUserPoolId}`]: async () => {
+                const token = await getFreshAuthToken();
+                if (!token) throw new Error('No current user');
+                return token;
+              },
             },
           }),
           requestChecksumCalculation: 'WHEN_REQUIRED',

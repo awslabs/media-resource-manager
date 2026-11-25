@@ -12,6 +12,21 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Fixed
+
+- With Cognito sign-in, the console keeps an active user signed in past the
+  1-hour ID token lifetime. It keeps the Cognito refresh token in the tab's
+  `sessionStorage`, next to the ID token, and gets a new ID token 5 minutes
+  before the current one expires, when a page loads with an expired one, and
+  when the API answers 401. Calls made during a refresh wait for it and are
+  sent with the new token. When Cognito refuses the refresh token (expired
+  or revoked), the console clears the session and shows the sign-in page.
+  **Sign out** clears all three values and revokes the refresh token. A new
+  tab or window still needs its own sign-in. AD sign-in
+  (`useCognitoAuth=false`) is unchanged: its session still ends after 1
+  hour.
+  ([#85](https://github.com/awslabs/media-resource-manager/issues/85))
+
 ## [1.6.0] - 2026-11-25
 
 Fixes for SMB storage on Windows workstations, the `ResourceAdmin` password
