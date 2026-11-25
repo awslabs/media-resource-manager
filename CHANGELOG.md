@@ -12,8 +12,37 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+## [1.5.1] - TBD
+
+Fixes for SMB storage on Windows workstations, the `ResourceAdmin` password
+with AWS Managed Microsoft AD, the DCV Connection Gateway install, console
+sessions and **Connect** in regional hubs, the existing-VPC analyzer and the
+stack cleanup scripts. The pipeline template changed, and regional hubs need
+an update.
+
 ### Upgrade steps
 
+- The pipeline template changed: the `AdMode` parameter defaults to empty
+  ([#125](https://github.com/awslabs/media-resource-manager/pull/125)).
+  Update the pipeline stack with `scripts/deploy-pipeline.yaml` from the
+  release tag before you start the build. Follow the full path in
+  [Upgrading](docs/UPGRADING.md), not the quick path.
+- After the deploy finishes, open **Regions** in the MRM console and click
+  **Update** on each regional hub. The hub update brings in the Windows
+  auto-login change
+  ([#119](https://github.com/awslabs/media-resource-manager/pull/119)),
+  the hub console session check and **Connect** retry
+  ([#120](https://github.com/awslabs/media-resource-manager/pull/120))
+  and the gateway install checks
+  ([#136](https://github.com/awslabs/media-resource-manager/pull/136)).
+  It replaces the hub's DCV Connection Gateway, which disconnects DCV
+  sessions on that gateway.
+- The deploy replaces the primary Region's DCV Connection Gateways one at a
+  time (the gateway install change in
+  [#136](https://github.com/awslabs/media-resource-manager/pull/136)). DCV
+  sessions on a gateway that is being replaced disconnect, and users
+  reconnect from the console. Plan the deploy and the hub updates outside
+  working hours.
 - No action needed for the `ResourceAdmin` password fix below. With
   `AdMode=managed`, the first deploy of this version sets the `ResourceAdmin`
   password to the value stored in its Secrets Manager secret. The value does
@@ -76,7 +105,8 @@ upgrade to that version; a version without it needs only a redeploy.
   scheduled reset raises the
   `<Acronym>-ResourceAdmin-Password-Refresh-Failed` CloudWatch alarm, and a
   failed reset during deployment fails the deployment.
-  ([#128](https://github.com/awslabs/media-resource-manager/issues/128))
+  ([#129](https://github.com/awslabs/media-resource-manager/pull/129),
+  [#128](https://github.com/awslabs/media-resource-manager/issues/128))
 - On standalone Windows workstations, attaching storage a few seconds after
   detaching it mounts the drive. The mount manager waits until the
   workstation's previous SMB mount secret is fully removed before it writes
@@ -169,14 +199,19 @@ upgrade to that version; a version without it needs only a redeploy.
   stops `deploy.ps1` with an error when a step fails instead of exiting 0.
   ([#135](https://github.com/awslabs/media-resource-manager/pull/135))
 
-### Removed
-
-- The unused `GET /auth/validate` route and its `validate-jwt` Lambda.
-  Protected routes validate tokens with the API's JWT authorizer.
-  ([#121](https://github.com/awslabs/media-resource-manager/pull/121))
-
-### Fixed
-
+- In regional hubs, a new workstation shows **Ready** only after its DCV
+  console session is READY. The check makes its Session Manager calls
+  through the hub's `dcv-session-manager`, which accepts them only from a
+  direct invoke and only for the describe calls and one `CONSOLE` session on
+  that instance. Until a hub is updated, its workstations are created as
+  before. **Connect** returns within API Gateway's 29-second limit: when a
+  new console session isn't ready after 15 seconds, the API returns 409
+  `session-starting`, and the browser viewer and the native client
+  **Connect** buttons retry up to 4 times with "Starting your session". The
+  hub DCV Lambda role can read AMIs in the hub Region
+  (`ec2:DescribeImages`). Needs a hub **Update**.
+  ([#120](https://github.com/awslabs/media-resource-manager/pull/120),
+  [#114](https://github.com/awslabs/media-resource-manager/issues/114))
 - The pipeline template's `AdMode` parameter defaults to empty, which keeps
   the mode in the stored deployment config, like the other optional pipeline
   parameters. A new install still gets `managed`. A pipeline stack that set
@@ -185,6 +220,11 @@ upgrade to that version; a version without it needs only a redeploy.
   `AdMode=managed` set and the deployment runs in connector mode, set
   `AdMode` to `connector` or leave it empty when you update the stack.
   ([#125](https://github.com/awslabs/media-resource-manager/pull/125))
+### Removed
+
+- The unused `GET /auth/validate` route and its `validate-jwt` Lambda.
+  Protected routes validate tokens with the API's JWT authorizer.
+  ([#121](https://github.com/awslabs/media-resource-manager/pull/121))
 
 ### Security
 
@@ -193,6 +233,27 @@ upgrade to that version; a version without it needs only a redeploy.
   AD account name) and returns the existing generic 400 otherwise. The API
   stage throttles the route at 10 requests per second with a burst of 20.
   ([#121](https://github.com/awslabs/media-resource-manager/pull/121))
+- Windows SMB mounts that need a credential (FSx for Windows on standalone
+  workstations, FSx for ONTAP with an SMB user) read it at logon from a
+  secret for that workstation,
+  `/<ProductName>/Workstation/<instanceId>/SmbMount`. The Run Command and the logon script carry the secret's ARN, and the
+  script maps each drive with `New-PSDrive -Persist` and a PSCredential. The
+  secret's resource policy allows reads only from that instance's role
+  session, FSx for ONTAP mounts get only the SMB user, and the secret is
+  deleted when none of the workstation's mounts needs a credential and when
+  the workstation is deleted. Each such
+  workstation has one secret (Secrets Manager list price USD 0.40 per secret
+  per month). Running workstations get the new logon script the next time
+  the mount manager runs for them, for example when their storage settings
+  are saved.
+  ([#122](https://github.com/awslabs/media-resource-manager/pull/122))
+- On standalone Windows workstations, auto-login sets the Administrator
+  password in the PowerShell process with `Set-LocalUser` and a SecureString,
+  as macOS auto-login does. It sets the account password before it writes
+  `DefaultPassword` to the Winlogon key, and stops with an error when the
+  secret is empty or the password can't be set. Hub workstations get the
+  change with a hub **Update**.
+  ([#119](https://github.com/awslabs/media-resource-manager/pull/119))
 
 ## [1.5.0] - 2026-11-23
 
@@ -560,6 +621,7 @@ Earlier releases are listed on the
 [GitHub releases page](https://github.com/awslabs/media-resource-manager/releases).
 
 [Unreleased]: https://github.com/awslabs/media-resource-manager/compare/v1.5.0...HEAD
+[1.5.1]: https://github.com/awslabs/media-resource-manager/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/awslabs/media-resource-manager/compare/v1.4.4...v1.5.0
 [1.4.4]: https://github.com/awslabs/media-resource-manager/compare/v1.4.3...v1.4.4
 [1.4.3]: https://github.com/awslabs/media-resource-manager/compare/v1.4.2...v1.4.3
