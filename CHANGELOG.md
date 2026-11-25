@@ -12,8 +12,41 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Upgrade steps
+
+- Optional, for installations that ran v1.4.3 or earlier: the log group
+  `/aws/lambda/<acronym>-create-admin-groups` in the primary Region may still
+  hold admin email addresses from earlier deploys. You can delete it or set a
+  short retention on it. See
+  [Installations that ran v1.4.3 or earlier](docs/UPGRADING.md#installations-that-ran-v143-or-earlier-old-adminsetup-log-group).
+  ([#148](https://github.com/awslabs/media-resource-manager/pull/148),
+  [#82](https://github.com/awslabs/media-resource-manager/issues/82))
+
 ### Fixed
 
+- Deleting a regional hub is refused while workstations remain in its
+  Region. The API returns 409 with the count, for example "Terminate the 2
+  workstations in us-west-2 before deleting its regional hub.", and lists
+  the workstations by hostname and instance ID (up to 20, then "and N
+  more"). The hub stays as it is, and no workstation is deleted. Records of
+  terminated workstations and failed creates don't count. The delete dialog
+  on **Regions** shows each Region's workstation count, lists the
+  workstations after a refused delete, and says to snapshot or copy any data
+  you need from them, then terminate them before deleting the hub. Before,
+  the delete started, and the hub stack's VPC, subnets and security group
+  couldn't be removed while those workstations still used them.
+  ([#147](https://github.com/awslabs/media-resource-manager/pull/147),
+  [#145](https://github.com/awslabs/media-resource-manager/issues/145))
+- A workstation launch that fails for lack of capacity doesn't use up a
+  hostname number. Windows and Linux creates keep the number they reserved
+  when they retry in the next subnet, and give it back to the counter when
+  the last subnet fails or the launch fails with another error. macOS
+  creates try every subnet with one number and give it back when no
+  instance launches. A number goes back only while it's still the newest
+  one; if another workstation has taken a later number in the meantime, the
+  number stays unused. Before, each failed attempt used up a number, so
+  hostnames skipped numbers.
+  ([#5](https://github.com/awslabs/media-resource-manager/issues/5))
 - Deleting a storage resource whose record has no MRM storage stack works.
   When `cloudFormationStackName` is empty or doesn't start with
   `<Acronym>-Storage-` (for example `N/A` on a record for a file system MRM
@@ -24,7 +57,14 @@ upgrade to that version; a version without it needs only a redeploy.
   stack before it removes the DataSync tasks and locations, so a delete that
   fails or is refused leaves them in place. **Storage** shows the error when
   a delete fails.
-  ([#143](https://github.com/awslabs/media-resource-manager/issues/143))
+  ([#149](https://github.com/awslabs/media-resource-manager/pull/149),
+  [#143](https://github.com/awslabs/media-resource-manager/issues/143))
+
+### Security
+
+- The AD sign-in Lambda (`ldap-auth`) logs sign-in requests, LDAP binds and
+  user record updates without the sign-in name.
+  ([#146](https://github.com/awslabs/media-resource-manager/pull/146))
 
 ## [1.6.0] - 2026-11-25
 
