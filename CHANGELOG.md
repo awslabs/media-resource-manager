@@ -20,7 +20,8 @@ upgrade to that version; a version without it needs only a redeploy.
   **Storage** page give the file system or volume ID, its Region and the
   commands to find and delete the backup. See
   [Deleting Storage](docs/USER_GUIDE.md#deleting-storage).
-  ([#118](https://github.com/awslabs/media-resource-manager/issues/118))
+  ([#152](https://github.com/awslabs/media-resource-manager/pull/152),
+  [#118](https://github.com/awslabs/media-resource-manager/issues/118))
 
 ## [1.6.0] - 2026-11-25
 
