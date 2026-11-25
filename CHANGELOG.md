@@ -95,7 +95,7 @@ upgrade to that version; a version without it needs only a redeploy.
   bundle, and the unused `scripts/connection-gwy-user-data.sh` is removed.
   Regional hubs get the change when you **Update** them, which replaces the
   hub's gateway.
-  ([#PR](https://github.com/awslabs/media-resource-manager/pull/PR))
+  ([#136](https://github.com/awslabs/media-resource-manager/pull/136))
 
 ### Removed
 
