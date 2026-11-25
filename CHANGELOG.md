@@ -77,6 +77,11 @@ upgrade to that version; a version without it needs only a redeploy.
   that would replace the Managed AD directory.
   ([#150](https://github.com/awslabs/media-resource-manager/pull/150),
   [#144](https://github.com/awslabs/media-resource-manager/issues/144))
+- The existing-VPC analyzer (`scripts/analyze-vpc.sh` and
+  `scripts/analyze-vpc.ps1`) counts a subnet whose default route goes to an
+  internet gateway as public, even when it doesn't assign public IPs, so it
+  isn't offered or picked as a private subnet.
+  ([#117](https://github.com/awslabs/media-resource-manager/pull/117))
 
 ### Security
 

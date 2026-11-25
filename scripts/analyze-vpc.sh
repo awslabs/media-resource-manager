@@ -131,16 +131,26 @@ analyze_vpc() {
         return 1
     fi
     
+    # Route tables, to count subnets whose default route is an internet gateway as public
+    local route_tables=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$vpc_id" --query 'RouteTables' --output json 2>/dev/null)
+    [[ -n "$route_tables" ]] || route_tables='[]'
+
     # Parse subnets and group by AZ - use || true to prevent set -e from exiting
-    echo "$subnets" | node -e "
+    echo "$subnets" | MRM_CLASSIFY_ROUTE_TABLES="$route_tables" node -e "
 const subnets = JSON.parse(require('fs').readFileSync('/dev/stdin', 'utf8'));
+const tables = JSON.parse(process.env.MRM_CLASSIFY_ROUTE_TABLES || '[]');
+${ROUTE_JS}
+function routesToIgw(id) {
+    const r = defaultRouteOf(tableFor(id));
+    return !!(r && r.GatewayId && r.GatewayId.startsWith('igw-'));
+}
 
 // Group subnets by AZ
 const byAz = {};
 subnets.forEach(s => {
     if (!byAz[s.AZ]) byAz[s.AZ] = { public: [], private: [] };
-    // Determine if public or private based on MapPublicIpOnLaunch or name
-    const isPublic = s.MapPublicIpOnLaunch || (s.Name && s.Name.toLowerCase().includes('public'));
+    // Public: default route to an internet gateway, public IPs on launch, or 'public' in the name
+    const isPublic = routesToIgw(s.SubnetId) || s.MapPublicIpOnLaunch || (s.Name && s.Name.toLowerCase().includes('public'));
     if (isPublic) {
         byAz[s.AZ].public.push(s);
     } else {

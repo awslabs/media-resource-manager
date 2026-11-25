@@ -69,6 +69,24 @@ describe('analyze-vpc.ps1 embedded node scripts', () => {
     expect(r.status).toBe(2);
   });
 
+  test('subnet analysis counts a subnet routed to an internet gateway as public, even without public IPs', () => {
+    const mgmt = { SubnetId: 'subnet-0a03', AZ: 'us-east-1a', CidrBlock: '10.0.2.0/24', MapPublicIpOnLaunch: false, Name: 'mgmt-a' };
+    const routeTables = [
+      { RouteTableId: 'rtb-0main', Associations: [{ Main: true }], Routes: [{ DestinationCidrBlock: '0.0.0.0/0', NatGatewayId: 'nat-0a', State: 'active' }] },
+      { RouteTableId: 'rtb-0igw', Associations: [{ SubnetId: 'subnet-0a03' }], Routes: [{ DestinationCidrBlock: '0.0.0.0/0', GatewayId: 'igw-0abc', State: 'active' }] },
+    ];
+    const r = runAsPs1(embedded('analysisScript'), {
+      MRM_SUBNETS_JSON: JSON.stringify([...SUBNETS, mgmt]),
+      MRM_CLASSIFY_ROUTE_TABLES: JSON.stringify(routeTables),
+    });
+    // Two public subnets in us-east-1a, so a selection is needed
+    expect(r.status).toBe(2);
+    const analysis = JSON.parse(fs.readFileSync(path.join(dir, 'vpc-analysis.json'), 'utf8'));
+    const ids = (list: Array<{ SubnetId: string }>) => list.map(s => s.SubnetId);
+    expect(ids(analysis.subnets['us-east-1a'].public)).toEqual(['subnet-0a01', 'subnet-0a03']);
+    expect(ids(analysis.subnets['us-east-1a'].private)).toEqual(['subnet-0a02']);
+  });
+
   test('NACL check reads its JSON from the environment, not argv[1]', () => {
     const nacls = [{ AclId: 'acl-0abc', Associations: ['subnet-0a02'], Entries: [{ Egress: true, RuleAction: 'allow', Protocol: '-1' }] }];
     const r = runAsPs1(embedded('checkScript'), { MRM_NACLS_JSON: JSON.stringify(nacls) });

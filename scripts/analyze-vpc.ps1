@@ -65,18 +65,33 @@ function Analyze-Vpc {
         return 1
     }
 
+    # Route tables, to count subnets whose default route is an internet gateway as public
+    $routeTablesJson = aws ec2 describe-route-tables `
+        --filters "Name=vpc-id,Values=$VpcId" `
+        --query 'RouteTables' --output json --region $region 2>$null
+    if (-not $routeTablesJson) { $routeTablesJson = "[]" }
+
     # Use node to analyze and display subnet info
     $analysisScript = @"
 const fs = require('fs');
 // JSON comes through the environment, not argv: PowerShell passes each line of
 // the aws output as its own argument, and argv[1] is this script's path.
 const subnets = JSON.parse(process.env.MRM_SUBNETS_JSON);
+const tables = JSON.parse(process.env.MRM_CLASSIFY_ROUTE_TABLES || '[]');
+const mainTable = () => tables.find(t => (t.Associations || []).some(a => a.Main));
+const tableFor = id => tables.find(t => (t.Associations || []).some(a => a.SubnetId === id)) || mainTable();
+function routesToIgw(id) {
+    const t = tableFor(id);
+    const r = t && (t.Routes || []).find(r => r.DestinationCidrBlock === '0.0.0.0/0');
+    return !!(r && r.GatewayId && r.GatewayId.startsWith('igw-'));
+}
 
 // Group subnets by AZ
 const byAz = {};
 subnets.forEach(s => {
     if (!byAz[s.AZ]) byAz[s.AZ] = { public: [], private: [] };
-    const isPublic = s.MapPublicIpOnLaunch || (s.Name && s.Name.toLowerCase().includes('public'));
+    // Public: default route to an internet gateway, public IPs on launch, or 'public' in the name
+    const isPublic = routesToIgw(s.SubnetId) || s.MapPublicIpOnLaunch || (s.Name && s.Name.toLowerCase().includes('public'));
     if (isPublic) {
         byAz[s.AZ].public.push(s);
     } else {
@@ -140,9 +155,10 @@ if (hasMultiplePrivatePerAz || hasMultiplePublicPerAz) {
     Set-Content -Path $tempScript -Value $analysisScript -Encoding UTF8
 
     $env:MRM_SUBNETS_JSON = ($subnetsJson -join "`n")
+    $env:MRM_CLASSIFY_ROUTE_TABLES = ($routeTablesJson -join "`n")
     node $tempScript | Out-Host
     $nodeExit = $LASTEXITCODE
-    Remove-Item Env:MRM_SUBNETS_JSON -ErrorAction SilentlyContinue
+    Remove-Item Env:MRM_SUBNETS_JSON, Env:MRM_CLASSIFY_ROUTE_TABLES -ErrorAction SilentlyContinue
     Remove-Item $tempScript -ErrorAction SilentlyContinue
 
     if ($nodeExit -eq 2) {
