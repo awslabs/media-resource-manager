@@ -12,6 +12,19 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Fixed
+
+- A workstation launch that fails for lack of capacity doesn't use up a
+  hostname number. Windows and Linux creates keep the number they reserved
+  when they retry in the next subnet, and give it back to the counter when
+  the last subnet fails or the launch fails with another error. macOS
+  creates try every subnet with one number and give it back when no
+  instance launches. A number goes back only while it's still the newest
+  one; if another workstation has taken a later number in the meantime, the
+  number stays unused. Before, each failed attempt used up a number, so
+  hostnames skipped numbers.
+  ([#5](https://github.com/awslabs/media-resource-manager/issues/5))
+
 ## [1.6.0] - 2026-11-25
 
 Fixes for SMB storage on Windows workstations, the `ResourceAdmin` password
