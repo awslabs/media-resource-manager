@@ -117,6 +117,30 @@ upgrade to that version; a version without it needs only a redeploy.
   live stacks as already deleted and the cleanup steps as finding nothing. If
   your credentials expire during a run, refresh them and run the script again.
   ([#133](https://github.com/awslabs/media-resource-manager/pull/133))
+- A DCV Connection Gateway that can't download or install its package is
+  replaced instead of staying in service. The install script stops with an
+  `ERROR` line in `/var/log/dcv-connection-gateway-install.log` when a
+  download fails, times out or is empty, when the package install fails, or
+  when the `dcv-connection-gateway` service isn't installed. Downloads retry
+  and time out instead of hanging. The gateway Auto Scaling groups in the
+  primary Region and in regional hubs use ELB health checks with a
+  15-minute grace period, so a gateway that fails its load balancer health
+  checks is replaced. A gateway that can never install (for example, with no
+  outbound internet access) is replaced again after each grace period until
+  the cause is fixed. The script no longer downloads the unused DCV server
+  bundle, and the unused `scripts/connection-gwy-user-data.sh` is removed.
+  Regional hubs get the change when you **Update** them, which replaces the
+  hub's gateway.
+  ([#136](https://github.com/awslabs/media-resource-manager/pull/136))
+- Deleting the DCV infrastructure stack succeeds when a workstation record
+  points to an instance that is already terminated or no longer exists. The
+  stack's cleanup step terminates only the workstation instances that still
+  exist and aren't already shutting down or terminated, and counts the rest
+  as cleaned up. Other EC2 errors, such as a denied request, still fail the
+  delete. Before, EC2's `InvalidInstanceID.NotFound` error for an instance
+  that was already gone failed the cleanup step and left the stack in
+  `DELETE_FAILED`.
+  ([#137](https://github.com/awslabs/media-resource-manager/pull/137))
 - With an existing VPC (`VpcId`), the VPC analyzer checks that each private
   subnet has outbound internet access. `scripts/analyze-vpc.sh` (and
   `scripts/analyze-vpc.ps1`) looks at the subnet's route table, or the VPC

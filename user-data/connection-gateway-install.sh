@@ -11,28 +11,47 @@
 # 1. Install DCV Connection Gateway from AWS CloudFront
 # 2. Configure it to connect to the Session Manager broker
 # 3. Optionally configure custom TLS certificate
+#
+# If a download, the package install or the service setup fails, the script
+# logs an ERROR line and exits non-zero. The ASG's ELB health checks then
+# replace the instance.
 
-LOG_PATH="/var/log/dcv-connection-gateway-install.log"
+LOG_PATH="${LOG_PATH:-/var/log/dcv-connection-gateway-install.log}"
 echo "$(date -u) Starting DCV Connection Gateway installation..." | tee -a "$LOG_PATH"
 
+fail() {
+    echo "$(date -u) ERROR: $*" | tee -a "$LOG_PATH"
+    exit 1
+}
+
+# download URL FILE: fails on an HTTP error, a timeout or an empty file.
+download() {
+    echo "$(date -u) Downloading $1" | tee -a "$LOG_PATH"
+    curl -fsS --connect-timeout 10 --max-time 600 --retry 5 --retry-delay 5 --retry-connrefused -o "$2" "$1" \
+        || fail "Download failed: $1. Check that the instance has outbound HTTPS access (NAT gateway or proxy)."
+    [ -s "$2" ] || fail "Download is missing or empty: $1"
+}
+
 # Get instance metadata using IMDSv2
-TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
+IMDS_CURL=(curl -fsS --connect-timeout 2 --retry 3)
+TOKEN=$("${IMDS_CURL[@]}" -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
 if [ -n "$TOKEN" ]; then
-  INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "unknown")
-  REGION=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+  INSTANCE_ID=$("${IMDS_CURL[@]}" -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "unknown")
+  REGION=$("${IMDS_CURL[@]}" -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
 else
-  INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "unknown")
-  REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+  INSTANCE_ID=$("${IMDS_CURL[@]}" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "unknown")
+  REGION=$("${IMDS_CURL[@]}" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
 fi
+[ -n "$REGION" ] || fail "Could not read the Region from instance metadata"
 
 echo "$(date -u) Instance: $INSTANCE_ID, Region: $REGION" | tee -a "$LOG_PATH"
 
 # Detect OS type and version
-read -r system version <<<$(echo $(cat /etc/os-release | grep "^ID=\|^VERSION_ID=" | sort | cut -d"=" -f2 | tr -d "\"" | tr '[:upper:]' '[:lower:]'))
+read -r system version <<<$(echo $(cat "${OS_RELEASE_FILE:-/etc/os-release}" | grep "^ID=\|^VERSION_ID=" | sort | cut -d"=" -f2 | tr -d "\"" | tr '[:upper:]' '[:lower:]'))
 major_version="${version%.*}"
 arch="$(arch)"
 CLOUDFRONT_PREFIX="https://d1uj6qtbmh3dt5.cloudfront.net"
-TMP_DIR="$(mktemp -d /tmp/dcv-install-XXXXXX)"
+TMP_DIR="$(mktemp -d -t dcv-install-XXXXXX)" || fail "Could not create a temporary directory"
 
 echo "$(date -u) Detected OS: $system $version, arch: $arch" | tee -a "$LOG_PATH"
 
@@ -80,48 +99,42 @@ fi
 
 echo "$(date -u) Using package type: $package_type, manager: $package_manager" | tee -a "$LOG_PATH"
 
-# Download packages
+# Download the connection gateway package only: the browser viewer is served
+# by the console, so the DCV server bundle isn't needed.
 echo "$(date -u) Downloading DCV Connection Gateway..." | tee -a "$LOG_PATH"
+download "$CLOUDFRONT_PREFIX/NICE-GPG-KEY" "$TMP_DIR/NICE-GPG-KEY"
 if [ "$package_manager" = "apt" ]; then
-    curl -o "$TMP_DIR/NICE-GPG-KEY" "$CLOUDFRONT_PREFIX/NICE-GPG-KEY"
-    gpg --import "$TMP_DIR/NICE-GPG-KEY"
+    gpg --import "$TMP_DIR/NICE-GPG-KEY" || fail "Could not import the NICE GPG key"
     if [ "$arch" != "x86_64" ]; then
         deb_arch="arm64"
-        curl -o "$TMP_DIR/nice-dcv-server.tgz" "$CLOUDFRONT_PREFIX/nice-dcv-ubuntu2204-aarch64.tgz"
     else
         deb_arch="amd64"
-        curl -o "$TMP_DIR/nice-dcv-server.tgz" "$CLOUDFRONT_PREFIX/nice-dcv-$package_type-$arch.tgz"
     fi
-    curl -o "$TMP_DIR/nice-dcv-connection-gateway.$package_extension" "$CLOUDFRONT_PREFIX/nice-dcv-connection-gateway_$deb_arch.$package_type.$package_extension"
+    package_url="$CLOUDFRONT_PREFIX/nice-dcv-connection-gateway_$deb_arch.$package_type.$package_extension"
 else
-    rpm --import "$CLOUDFRONT_PREFIX/NICE-GPG-KEY"
-    curl -o "$TMP_DIR/nice-dcv-connection-gateway.$package_extension" "$CLOUDFRONT_PREFIX/nice-dcv-connection-gateway-$package_type.$arch.$package_extension"
-    curl -o "$TMP_DIR/nice-dcv-server.tgz" "$CLOUDFRONT_PREFIX/nice-dcv-$package_type-$arch.tgz"
+    rpm --import "$TMP_DIR/NICE-GPG-KEY" || fail "Could not import the NICE GPG key"
+    package_url="$CLOUDFRONT_PREFIX/nice-dcv-connection-gateway-$package_type.$arch.$package_extension"
 fi
+package_file="$TMP_DIR/nice-dcv-connection-gateway.$package_extension"
+download "$package_url" "$package_file"
 
-# Install packages
 echo "$(date -u) Installing DCV Connection Gateway..." | tee -a "$LOG_PATH"
-tar -xvzf "$TMP_DIR/nice-dcv-server.tgz" -C "$TMP_DIR"
-
-# Install the connection gateway only: the browser viewer is served by the console
-for package_pattern in "nice-dcv-connection-gateway.$package_extension"; do
-    package_full_path=$(find "$TMP_DIR" -name "$package_pattern")
-    if [ -n "$package_full_path" ]; then
-        $package_manager install -y "$package_full_path"
-    fi
-done
+$package_manager install -y "$package_file" || fail "Package install failed: $package_file"
 
 # Clean up temp files
 rm -rf "$TMP_DIR"
 
 CONFIG_FILE="/etc/dcv-connection-gateway/dcv-connection-gateway.conf"
+systemctl cat dcv-connection-gateway.service >/dev/null 2>&1 \
+    || fail "dcv-connection-gateway.service is not installed"
+[ -f "$CONFIG_FILE" ] || fail "Gateway config file is missing: $CONFIG_FILE"
 # Token-only gateway: [web-resources] sets neither url nor local-resources-path,
 # so HTTP requests without a session token get an empty 404.
 sed -i -E '/^\[web-resources\]/,/^\[/{/^[[:space:]]*(local-resources-path|url)[[:space:]]*=/d}' "$CONFIG_FILE"
 
 # Enable and start gateway initially
 echo "$(date -u) Starting DCV Connection Gateway service..." | tee -a "$LOG_PATH"
-systemctl enable dcv-connection-gateway
+systemctl enable dcv-connection-gateway || fail "Could not enable dcv-connection-gateway.service"
 systemctl start dcv-connection-gateway
 
 # Get broker endpoint from SSM Parameter Store
