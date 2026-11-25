@@ -175,6 +175,24 @@ describe('refresh before expiry', () => {
   });
 });
 
+describe('base64url tokens', () => {
+  it("reads the expiry of a token whose payload has '-' or '_' and doesn't refresh it early", async () => {
+    // Real Cognito tokens are base64url; this payload encodes to '/' and '+',
+    // which base64url writes as '_' and '-'.
+    const header = btoa(JSON.stringify({ alg: 'RS256' }));
+    const body = btoa(JSON.stringify({ exp: now() + 3600, name: '\u00ff\u00ff\u00ff\u00fe\u00fe' }))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    expect(body).toMatch(/[-_]/);
+    const token = `${header}.${body}.sig`;
+    sessionStorage.setItem('auth-token', token);
+    sessionStorage.setItem('auth-refresh-token', REFRESH);
+    expect(getAuthToken()).toBe(token);
+    await apiCall('/workstations', { headers: { Authorization: `Bearer ${token}` } });
+    expect(cognitoCalls('InitiateAuth')).toHaveLength(0);
+    expect(apiCalls().map(c => bearer(c.init))).toEqual([token]);
+  });
+});
+
 describe('refresh on 401', () => {
   it('refreshes once and retries the request when the API answers 401', async () => {
     const old = signedIn(3600);

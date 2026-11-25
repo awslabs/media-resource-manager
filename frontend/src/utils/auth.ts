@@ -44,11 +44,15 @@ const REFRESH_RETRY_SECONDS = 60;
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
+/** Decode a JWT payload. JWTs use base64url, which atob() rejects ('-', '_'). */
+const decodePayload = (token: string) =>
+  JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+
 /** The `exp` claim of a JWT, or null when it can't be read. */
 const tokenExpiry = (token: string | null): number | null => {
   if (!token || token.split('.').length !== 3) return null;
   try {
-    const payload = JSON.parse(atob(token.split('.')[1]));
+    const payload = decodePayload(token);
     return typeof payload.exp === 'number' ? payload.exp : null;
   } catch {
     return null;
@@ -228,7 +232,7 @@ export const getAuthToken = (): string | null => {
   if (token && token.split('.').length === 3) {
     try {
       // Try to decode the payload to ensure it's valid
-      const payload = JSON.parse(atob(token.split('.')[1]));
+      const payload = decodePayload(token);
       if (payload.exp && payload.exp > nowSeconds()) {
         return token;
       }
