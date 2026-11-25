@@ -12,6 +12,11 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Security
+
+- The AD sign-in Lambda (`ldap-auth`) logs sign-in requests, LDAP binds and
+  user record updates without the sign-in name.
+
 ## [1.6.0] - 2026-11-25
 
 Fixes for SMB storage on Windows workstations, the `ResourceAdmin` password
