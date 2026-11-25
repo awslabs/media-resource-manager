@@ -76,6 +76,11 @@ upgrade to that version; a version without it needs only a redeploy.
   gateway or a Secrets Manager interface endpoint with private DNS), as the
   existing credential reads do.
   ([#131](https://github.com/awslabs/media-resource-manager/pull/131))
+- The web console loads the new release on the next page load after an
+  upgrade, without a hard refresh. `index.html` and `config.json` are served
+  with `Cache-Control: no-cache`, and the hashed bundles under `assets/` with
+  a one-year immutable `Cache-Control`.
+  ([#124](https://github.com/awslabs/media-resource-manager/pull/124))
 
 ### Removed
 
