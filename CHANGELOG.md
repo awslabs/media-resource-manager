@@ -118,6 +118,15 @@ upgrade to that version; a version without it needs only a redeploy.
   Regional hubs get the change when you **Update** them, which replaces the
   hub's gateway.
   ([#136](https://github.com/awslabs/media-resource-manager/pull/136))
+- Deleting the DCV infrastructure stack succeeds when a workstation record
+  points to an instance that is already terminated or no longer exists. The
+  stack's cleanup step terminates only the workstation instances that still
+  exist and aren't already shutting down or terminated, and counts the rest
+  as cleaned up. Other EC2 errors, such as a denied request, still fail the
+  delete. Before, EC2's `InvalidInstanceID.NotFound` error for an instance
+  that was already gone failed the cleanup step and left the stack in
+  `DELETE_FAILED`.
+  ([#137](https://github.com/awslabs/media-resource-manager/pull/137))
 
 ### Removed
 
