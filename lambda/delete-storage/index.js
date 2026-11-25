@@ -219,6 +219,71 @@ async function deleteDataSyncTasksAndLocations(storageId) {
   }
 }
 
+/**
+ * True when the stack name is one MRM gives its storage stacks:
+ * `<Acronym>-Storage-<storageId>` (generate-fsx-template). Without ACRONYM
+ * every name counts, as before.
+ */
+function isMrmStorageStack(stackName) {
+  const acronym = process.env.ACRONYM;
+  if (!acronym) return true;
+  return stackName.startsWith(`${acronym}-Storage-`);
+}
+
+async function deleteStorageRecord(storageId) {
+  await dynamodb.send(new DeleteCommand({
+    TableName: process.env.STORAGE_TABLE_NAME,
+    Key: { storageId }
+  }));
+}
+
+function deleted(storageId, message) {
+  return {
+    statusCode: 200,
+    headers: corsHeaders,
+    body: JSON.stringify({ success: true, message, storageId })
+  };
+}
+
+/**
+ * Cascade-delete the DataSync tasks and locations of this storage. Returns
+ * an error response to send when the cleanup fails, otherwise null.
+ */
+async function cleanUpDataSync(storageId) {
+  try {
+    const result = await deleteDataSyncTasksAndLocations(storageId);
+    if (result.deletedTasks.length || result.deletedLocations.length) {
+      console.log(`DataSync cleanup: removed ${result.deletedTasks.length} task(s), ${result.deletedLocations.length} location(s)`);
+    }
+    if (result.errors.length) {
+      // Per-item errors are logged above. If any failed, the stack delete
+      // would likely fail too, so show a clear error instead of a record
+      // stuck in "deleting".
+      return {
+        statusCode: 500,
+        headers: corsHeaders,
+        body: JSON.stringify({
+          success: false,
+          error: 'Failed to clean up associated DataSync resources',
+          details: result.errors
+        })
+      };
+    }
+    return null;
+  } catch (cleanupError) {
+    console.error('DataSync cleanup threw:', cleanupError);
+    return {
+      statusCode: 500,
+      headers: corsHeaders,
+      body: JSON.stringify({
+        success: false,
+        error: 'Failed to clean up associated DataSync resources',
+        details: cleanupError.message
+      })
+    };
+  }
+}
+
 exports.handler = async (event) => {
   console.log('DeleteStorage event:', JSON.stringify(requestSummary(event)));
   
@@ -259,44 +324,7 @@ exports.handler = async (event) => {
     }
     
     const storage = getResult.Item;
-    
-    // Cascade-delete any DataSync tasks and locations that reference this
-    // storage. This must run before CloudFormation stack delete so DataSync
-    // releases its ENIs from the FSx security group — otherwise stack delete
-    // fails with DependencyViolation.
-    let dataSyncCleanup;
-    try {
-      dataSyncCleanup = await deleteDataSyncTasksAndLocations(storageId);
-      if (dataSyncCleanup.deletedTasks.length || dataSyncCleanup.deletedLocations.length) {
-        console.log(`DataSync cleanup: removed ${dataSyncCleanup.deletedTasks.length} task(s), ${dataSyncCleanup.deletedLocations.length} location(s)`);
-      }
-      if (dataSyncCleanup.errors.length) {
-        // Non-fatal: we logged per-item errors, but if any failed to delete
-        // the stack delete will likely also fail. Surface to caller so the
-        // user sees a clear error instead of a stuck "deleting" record.
-        return {
-          statusCode: 500,
-          headers: corsHeaders,
-          body: JSON.stringify({
-            success: false,
-            error: 'Failed to clean up associated DataSync resources',
-            details: dataSyncCleanup.errors
-          })
-        };
-      }
-    } catch (cleanupError) {
-      console.error('DataSync cleanup threw:', cleanupError);
-      return {
-        statusCode: 500,
-        headers: corsHeaders,
-        body: JSON.stringify({
-          success: false,
-          error: 'Failed to clean up associated DataSync resources',
-          details: cleanupError.message
-        })
-      };
-    }
-    
+
     // Check if storage is already being deleted
     if (storage.status === 'deleting') {
       return {
@@ -308,30 +336,29 @@ exports.handler = async (event) => {
         })
       };
     }
-    
+
     // For Mountpoint S3 storage (no CloudFormation stack), just delete the DynamoDB record
     if (storage.type === 'mountpoint-s3') {
-      await dynamodb.send(new DeleteCommand({
-        TableName: process.env.STORAGE_TABLE_NAME,
-        Key: { storageId }
-      }));
-      
+      const cleanupFailure = await cleanUpDataSync(storageId);
+      if (cleanupFailure) return cleanupFailure;
+      await deleteStorageRecord(storageId);
       console.log(`Deleted Mountpoint S3 storage record: ${storageId}`);
-      
-      return {
-        statusCode: 200,
-        headers: corsHeaders,
-        body: JSON.stringify({
-          success: true,
-          message: 'Storage deleted successfully',
-          storageId
-        })
-      };
+      return deleted(storageId, 'Storage deleted successfully');
     }
-    
-    // For FSx storage, check if we need to handle failed/stuck states
+
     const stackName = storage.cloudFormationStackName;
-    
+
+    // A record whose stack name isn't an MRM storage stack (for example "N/A"
+    // on a record added for a file system MRM didn't create) has no stack for
+    // MRM to delete, and the role may describe only MRM storage stacks.
+    if (stackName && !isMrmStorageStack(stackName)) {
+      console.log(`Storage ${storageId}: ${JSON.stringify(stackName)} is not an MRM storage stack; removing only the MRM record`);
+      const cleanupFailure = await cleanUpDataSync(storageId);
+      if (cleanupFailure) return cleanupFailure;
+      await deleteStorageRecord(storageId);
+      return deleted(storageId, 'Storage record removed. MRM did not create this file system, so the file system itself was not changed.');
+    }
+
     // Get region from storage record (defaults to primary region if not set)
     const storageRegion = storage.region || process.env.AWS_REGION;
     console.log(`Storage ${storageId} is in region: ${storageRegion}`);
@@ -339,7 +366,8 @@ exports.handler = async (event) => {
     // Get CloudFormation client for the storage's region
     const cfn = getCfnClient(storageRegion);
     
-    // Check if the CloudFormation stack exists and its status
+    // Check the stack before anything is deleted, so a failed check leaves
+    // the DataSync tasks and locations in place.
     let stackExists = false;
     let stackStatus = null;
     
@@ -372,6 +400,9 @@ exports.handler = async (event) => {
     
     if (!stackName || !stackExists || (stackStatus && directDeleteStatuses.includes(stackStatus))) {
       console.log(`Direct delete: stackName=${stackName}, stackExists=${stackExists}, stackStatus=${stackStatus}`);
+
+      const cleanupFailure = await cleanUpDataSync(storageId);
+      if (cleanupFailure) return cleanupFailure;
       
       // If stack exists in ROLLBACK_COMPLETE or DELETE_FAILED, try to delete it
       if (stackExists && (stackStatus === 'ROLLBACK_COMPLETE' || stackStatus === 'DELETE_FAILED')) {
@@ -385,49 +416,40 @@ exports.handler = async (event) => {
         }
       }
       
-      // Delete the DynamoDB record directly
-      await dynamodb.send(new DeleteCommand({
-        TableName: process.env.STORAGE_TABLE_NAME,
-        Key: { storageId }
-      }));
-      
+      await deleteStorageRecord(storageId);
       console.log(`Deleted storage record: ${storageId}`);
-      
-      return {
-        statusCode: 200,
-        headers: corsHeaders,
-        body: JSON.stringify({
-          success: true,
-          message: 'Storage deleted successfully',
-          storageId
-        })
-      };
+      return deleted(storageId, 'Storage deleted successfully');
     }
     
     // For active stacks, use Step Functions for proper deletion workflow
     // But first check if the storage is stuck in 'creating' status
-    if (storage.status === 'creating' || storage.status === 'validating') {
-      // Check if the stack is actually still being created
-      if (stackStatus && !stackStatus.includes('IN_PROGRESS')) {
-        console.log(`Storage stuck in ${storage.status} but stack is ${stackStatus}, proceeding with deletion`);
-        // Update status to allow deletion
-        await dynamodb.send(new UpdateCommand({
-          TableName: process.env.STORAGE_TABLE_NAME,
-          Key: { storageId },
-          UpdateExpression: 'SET #status = :status',
-          ExpressionAttributeNames: { '#status': 'status' },
-          ExpressionAttributeValues: { ':status': 'failed' }
-        }));
-      } else {
-        return {
-          statusCode: 409,
-          headers: corsHeaders,
-          body: JSON.stringify({
-            success: false,
-            error: 'Cannot delete storage while it is being created. Please wait for creation to complete or fail.'
-          })
-        };
-      }
+    const stuckCreating = (storage.status === 'creating' || storage.status === 'validating');
+    if (stuckCreating && !(stackStatus && !stackStatus.includes('IN_PROGRESS'))) {
+      return {
+        statusCode: 409,
+        headers: corsHeaders,
+        body: JSON.stringify({
+          success: false,
+          error: 'Cannot delete storage while it is being created. Please wait for creation to complete or fail.'
+        })
+      };
+    }
+
+    // DataSync releases its ENIs on the FSx security group before the stack
+    // delete starts (see deleteDataSyncTasksAndLocations).
+    const cleanupFailure = await cleanUpDataSync(storageId);
+    if (cleanupFailure) return cleanupFailure;
+
+    if (stuckCreating) {
+      console.log(`Storage stuck in ${storage.status} but stack is ${stackStatus}, proceeding with deletion`);
+      // Update status to allow deletion
+      await dynamodb.send(new UpdateCommand({
+        TableName: process.env.STORAGE_TABLE_NAME,
+        Key: { storageId },
+        UpdateExpression: 'SET #status = :status',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':status': 'failed' }
+      }));
     }
     
     // Start Step Functions execution for deletion
