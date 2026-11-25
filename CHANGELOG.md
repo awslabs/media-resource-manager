@@ -38,6 +38,7 @@ upgrade to that version; a version without it needs only a redeploy.
 
 - `scripts/create-multipart-upload.py` takes the target bucket as a required
   argument: `python3 scripts/create-multipart-upload.py <bucket>`.
+  ([#134](https://github.com/awslabs/media-resource-manager/pull/134))
 
 ### Fixed
 
