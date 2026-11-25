@@ -584,7 +584,7 @@ MRM uses one private subnet and one public subnet in each Availability Zone,
 in at least 2 AZs. The private subnets need outbound internet access (a NAT
 gateway, NAT instance or transit gateway).
 
-When you set `VpcId`, the deployment script automatically runs `scripts/analyze-vpc.sh` to:
+When you set `VpcId`, the deployment script automatically runs `scripts/analyze-vpc.sh` (`scripts/analyze-vpc.ps1` with `deploy.ps1` on Windows) to:
 - Inspect subnet layout
 - Check the subnets in `PrivateSubnetIds` and `PublicSubnetIds` when you set them: each must be in the VPC, one per AZ, in the order of `AvailabilityZones` (filled in from the subnets when empty)
 - Check that each private subnet it will use has outbound internet access: its route table (or the VPC main route table) needs a `0.0.0.0/0` route that is not a blackhole to a NAT gateway, NAT instance, transit gateway, VPC endpoint (AWS Network Firewall or Gateway Load Balancer) or Cloud WAN core network. When the analyzer picks or validates the subnets, it stops and names the subnet, AZ and route table if one has no such route. On later deploys, when the subnets are already saved, it runs the same check as a warning in the build log and the deploy continues. It warns on a default route it cannot verify (such as a virtual private gateway)

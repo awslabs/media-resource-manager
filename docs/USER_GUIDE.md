@@ -414,6 +414,36 @@ Storage can be attached when creating a workstation or added later:
 3. Specify mount point
 4. Save changes
 
+#### Deleting Storage
+
+1. Select one or more storage resources, then choose **Actions** → **Delete**
+2. Confirm. Deleting FSx storage takes 5-10 minutes.
+
+For a record of a file system that MRM didn't create, MRM removes only its
+record and leaves the file system as it is.
+
+When MRM deletes an FSx for Windows File Server file system or an FSx for
+ONTAP volume, a final backup will be kept until you delete it. FSx bills
+backups for their storage. Automatic backups are deleted with the file
+system; backups you made yourself stay too.
+
+After the delete, the **Storage** page shows the file system or volume ID, its
+Region and the commands to find and delete the backup. FSx takes the backup
+during the delete, so it appears when the delete finishes. To find it:
+
+```bash
+# FSx for Windows File Server
+aws fsx describe-backups --region <region> --filters Name=file-system-id,Values=<file-system-id>
+# FSx for ONTAP
+aws fsx describe-backups --region <region> --filters Name=volume-id,Values=<volume-id>
+```
+
+When you no longer need it, delete it with its `BackupId`. This can't be undone:
+
+```bash
+aws fsx delete-backup --region <region> --backup-id <backup-id>
+```
+
 ### Updating Regional Hubs
 
 Each regional hub runs its own copy of MRM's regional code, such as the regional DCV session manager. Upgrading MRM doesn't change that copy, so a hub needs an update to get fixes in that code.
