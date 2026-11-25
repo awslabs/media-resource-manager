@@ -12,6 +12,7 @@ export {};
 
 const PASSWORD = 'Correct-Horse-9-Battery'; // pragma: allowlist secret
 const binds: Array<{ dn: string; password: unknown }> = [];
+const mockDdbSend = jest.fn();
 
 jest.mock('ldapjs', () => ({
   createClient: () => ({
@@ -56,7 +57,7 @@ jest.mock('@aws-sdk/client-dynamodb', () => ({
 }), { virtual: true });
 
 jest.mock('@aws-sdk/lib-dynamodb', () => ({
-  DynamoDBDocumentClient: { from: () => ({ send: jest.fn().mockResolvedValue({}) }) },
+  DynamoDBDocumentClient: { from: () => ({ send: (...args: unknown[]) => mockDdbSend(...args) }) },
   UpdateCommand: jest.fn(),
 }), { virtual: true });
 
@@ -73,6 +74,8 @@ beforeEach(() => {
   jest.useFakeTimers();
   binds.length = 0;
   logged.length = 0;
+  mockDdbSend.mockReset();
+  mockDdbSend.mockResolvedValue({});
   for (const level of ['log', 'warn', 'error'] as const) {
     jest.spyOn(console, level).mockImplementation((...args: unknown[]) => {
       logged.push(args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' '));
@@ -164,6 +167,20 @@ describe('ldap-auth input validation', () => {
       expect(line).not.toContain(PASSWORD);
       expect(line).not.toContain('wrong-password');
       expect(line).not.toContain('EXAMPLE\\');
+    }
+  });
+
+  test('no log line carries the sign-in username', async () => {
+    const username = 'jdoe-signin';
+    // Successful sign-in, a failed user-record write, and a wrong password.
+    await handler(event({ username, password: PASSWORD }));
+    mockDdbSend.mockRejectedValueOnce(Object.assign(new Error('throttled'), { name: 'ThrottlingException' }));
+    await handler(event({ username, password: PASSWORD }));
+    await handler(event({ username, password: 'wrong-password' })); // pragma: allowlist secret
+    expect(logged.some((line) => line.includes('JIT user record upserted'))).toBe(true);
+    expect(logged.some((line) => line.includes('JIT user upsert failed'))).toBe(true);
+    for (const line of logged) {
+      expect(line).not.toContain(username);
     }
   });
 });
