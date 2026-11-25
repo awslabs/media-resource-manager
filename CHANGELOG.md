@@ -59,6 +59,15 @@ upgrade to that version; a version without it needs only a redeploy.
   a delete fails.
   ([#149](https://github.com/awslabs/media-resource-manager/pull/149),
   [#143](https://github.com/awslabs/media-resource-manager/issues/143))
+- Deleting FSx for Windows File Server storage or an FSx for ONTAP volume
+  that MRM created, from **Storage**, says that a final backup will be kept
+  until it's deleted. The delete dialog mentions it, and after the delete the
+  API response and the
+  **Storage** page give the file system or volume ID, its Region and the
+  commands to find and delete the backup. See
+  [Deleting Storage](docs/USER_GUIDE.md#deleting-storage).
+  ([#152](https://github.com/awslabs/media-resource-manager/pull/152),
+  [#118](https://github.com/awslabs/media-resource-manager/issues/118))
 
 ### Security
 

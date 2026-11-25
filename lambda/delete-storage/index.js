@@ -237,11 +237,11 @@ async function deleteStorageRecord(storageId) {
   }));
 }
 
-function deleted(storageId, message) {
+function deleted(storageId, message, finalBackup = null) {
   return {
     statusCode: 200,
     headers: corsHeaders,
-    body: JSON.stringify({ success: true, message, storageId })
+    body: JSON.stringify({ success: true, message, storageId, ...(finalBackup && { finalBackup }) })
   };
 }
 
@@ -282,6 +282,42 @@ async function cleanUpDataSync(storageId) {
       })
     };
   }
+}
+
+/**
+ * Deleting the stack of an FSx for Windows File Server file system, or of an
+ * FSx for ONTAP volume, leaves a final backup that FSx keeps (and bills) until
+ * someone deletes it. FSx takes the backup during the stack delete, after this
+ * Lambda has returned, so the response names the file system or volume and
+ * the commands to find and delete the backup instead of the backup's ID.
+ * Returns null for storage types without a final backup.
+ */
+function finalBackupNotice(storage, region) {
+  const kinds = {
+    'fsx-windows': { resourceType: 'file system', id: storage.fsxFileSystemId, pattern: /^fs-[0-9a-f]+$/, filter: 'file-system-id' },
+    'fsx-ontap': { resourceType: 'volume', id: storage.volumeId, pattern: /^fsvol-[0-9a-f]+$/, filter: 'volume-id' },
+  };
+  const kind = kinds[storage.type];
+  if (!kind) return null;
+  // The IDs go into commands an admin may paste, so only well-formed values are used.
+  const resourceId = typeof kind.id === 'string' && kind.pattern.test(kind.id) ? kind.id : null;
+  const validRegion = typeof region === 'string' && /^[a-z]{2}(-[a-z]+)+-\d+$/.test(region) ? region : null;
+  if (!resourceId || !validRegion) {
+    return {
+      resourceType: kind.resourceType,
+      message: `A final backup of the deleted ${kind.resourceType} will be kept until you delete it. ` +
+        'You can find it under Backups in the Amazon FSx console.',
+    };
+  }
+  return {
+    resourceType: kind.resourceType,
+    resourceId,
+    region: validRegion,
+    message: `A final backup of ${kind.resourceType} ${resourceId} in ${validRegion} will be kept until you delete it. ` +
+      'It appears when the deletion finishes.',
+    findCommand: `aws fsx describe-backups --region ${validRegion} --filters Name=${kind.filter},Values=${resourceId}`,
+    deleteCommand: `aws fsx delete-backup --region ${validRegion} --backup-id <backup-id>`,
+  };
 }
 
 exports.handler = async (event) => {
@@ -405,11 +441,15 @@ exports.handler = async (event) => {
       if (cleanupFailure) return cleanupFailure;
       
       // If stack exists in ROLLBACK_COMPLETE or DELETE_FAILED, try to delete it
+      let finalBackup = null;
       if (stackExists && (stackStatus === 'ROLLBACK_COMPLETE' || stackStatus === 'DELETE_FAILED')) {
         try {
           console.log(`Deleting rolled back/failed stack: ${stackName}`);
           await cfn.send(new DeleteStackCommand({ StackName: stackName }));
           console.log(`Stack deletion initiated for: ${stackName}`);
+          // A failed delete may have stopped after the file system or volume
+          // went; a rolled-back create has none.
+          if (stackStatus === 'DELETE_FAILED') finalBackup = finalBackupNotice(storage, storageRegion);
         } catch (error) {
           console.warn(`Could not delete stack ${stackName}: ${error.message}`);
           // Continue with DynamoDB deletion even if stack deletion fails
@@ -418,7 +458,7 @@ exports.handler = async (event) => {
       
       await deleteStorageRecord(storageId);
       console.log(`Deleted storage record: ${storageId}`);
-      return deleted(storageId, 'Storage deleted successfully');
+      return deleted(storageId, 'Storage deleted successfully', finalBackup);
     }
     
     // For active stacks, use Step Functions for proper deletion workflow
@@ -468,6 +508,7 @@ exports.handler = async (event) => {
     }));
     
     console.log(`Started deletion execution: ${executionName} for region: ${storageRegion}`);
+    const stackFinalBackup = finalBackupNotice(storage, storageRegion);
     
     return {
       statusCode: 200,
@@ -476,7 +517,8 @@ exports.handler = async (event) => {
         success: true,
         message: 'Storage deletion started',
         storageId,
-        status: 'deleting'
+        status: 'deleting',
+        ...(stackFinalBackup && { finalBackup: stackFinalBackup })
       })
     };
     
