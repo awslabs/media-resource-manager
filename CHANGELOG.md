@@ -12,6 +12,17 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Fixed
+
+- On Windows, `scripts/analyze-vpc.ps1` checks `PrivateSubnetIds`,
+  `PublicSubnetIds` and `AvailabilityZones` when `PrivateSubnetIds` is set in
+  `parameters.json`, and keeps them, as `scripts/analyze-vpc.sh` does: each
+  subnet must be in the VPC, one per AZ, in the order of `AvailabilityZones`.
+  It stops without changing `parameters.json` when the subnets differ from
+  the ones the install is deployed on, or are in a different order, since
+  that would replace the Managed AD directory.
+  ([#144](https://github.com/awslabs/media-resource-manager/issues/144))
+
 ## [1.6.0] - 2026-11-25
 
 Fixes for SMB storage on Windows workstations, the `ResourceAdmin` password
