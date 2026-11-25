@@ -98,6 +98,10 @@ if ($vpcId) {
         }
     } else {
         Write-Ok "VPC subnet configuration already present in parameters.json"
+        # Still check the saved private subnets' outbound access (warning only)
+        if (Test-Path "scripts/analyze-vpc.ps1") {
+            & "scripts/analyze-vpc.ps1" -CheckEgress
+        }
     }
 }
 

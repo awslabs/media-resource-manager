@@ -88,6 +88,8 @@ interface RunOptions {
   routeTables?: object[];
   /** Make describe-route-tables for the whole VPC fail. */
   failRouteTables?: boolean;
+  /** Arguments to the script, e.g. --check-egress. */
+  args?: string[];
   stackStatus?: string;
   /** Values of /<PascalName>/Network/<key> in SSM, i.e. the subnets the install is deployed on. */
   deployed?: { PrivateSubnetIds?: string; PublicSubnetIds?: string };
@@ -134,7 +136,7 @@ function run(opts: RunOptions): RunResult {
   const env: NodeJS.ProcessEnv = { ...process.env, PATH: `${stubDir}:${process.env.PATH}`, STUB_DIR: stubDir };
   delete env.ACRONYM;
   delete env.PASCAL_CASE;
-  const result = spawnSync('bash', [SCRIPT], { cwd: workDir, env, input: '', encoding: 'utf8', timeout: 60000 });
+  const result = spawnSync('bash', [SCRIPT, ...(opts.args ?? [])], { cwd: workDir, env, input: '', encoding: 'utf8', timeout: 60000 });
 
   const saved = JSON.parse(fs.readFileSync(path.join(workDir, 'parameters.json'), 'utf8')) as { ParameterKey: string; ParameterValue: string }[];
   return {
@@ -293,6 +295,12 @@ describe('analyze-vpc.sh private subnet egress check', () => {
     { name: 'a NAT gateway', routes: defaultRoute({ NatGatewayId: 'nat-0b', State: 'active' }), shown: /subnet-0b02 \(us-east-1b\): route table rtb-0b02 -> NAT gateway nat-0b/ },
     { name: 'a transit gateway', routes: defaultRoute({ TransitGatewayId: 'tgw-0abc', State: 'active' }), shown: /-> transit gateway tgw-0abc/ },
     { name: 'a NAT instance', routes: defaultRoute({ InstanceId: 'i-abcnat', NetworkInterfaceId: 'eni-abcnat', State: 'active' }), shown: /-> instance i-abcnat/ },
+    { name: 'a firewall or Gateway Load Balancer endpoint', routes: defaultRoute({ GatewayId: 'vpce-0abc', State: 'active' }), shown: /-> VPC endpoint vpce-0abc/ },
+    {
+      name: 'a Cloud WAN core network',
+      routes: defaultRoute({ CoreNetworkArn: 'arn:aws:networkmanager::123456789012:core-network/core-network-0abc', State: 'active' }),
+      shown: /-> Cloud WAN core network arn:aws:networkmanager::123456789012:core-network\/core-network-0abc/,
+    },
   ])('accepts a private subnet whose default route goes to $name', ({ routes, shown }) => {
     const r = run({ params: EXPLICIT, routeTables: withTable('rtb-0b02', { Routes: routes }) });
     expect(r.status).toBe(0);
@@ -305,13 +313,14 @@ describe('analyze-vpc.sh private subnet egress check', () => {
     { name: 'a blackholed NAT gateway', routes: defaultRoute({ NatGatewayId: 'nat-0gone', State: 'blackhole' }), shown: 'NAT gateway nat-0gone (blackhole)' },
     { name: 'only an internet gateway', routes: defaultRoute({ GatewayId: 'igw-0abc', State: 'active' }), shown: 'internet gateway igw-0abc' },
     { name: 'VPC peering', routes: defaultRoute({ VpcPeeringConnectionId: 'pcx-0abc', State: 'active' }), shown: 'VPC peering pcx-0abc' },
+    { name: 'a blackholed firewall endpoint', routes: defaultRoute({ GatewayId: 'vpce-0abc', State: 'blackhole' }), shown: 'VPC endpoint vpce-0abc (blackhole)' },
   ])('stops on explicit subnets when one has $name and leaves parameters.json alone', ({ routes, shown }) => {
     const r = run({ params: EXPLICIT, routeTables: withTable('rtb-0b02', { Routes: routes }) });
     expect(r.status).toBe(1);
     expect(r.output).toContain(`subnet-0b02 (us-east-1b): route table rtb-0b02 -> ${shown}`);
     expect(r.output).toMatch(/subnet-0a02 \(us-east-1a\): route table rtb-0a02 -> NAT gateway nat-0a/);
     expect(r.output).toMatch(/A private subnet has no outbound internet access/);
-    expect(r.output).toMatch(/0\.0\.0\.0\/0 route to a NAT gateway, NAT instance or transit gateway/);
+    expect(r.output).toMatch(/0\.0\.0\.0\/0 route to a NAT gateway, NAT instance, transit gateway, firewall/);
     expect(r.params).toEqual(EXPLICIT);
   });
 
@@ -346,5 +355,46 @@ describe('analyze-vpc.sh private subnet egress check', () => {
     expect(r.status).toBe(1);
     expect(r.output).toMatch(/Could not read the route tables of VPC vpc-0abc1234def567890/);
     expect(r.params).toEqual(EXPLICIT);
+  });
+});
+
+// deploy.sh runs --check-egress when the subnets are already saved: the same
+// check on the deployed subnets, as a warning that never stops the build.
+describe('analyze-vpc.sh --check-egress', () => {
+  const SAVED = { VpcId: VPC_ID, PrivateSubnetIds: 'subnet-0a02,subnet-0b02', PrivateRouteTableIds: 'rtb-0a02,rtb-0b02' };
+
+  test('warns about a saved private subnet without outbound access and exits 0', () => {
+    const r = run({
+      params: SAVED,
+      args: ['--check-egress'],
+      routeTables: withTable('rtb-0b02', { Routes: [{ DestinationCidrBlock: '10.0.0.0/16', GatewayId: 'local' }] }),
+    });
+    expect(r.status).toBe(0);
+    expect(r.output).toContain('WARNING: subnet-0b02 (us-east-1b): route table rtb-0b02 -> no default route');
+    expect(r.output).toMatch(/a private subnet this install is deployed on has no outbound internet access/);
+    expect(r.output).toMatch(/The deployment continues/);
+    expect(r.output).not.toMatch(/❌/);
+    expect(r.params).toEqual(SAVED);
+    expect(r.calls.split('\n').filter(Boolean).every(c => /^aws (ec2 describe-|configure get)/.test(c))).toBe(true);
+  });
+
+  test('lists saved private subnets with outbound access', () => {
+    const r = run({ params: SAVED, args: ['--check-egress'] });
+    expect(r.status).toBe(0);
+    expect(r.output).toMatch(/subnet-0a02 \(us-east-1a\): route table rtb-0a02 -> NAT gateway nat-0a/);
+    expect(r.output).not.toMatch(/WARNING/);
+    expect(r.params).toEqual(SAVED);
+  });
+
+  test('warns and exits 0 when it cannot read the route tables', () => {
+    const r = run({ params: SAVED, args: ['--check-egress'], failRouteTables: true });
+    expect(r.status).toBe(0);
+    expect(r.output).toMatch(/Could not read the route tables of VPC vpc-0abc1234def567890 to check the private subnets/);
+  });
+
+  test('does nothing without saved private subnets', () => {
+    const r = run({ params: { VpcId: VPC_ID }, args: ['--check-egress'] });
+    expect(r.status).toBe(0);
+    expect(r.calls).toBe('');
   });
 });

@@ -133,6 +133,10 @@ if [[ -n "$VPC_ID" ]]; then
         fi
     else
         print_success "VPC subnet configuration already present in parameters.json"
+        # Still check the saved private subnets' outbound access (warning only)
+        if [[ -f "scripts/analyze-vpc.sh" ]]; then
+            bash scripts/analyze-vpc.sh --check-egress
+        fi
     fi
 fi
 

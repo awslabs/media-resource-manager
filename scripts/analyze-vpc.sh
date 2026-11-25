@@ -11,6 +11,10 @@
 #   - Several per AZ, no terminal (CodeBuild): exit 3 on a fresh install with
 #     the candidate subnets; on an existing install, warn and keep the VPC
 #     lookup it was deployed with.
+#   - Every mode that saves subnets first checks that each private subnet has
+#     outbound internet access, and exits 1 if one does not.
+#   - --check-egress: only that check, on the saved PrivateSubnetIds, as a
+#     warning (always exit 0). deploy.sh runs it when the subnets are saved.
 #
 # Exit codes: 0 = done, 1 = error, 3 = subnet selection needed but no terminal.
 
@@ -83,19 +87,24 @@ function describeRoute(r) {
     if (r.TransitGatewayId) return "transit gateway " + r.TransitGatewayId + state;
     if (r.InstanceId) return "instance " + r.InstanceId + state;
     if (r.NetworkInterfaceId) return "network interface " + r.NetworkInterfaceId + state;
+    if (r.CoreNetworkArn) return "Cloud WAN core network " + r.CoreNetworkArn + state;
     if (r.VpcPeeringConnectionId) return "VPC peering " + r.VpcPeeringConnectionId + state;
     if (r.GatewayId && r.GatewayId.startsWith("igw-")) return "internet gateway " + r.GatewayId + state;
+    if (r.GatewayId && r.GatewayId.startsWith("vpce-")) return "VPC endpoint " + r.GatewayId + state;
     if (r.GatewayId) return "gateway " + r.GatewayId + state;
     return "other" + state;
 }
-// "ok": an active route to a NAT gateway, transit gateway, NAT instance or
-// network interface. "unknown": another target that may reach the internet
-// (virtual private gateway, Gateway Load Balancer or firewall endpoint, Cloud
-// WAN). "none": no route, a blackhole, an internet gateway (private subnets
-// have no public IPs) or VPC peering (peering does not carry internet traffic).
+// "ok": an active route to a NAT gateway, transit gateway, NAT instance,
+// network interface, VPC endpoint (Gateway Load Balancer or AWS Network
+// Firewall; describe-route-tables reports it as a vpce- GatewayId) or Cloud
+// WAN core network. "unknown": another target that may reach the internet
+// (such as a virtual private gateway). "none": no route, a blackhole, an
+// internet gateway (private subnets have no public IPs) or VPC peering
+// (peering does not carry internet traffic).
 function egressOf(r) {
     if (!r || r.State === "blackhole") return "none";
-    if (r.NatGatewayId || r.TransitGatewayId || r.InstanceId || r.NetworkInterfaceId) return "ok";
+    if (r.NatGatewayId || r.TransitGatewayId || r.InstanceId || r.NetworkInterfaceId || r.CoreNetworkArn) return "ok";
+    if (r.GatewayId && r.GatewayId.startsWith("vpce-")) return "ok";
     if (r.VpcPeeringConnectionId || (r.GatewayId && r.GatewayId.startsWith("igw-"))) return "none";
     return "unknown";
 }
@@ -404,29 +413,37 @@ selectSubnets().catch(console.error);
 "
 }
 
-# Check that each selected private subnet has outbound internet access.
+# Check that each private subnet has outbound internet access.
 # Workstations and the DCV Connection Gateway download software at boot; one
 # launched in a subnet without a NAT route never becomes ready. The ASGs span
 # every private subnet, so one isolated subnet is enough to break them.
+#   $1 VPC ID, $2 comma-separated private subnet IDs,
+#   $3 "fail" (default: an isolated subnet returns 1) or "warn" (print a
+#      warning and return 0, for subnets an install is already deployed on).
+# Read-only: describe-route-tables and describe-subnets.
 check_private_egress() {
-    local vpc_id=$1
+    local vpc_id=$1 private_ids=$2 mode=${3:-fail}
     local tables subnets
     print_status "🔍 Checking outbound internet access of the private subnets..."
     tables=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$vpc_id" --query 'RouteTables' --output json 2>&1)
     if [[ $? -ne 0 ]]; then
+        if [[ "$mode" == warn ]]; then
+            print_warning "Could not read the route tables of VPC $vpc_id to check the private subnets: $tables"
+            return 0
+        fi
         print_error "Could not read the route tables of VPC $vpc_id: $tables"
         return 1
     fi
     subnets=$(describe_vpc_subnets "$vpc_id")
 
-    echo "$tables" | SUBNETS="$subnets" node -e "
+    echo "$tables" | SUBNETS="$subnets" PRIVATE_IDS="$private_ids" EGRESS_MODE="$mode" node -e "
 const fs = require('fs');
 const tables = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8') || '[]');
 ${ROUTE_JS}
 const azOf = new Map(JSON.parse(process.env.SUBNETS || '[]').map(s => [s.SubnetId, s.AZ]));
-const { privateSubnetIds } = JSON.parse(fs.readFileSync(process.env.SELECTION_FILE, 'utf8'));
+const warnOnly = process.env.EGRESS_MODE === 'warn';
 let failed = false;
-for (const id of privateSubnetIds) {
+for (const id of process.env.PRIVATE_IDS.split(',').map(s => s.trim()).filter(Boolean)) {
     const t = tableFor(id);
     const r = defaultRouteOf(t);
     const where = id + ' (' + (azOf.get(id) || 'unknown AZ') + ')';
@@ -436,6 +453,9 @@ for (const id of privateSubnetIds) {
         console.log('  ✅ ' + where + ': ' + table + ' -> ' + describeRoute(r));
     } else if (egress === 'unknown') {
         console.log('  ⚠️  ' + where + ': ' + table + ' -> ' + describeRoute(r) + '. Check that this target gives outbound internet access.');
+    } else if (warnOnly) {
+        console.log('  ⚠️  WARNING: ' + where + ': ' + table + ' -> ' + describeRoute(r));
+        failed = true;
     } else {
         console.error('  ❌ ' + where + ': ' + table + ' -> ' + describeRoute(r));
         failed = true;
@@ -443,17 +463,25 @@ for (const id of privateSubnetIds) {
 }
 process.exit(failed ? 1 : 0);
 "
-    if [[ $? -ne 0 ]]; then
-        print_error "A private subnet has no outbound internet access (see above)."
-        echo "  Private subnets need a 0.0.0.0/0 route to a NAT gateway, NAT instance or transit gateway that is"
-        echo "  not a blackhole. Workstations and the DCV Connection Gateway launched in such a subnet cannot"
-        echo "  download their software and never become ready."
-        echo "  Add that route to the route table shown, or set PrivateSubnetIds to a private subnet with one in"
-        echo "  that AZ. On an install that is already deployed, add the route: changing PrivateSubnetIds"
-        echo "  replaces the Managed AD directory."
-        return 1
+    [[ $? -eq 0 ]] && return 0
+
+    if [[ "$mode" == warn ]]; then
+        print_warning "WARNING: a private subnet this install is deployed on has no outbound internet access (see above)."
+        echo "  Workstations and the DCV Connection Gateway launched in it cannot download their software and"
+        echo "  never become ready. Add a 0.0.0.0/0 route to a NAT gateway, NAT instance, transit gateway,"
+        echo "  firewall endpoint or Cloud WAN core network (not a blackhole) to the route table shown."
+        echo "  Don't change PrivateSubnetIds instead: that replaces the Managed AD directory."
+        echo "  The deployment continues."
+        return 0
     fi
-    return 0
+    print_error "A private subnet has no outbound internet access (see above)."
+    echo "  Private subnets need a 0.0.0.0/0 route to a NAT gateway, NAT instance, transit gateway, firewall"
+    echo "  endpoint or Cloud WAN core network that is not a blackhole. Workstations and the DCV Connection"
+    echo "  Gateway launched in such a subnet cannot download their software and never become ready."
+    echo "  Add that route to the route table shown, or set PrivateSubnetIds to a private subnet with one in"
+    echo "  that AZ. On an install that is already deployed, add the route: changing PrivateSubnetIds"
+    echo "  replaces the Managed AD directory."
+    return 1
 }
 
 # Update parameters.json with selected subnets
@@ -467,9 +495,9 @@ update_parameters() {
 
     # Every path (explicit, one per AZ, prompted) saves its subnets here, so
     # check their outbound access before writing anything.
-    check_private_egress "$vpc_id" || return 1
-
     local private_ids=$(node -p "JSON.parse(require('fs').readFileSync(process.env.SELECTION_FILE)).privateSubnetIds.join(',')")
+    check_private_egress "$vpc_id" "$private_ids" || return 1
+
     local public_ids=$(node -p "JSON.parse(require('fs').readFileSync(process.env.SELECTION_FILE)).publicSubnetIds.join(',')")
     local azs=$(node -p "JSON.parse(require('fs').readFileSync(process.env.SELECTION_FILE)).availabilityZones.join(',')")
     
@@ -668,6 +696,14 @@ main() {
     
     if [[ -z "$vpc_id" ]]; then
         print_warning "No VPC ID found in parameters.json - will create new VPC"
+        exit 0
+    fi
+
+    # --check-egress: deploy.sh skips the analyzer when the subnets are already
+    # saved, and runs only this. Warn, never fail: the install is deployed on them.
+    if [[ "$1" == "--check-egress" ]]; then
+        local saved=$(get_param PrivateSubnetIds)
+        [[ -n "$saved" ]] && check_private_egress "$vpc_id" "$saved" warn
         exit 0
     fi
 
