@@ -24,6 +24,20 @@ upgrade to that version; a version without it needs only a redeploy.
   and NTFS permissions on each FSx for Windows file share. See
   [#130](https://github.com/awslabs/media-resource-manager/issues/130) for
   how to grant them.
+- With an existing VPC, check before you upgrade that each subnet in
+  `PrivateSubnetIds` has a `0.0.0.0/0` route to a NAT gateway, NAT instance,
+  transit gateway, firewall endpoint or Cloud WAN core network (see the VPC
+  analyzer fix below,
+  [#135](https://github.com/awslabs/media-resource-manager/pull/135)). An
+  install whose subnets are already saved in `PrivateSubnetIds` and
+  `PrivateRouteTableIds` gets a warning in the build log for a subnet without
+  that route, and the upgrade continues. The check stops the deployment when
+  the analyzer picks or validates the subnets: on a first deploy, when
+  `PrivateSubnetIds` changes, and on every deploy of an install that has no
+  `PrivateRouteTableIds` saved (its private subnets use the VPC main route
+  table) or no `PrivateSubnetIds` and one private subnet per AZ. Add the
+  missing route to fix either case; changing `PrivateSubnetIds` on a
+  deployed install replaces the Managed AD directory.
 
 ### Added
 
@@ -127,6 +141,33 @@ upgrade to that version; a version without it needs only a redeploy.
   that was already gone failed the cleanup step and left the stack in
   `DELETE_FAILED`.
   ([#137](https://github.com/awslabs/media-resource-manager/pull/137))
+- With an existing VPC (`VpcId`), the VPC analyzer checks that each private
+  subnet has outbound internet access. `scripts/analyze-vpc.sh` (and
+  `scripts/analyze-vpc.ps1`) looks at the subnet's route table, or the VPC
+  main route table when the subnet has none of its own, for a `0.0.0.0/0`
+  route that is not a blackhole to a NAT gateway, transit gateway, NAT
+  instance, network interface, VPC endpoint (AWS Network Firewall or Gateway
+  Load Balancer) or Cloud WAN core network. An internet gateway, VPC peering
+  or no default route fails the check. The DCV Connection Gateway and
+  workstations can launch in any private subnet, and an instance in a subnet
+  without that route could not download its software and never became
+  ready. The check runs in two modes:
+  - When the analyzer picks or validates the subnets (given in
+    `PrivateSubnetIds`, one per AZ, or chosen at the prompt), a failed check
+    stops the deployment and leaves `parameters.json` unchanged.
+  - When the subnets are already saved and `deploy.sh` (or `deploy.ps1`)
+    skips the analyzer, it runs only this check
+    (`scripts/analyze-vpc.sh --check-egress`), prints a warning and continues.
+
+  Both name the subnet, its AZ, the route table and the route that is
+  needed. A default route the analyzer cannot verify, such as a virtual
+  private gateway, gets a warning.
+  ([#135](https://github.com/awslabs/media-resource-manager/pull/135))
+- On Windows, `scripts/analyze-vpc.ps1` analyzes an existing VPC's subnets
+  and NACLs. Its subnet and NACL checks read the VPC data they are given
+  (they failed with `SyntaxError: ... is not valid JSON`), and the analyzer
+  stops `deploy.ps1` with an error when a step fails instead of exiting 0.
+  ([#135](https://github.com/awslabs/media-resource-manager/pull/135))
 
 ### Removed
 
