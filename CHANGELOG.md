@@ -12,6 +12,76 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Upgrade steps
+
+- No action needed for the `ResourceAdmin` password fix below. With
+  `AdMode=managed`, the first deploy of this version sets the `ResourceAdmin`
+  password to the value stored in its Secrets Manager secret. The value does
+  not change, so nothing that uses the secret needs updating.
+- With AD sign-in (`useCognitoAuth=false`), domain-joined Windows workstations
+  mount FSx for Windows storage with the signed-in user's AD identity. Before
+  you upgrade, check that the users, or an AD group they belong to, have share
+  and NTFS permissions on each FSx for Windows file share. See
+  [#130](https://github.com/awslabs/media-resource-manager/issues/130) for
+  how to grant them.
+
+### Added
+
+- [Upgrading](docs/UPGRADING.md), a step-by-step guide to upgrading an
+  installation to a new release: the pipeline template from the release tag,
+  a change set preview, the build, regional hub updates, checks and rollback.
+  The README's upgrade notes moved there, and the user guide now says when a
+  regional hub **Update** replaces the hub's DCV Connection Gateway.
+  ([#126](https://github.com/awslabs/media-resource-manager/pull/126))
+
+### Fixed
+
+- Windows workstation records store the **Join Domain** setting
+  (`joinDomain`). The FSx SMB mount manager and the workstation start
+  workflow use it to choose integrated authentication and the domain-joined
+  start path. For records created by earlier versions, the mount manager
+  reads the instance's computer name from SSM and stores the answer;
+  otherwise both use the console's Join Domain default for the deployment's
+  sign-in mode.
+  ([#123](https://github.com/awslabs/media-resource-manager/pull/123))
+- With `AdMode=managed`, MRM keeps the `ResourceAdmin` password from
+  expiring. AWS Managed Microsoft AD expires passwords after the directory's
+  maximum password age (42 days by default), and an expired `ResourceAdmin`
+  password stopped FSx for Windows File Server storage creation,
+  `ResourceAdmin` sign-in, SMB mounts and DataSync SMB locations. MRM now sets
+  the password to its stored value on the first deploy of this version and
+  every 30 days after that, through the AWS Directory Service API. A failed
+  scheduled reset raises the
+  `<Acronym>-ResourceAdmin-Password-Refresh-Failed` CloudWatch alarm, and a
+  failed reset during deployment fails the deployment.
+  ([#128](https://github.com/awslabs/media-resource-manager/issues/128))
+- On standalone Windows workstations, attaching storage a few seconds after
+  detaching it mounts the drive. The mount manager waits until the
+  workstation's previous SMB mount secret is fully removed before it writes
+  the new one, and if it can't write the secret it reports an error instead
+  of sending a logon script without credentials. On Windows workstations, a
+  mount requested while the previous one is still running now runs after it
+  instead of being skipped, so attaching and then detaching quickly ends
+  with the drive removed, and a Run Command that can't start the mount
+  reports a failure. If storage is attached or detached again while the
+  mount manager is still preparing a workstation's script, it starts over
+  from the current setting instead of sending the older script. The mount
+  log on the workstation (`C:\Windows\Temp\fsx-mount-log.txt`) shows the
+  time of each step and how long the credential read took, and says
+  "completed with errors" when a mount failed. The logon script reads its
+  credentials with a signed Secrets Manager request using the workstation's
+  instance role, which takes under a second instead of the minute or more it
+  took to load AWS Tools for PowerShell, and runs at normal priority. The
+  workstation needs a route to Secrets Manager in its own Region (a NAT
+  gateway or a Secrets Manager interface endpoint with private DNS), as the
+  existing credential reads do.
+  ([#131](https://github.com/awslabs/media-resource-manager/pull/131))
+- The web console loads the new release on the next page load after an
+  upgrade, without a hard refresh. `index.html` and `config.json` are served
+  with `Cache-Control: no-cache`, and the hashed bundles under `assets/` with
+  a one-year immutable `Cache-Control`.
+  ([#124](https://github.com/awslabs/media-resource-manager/pull/124))
+
 ### Removed
 
 - The unused `GET /auth/validate` route and its `validate-jwt` Lambda.

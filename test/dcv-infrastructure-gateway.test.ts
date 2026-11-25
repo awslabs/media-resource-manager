@@ -393,3 +393,28 @@ describe('vpc-cidr-prefix-list', () => {
     expect(none.calls).toEqual([]);
   });
 });
+
+describe('workstation instance role and SMB mount secrets', () => {
+  const smbMountResource = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:/MediaResourceManager/Workstation/*/SmbMount-*';
+  let statements: any[];
+  beforeAll(() => {
+    const template = synth();
+    const roles = template.findResources('AWS::IAM::Role');
+    const [roleId] = Object.entries(roles).find(([id]) => id.startsWith('WorkstationInstanceRole'))!;
+    const policies = template.findResources('AWS::IAM::Policy');
+    statements = Object.values(policies)
+      .filter((p: any) => JSON.stringify(p.Properties.Roles).includes(`"${roleId}"`))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+  }, 120000);
+
+  test('can read only the per-workstation SMB mount secrets path, with GetSecretValue only', () => {
+    const smb = statements.filter(s => JSON.stringify(s.Resource).includes('SmbMount'));
+    expect(smb).toEqual([{ Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: smbMountResource }]);
+  });
+
+  test('has no read on the AD service-account or storage secrets', () => {
+    const text = JSON.stringify(statements);
+    expect(text).not.toContain('/Identity/');
+    expect(text).not.toContain('/Storage/');
+  });
+});

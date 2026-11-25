@@ -10,6 +10,9 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import * as kms from 'aws-cdk-lib/aws-kms';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import { Construct } from 'constructs';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -409,7 +412,9 @@ export class IdentityConstruct extends Construct {
         Username: 'ResourceAdmin',
         SecretArn: resourceAdminSecret.secretArn,
         IsAdmin: 'true',
-        Version: '10', // Force re-execution to create users with KMS fix
+        // '11': on the next deploy, Update sets ResourceAdmin's password to
+        // its stored value, which recovers a password that has already expired.
+        Version: '11',
       },
     });
 
@@ -422,6 +427,72 @@ export class IdentityConstruct extends Construct {
         IsAdmin: 'false',
         Version: '10', // Force re-execution to create users with KMS fix
       },
+    });
+
+    this.createResourceAdminPasswordRefresh(managedAd.ref, resourceAdminSecret, encryptionKey);
+  }
+
+  /**
+   * Managed-AD-only: every 30 days, set ResourceAdmin's password to its stored
+   * value. AWS Managed Microsoft AD expires passwords after the directory's
+   * maximum password age (42 days by default), and the Directory Service APIs
+   * cannot mark a password as never expiring. An administrative reset to the
+   * same value restarts the password age, and everything that reads the
+   * secret keeps working. A failed run raises, which shows in the function's
+   * Errors metric and the alarm below.
+   */
+  private createResourceAdminPasswordRefresh(
+    directoryId: string,
+    resourceAdminSecret: secretsmanager.Secret,
+    encryptionKey?: kms.IKey,
+  ) {
+    const stack = cdk.Stack.of(this);
+    const fn = new lambda.Function(this, 'ResourceAdminPasswordRefreshFunction', {
+      functionName: `${this.acronym.toLowerCase()}-resourceadmin-password-refresh`,
+      description: 'Sets the ResourceAdmin password to its stored value so the directory password age does not expire it',
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'index.scheduled_reset_handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../lambda/ad-user-manager')),
+      timeout: cdk.Duration.minutes(1),
+      reservedConcurrentExecutions: 1,
+      environmentEncryption: encryptionKey,
+      environment: {
+        DIRECTORY_ID: directoryId,
+        USERNAME: 'ResourceAdmin',
+        SECRET_ARN: resourceAdminSecret.secretArn, // pragma: allowlist secret
+      },
+    });
+
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ds:ResetUserPassword'],
+      resources: [`arn:aws:ds:${stack.region}:${stack.account}:directory/${directoryId}`],
+    }));
+    fn.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [resourceAdminSecret.secretArn],
+    }));
+    if (encryptionKey) {
+      // The secret and the function's environment use this key.
+      encryptionKey.grantDecrypt(fn);
+    }
+
+    new events.Rule(this, 'ResourceAdminPasswordRefreshSchedule', {
+      description: 'Every 30 days, inside the 42-day default maximum password age',
+      schedule: events.Schedule.rate(cdk.Duration.days(30)),
+      targets: [new targets.LambdaFunction(fn)],
+    });
+
+    new cloudwatch.Alarm(this, 'ResourceAdminPasswordRefreshAlarm', {
+      alarmName: `${this.acronym}-ResourceAdmin-Password-Refresh-Failed`,
+      alarmDescription: 'The scheduled ResourceAdmin password reset failed. Check the function logs; '
+        + 'if it keeps failing, ResourceAdmin sign-in and FSx for Windows storage stop working when the password expires.',
+      metric: fn.metricErrors({ period: cdk.Duration.days(1), statistic: 'Sum' }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
   }
 

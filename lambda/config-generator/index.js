@@ -150,7 +150,10 @@ exports.handler = async (event) => {
       Bucket: bucketName,
       Key: 'config.json',
       Body: JSON.stringify(config, null, 2),
-      ContentType: 'application/json'
+      ContentType: 'application/json',
+      // Browsers and CloudFront revalidate on every load, so a regenerated
+      // config (new deploy, new identity provider) is picked up at once.
+      CacheControl: 'no-cache'
     });
     
     await s3.send(command);

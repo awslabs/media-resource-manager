@@ -378,6 +378,7 @@ const workstationStartStack = new WorkstationStartStack(app, `${naming.acronym}-
   acronym: naming.acronym,
   workstationTableName: infrastructureStack.database.workstationTable.tableName,
   storageTableName: infrastructureStack.database.storageTable.tableName,
+  useCognitoAuth,
   progressTableName: `${naming.acronym.toLowerCase()}-progress`, // Created in WorkstationManagementStack
   checkDCVReadinessFunction: windowsWorkstationCreationStack.checkDCVReadinessFunction,
   checkInstanceStatusFunction: windowsWorkstationCreationStack.checkInstanceStatusFunction,
