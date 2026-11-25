@@ -240,16 +240,16 @@ function finalBackupNotice(storage, region) {
   if (!resourceId || !validRegion) {
     return {
       resourceType: kind.resourceType,
-      message: `FSx keeps a final backup of the deleted ${kind.resourceType} until you delete it, and bills it for its storage. ` +
-        'Find it under Backups in the Amazon FSx console.',
+      message: `A final backup of the deleted ${kind.resourceType} will be kept until you delete it. ` +
+        'You can find it under Backups in the Amazon FSx console.',
     };
   }
   return {
     resourceType: kind.resourceType,
     resourceId,
     region: validRegion,
-    message: `FSx keeps a final backup of ${kind.resourceType} ${resourceId} in ${validRegion} until you delete it, ` +
-      'and bills it for its storage. The backup appears when the deletion finishes.',
+    message: `A final backup of ${kind.resourceType} ${resourceId} in ${validRegion} will be kept until you delete it. ` +
+      'It appears when the deletion finishes.',
     findCommand: `aws fsx describe-backups --region ${validRegion} --filters Name=${kind.filter},Values=${resourceId}`,
     deleteCommand: `aws fsx delete-backup --region ${validRegion} --backup-id <backup-id>`,
   };

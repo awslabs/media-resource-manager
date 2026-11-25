@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * DELETE /storage/{storageId} tells the admin when FSx keeps a final backup
+ * DELETE /storage/{storageId} tells the admin when a final backup will be kept
  * (FSx for Windows file systems and FSx for ONTAP volumes), with the file
  * system or volume ID, the Region and the commands to find and delete it.
  */
@@ -112,7 +112,7 @@ describe('delete-storage final backup notice', () => {
       resourceType: 'file system',
       resourceId: 'fs-0123456789abcdef0',
       region: 'us-west-2',
-      message: expect.stringContaining('final backup of file system fs-0123456789abcdef0 in us-west-2'),
+      message: expect.stringContaining('A final backup of file system fs-0123456789abcdef0 in us-west-2 will be kept'),
       findCommand: 'aws fsx describe-backups --region us-west-2 --filters Name=file-system-id,Values=fs-0123456789abcdef0',
       deleteCommand: 'aws fsx delete-backup --region us-west-2 --backup-id <backup-id>',
     });
@@ -132,7 +132,7 @@ describe('delete-storage final backup notice', () => {
   test('a record without a usable ID gets the notice without commands', async () => {
     mockStorage = { storageId: 'st-1', type: 'fsx-windows', status: 'available', cloudFormationStackName: 'MRM-Storage-st-1', region: 'us-east-1', fsxFileSystemId: 'fs-1; echo hi' };
     const { body } = await del();
-    expect(body.finalBackup.message).toContain('final backup of the deleted file system');
+    expect(body.finalBackup.message).toContain('A final backup of the deleted file system will be kept');
     expect(body.finalBackup.findCommand).toBeUndefined();
     expect(body.finalBackup.resourceId).toBeUndefined();
   });

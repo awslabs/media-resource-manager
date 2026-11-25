@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 /**
- * Deleting storage from the Filesystems page: when the API says FSx keeps a
- * final backup, the page shows it with the file system or volume ID, the
+ * Deleting storage from the Filesystems page: when the API says a final
+ * backup will be kept, the page shows it (as information, not a warning) with
+ * the file system or volume ID, the
  * Region and the commands to find and delete the backup. The API, the layout
  * and the Actions dropdown are mocked; the page, its table and modal are real.
  */
@@ -17,7 +18,7 @@ const FINAL_BACKUP = {
   resourceType: 'file system',
   resourceId: 'fs-0123456789abcdef0',
   region: 'us-west-2',
-  message: 'FSx keeps a final backup of file system fs-0123456789abcdef0 in us-west-2 until you delete it, and bills it for its storage. The backup appears when the deletion finishes.',
+  message: 'A final backup of file system fs-0123456789abcdef0 in us-west-2 will be kept until you delete it. It appears when the deletion finishes.',
   findCommand: 'aws fsx describe-backups --region us-west-2 --filters Name=file-system-id,Values=fs-0123456789abcdef0',
   deleteCommand: 'aws fsx delete-backup --region us-west-2 --backup-id <backup-id>',
 };
@@ -96,7 +97,7 @@ async function deleteFirstRow() {
   await act(async () => { deleteItem.click(); });
   await flush();
   const dialog = document.querySelector('.ant-modal') as HTMLElement;
-  expect(dialog.textContent).toContain('FSx keeps a final backup of each deleted FSx for Windows file system');
+  expect(dialog.querySelector('[data-testid="final-backup-note"]')?.textContent).toContain('A final backup will be kept');
   const ok = Array.from(document.querySelectorAll('.ant-modal-footer button')).find((b) => b.textContent?.trim() === 'Delete') as HTMLButtonElement;
   await act(async () => { ok.click(); });
   await flush();
@@ -108,6 +109,8 @@ describe('FilesystemsAntd storage delete', () => {
     await deleteFirstRow();
     const details = document.querySelector('[data-testid="final-backup-details"]') as HTMLElement;
     expect(details).toBeTruthy();
+    // Information, not a warning
+    expect(details.closest('.ant-alert')?.classList.contains('ant-alert-info')).toBe(true);
     expect(details.textContent).toContain(FINAL_BACKUP.message);
     expect(details.textContent).toContain(FINAL_BACKUP.findCommand);
     expect(details.textContent).toContain(FINAL_BACKUP.deleteCommand);

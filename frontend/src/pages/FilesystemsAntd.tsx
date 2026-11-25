@@ -350,7 +350,7 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
       const started = `Deletion started for ${selectedResources.length} resource(s). This may take 5-10 minutes.`;
       setAlert(
         finalBackups.length
-          ? { type: 'warning', message: started, description: <FinalBackupDetails notices={finalBackups} /> }
+          ? { type: 'info', message: started, description: <FinalBackupDetails notices={finalBackups} /> }
           : { type: 'info', message: started }
       );
       setShowDeleteModal(false);
@@ -1140,13 +1140,14 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
           <Alert
             type="warning"
             message="This will delete the storage resources and their associated AWS resources. This action cannot be undone."
-            description={
-              selectedResources.some((r) => r.type === 'fsx-windows' || r.type === 'fsx-ontap')
-                ? 'FSx keeps a final backup of each deleted FSx for Windows file system and FSx for ONTAP volume, and bills it for its storage until you delete it.'
-                : undefined
-            }
             style={{ marginBottom: 16 }}
           />
+          {selectedResources.some((r) => r.type === 'fsx-windows' || r.type === 'fsx-ontap') && (
+            <p data-testid="final-backup-note">
+              A final backup will be kept of each FSx for Windows file system and FSx for ONTAP volume you delete,
+              until you delete the backup.
+            </p>
+          )}
           <p>Are you sure you want to delete {selectedResources.length} storage resource(s)?</p>
           <ul>
             {selectedResources.map((r) => (
