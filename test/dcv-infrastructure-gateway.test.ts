@@ -78,8 +78,22 @@ describe('primary gateway (default: CloudFront browser path)', () => {
     const asgs = template.findResources('AWS::AutoScaling::AutoScalingGroup');
     const [, asg] = Object.entries(asgs).find(([id]) => id.startsWith('ConnectionGatewayAsg'))!;
     expect((asg as any).UpdatePolicy.AutoScalingRollingUpdate).toEqual(expect.objectContaining({
-      MaxBatchSize: 1, MinInstancesInService: 1,
+      MaxBatchSize: 1, MinInstancesInService: 1, PauseTime: 'PT5M',
     }));
+  });
+
+  it('replaces a gateway that fails its target group health checks, after a 900 s grace period', () => {
+    const asgs = template.findResources('AWS::AutoScaling::AutoScalingGroup');
+    const [, asg] = Object.entries(asgs).find(([id]) => id.startsWith('ConnectionGatewayAsg'))!;
+    const props = (asg as any).Properties;
+    expect(props.HealthCheckType).toBe('ELB');
+    expect(props.HealthCheckGracePeriod).toBe(900);
+    // NLB TCP 8443, NLB UDP 8444 and the browser ALB HTTPS 8443 target groups.
+    const tgIds = props.TargetGroupARNs.map((ref: any) => ref.Ref).sort();
+    expect(tgIds).toHaveLength(3);
+    expect(tgIds[0]).toMatch(/^ConnectionGatewayTargetGroup/);
+    expect(tgIds[1]).toMatch(/^ConnectionGatewayUdpTargetGroup/);
+    expect(tgIds[2]).toMatch(/^GatewayBrowserTargetGroup/);
   });
 
   const vpcCidrsPrefixList = { 'Fn::GetAtt': ['VpcCidrPrefixList', 'PrefixListId'] };
