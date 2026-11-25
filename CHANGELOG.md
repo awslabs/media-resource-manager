@@ -36,8 +36,10 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ### Changed
 
-- `scripts/create-multipart-upload.py` takes the target bucket as a required
-  argument: `python3 scripts/create-multipart-upload.py <bucket>`.
+- `scripts/create-multipart-upload.py` takes the target bucket, object key
+  and file size as required arguments, and the part size as an option
+  (default 500 MB):
+  `python3 scripts/create-multipart-upload.py <bucket> <key> <file_size_bytes> [--part-size MB]`.
   ([#134](https://github.com/awslabs/media-resource-manager/pull/134))
 
 ### Fixed
