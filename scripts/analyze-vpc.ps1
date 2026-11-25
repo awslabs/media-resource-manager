@@ -21,6 +21,24 @@ function Get-VpcId {
     node -p "JSON.parse(require('fs').readFileSync('parameters.json')).find(p => p.ParameterKey === 'VpcId')?.ParameterValue || ''" 2>$null
 }
 
+# A parameters.json value with whitespace removed, as get_param in analyze-vpc.sh
+function Get-Param {
+    param([string]$Key)
+    if (-not (Test-Path "parameters.json")) { return "" }
+    $env:MRM_PARAM_KEY = $Key
+    $value = node -p "(JSON.parse(require('fs').readFileSync('parameters.json')).find(p => p.ParameterKey === process.env.MRM_PARAM_KEY)?.ParameterValue || '').replace(/\s+/g, '')" 2>$null
+    Remove-Item Env:MRM_PARAM_KEY -ErrorAction SilentlyContinue
+    return "$value"
+}
+
+# Product name without spaces or symbols, as in bin/media-resource-manager.ts
+function Get-PascalCase {
+    if ($env:PASCAL_CASE) { return $env:PASCAL_CASE }
+    $name = node -p "let n = 'Media Resource Manager'; try { n = (require('./cdk.json').context || {}).productName || n } catch (e) {} n.trim().replace(/\s+/g, '').replace(/[^a-zA-Z0-9]/g, '')" 2>$null
+    if (-not $name) { $name = "MediaResourceManager" }
+    return "$name"
+}
+
 function Get-CurrentRegion {
     $region = aws configure get region 2>$null
     if (-not $region) { $region = $env:AWS_REGION }
@@ -260,6 +278,134 @@ fs.writeFileSync('selected-subnets.json', JSON.stringify(result, null, 2));
 
     # Now update parameters.json
     Update-Parameters -VpcId $VpcId -VpcCidr $vpcCidr
+}
+
+# The subnet list the install is deployed on, from the
+# /<PascalName>/Network/<key> parameter that NetworkConstruct writes. Returns
+# "" when the parameter doesn't exist (not deployed yet), $null on a read error.
+function Get-DeployedSubnets {
+    param([string]$Key)
+    $region = Get-CurrentRegion
+    $name = "/$(Get-PascalCase)/Network/$Key"
+    $out = aws ssm get-parameter --name $name --query 'Parameter.Value' --output text --region $region 2>&1
+    $text = ($out | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        if ($text -match 'ParameterNotFound') { return "" }
+        Write-Err "Could not read $name to compare with the deployed subnets: $text"
+        return $null
+    }
+    return ($text -replace '\s', '')
+}
+
+# PrivateSubnetIds is set in parameters.json: validate PrivateSubnetIds,
+# PublicSubnetIds and AvailabilityZones without prompting, as
+# validate_explicit_subnets and check_deployed_subnets in analyze-vpc.sh do,
+# and write selected-subnets.json for Update-Parameters. Never reorders: CDK
+# places subnet i in AvailabilityZones[i]. Changing or reordering the subnets
+# of a deployed install replaces AWS Managed Microsoft AD (and with it every
+# domain join), the DNS resolver endpoint and the load balancers, so it stops
+# when they differ from the deployed ones.
+function Test-ExplicitSubnets {
+    param([string]$VpcId)
+
+    $region = Get-CurrentRegion
+    Write-Status "Checking the configured subnets against VPC $VpcId..."
+
+    $subnetsJson = aws ec2 describe-subnets `
+        --filters "Name=vpc-id,Values=$VpcId" `
+        --query 'Subnets[*].{SubnetId:SubnetId,AZ:AvailabilityZone,CidrBlock:CidrBlock,MapPublicIpOnLaunch:MapPublicIpOnLaunch,Name:Tags[?Key==`Name`].Value|[0]}' `
+        --output json --region $region 2>$null
+    if (-not $subnetsJson -or $subnetsJson -eq "[]") {
+        Write-Err "No subnets found in VPC $VpcId"
+        return $false
+    }
+
+    $deployedPrivate = Get-DeployedSubnets -Key "PrivateSubnetIds"
+    if ($null -eq $deployedPrivate) { return $false }
+    $deployedPublic = Get-DeployedSubnets -Key "PublicSubnetIds"
+    if ($null -eq $deployedPublic) { return $false }
+
+    $validateScript = @"
+const fs = require('fs');
+const env = process.env;
+const inVpc = new Map(JSON.parse(env.MRM_SUBNETS_JSON).map(s => [s.SubnetId, s]));
+const list = v => (v || '').split(',').map(s => s.trim()).filter(Boolean);
+const priv = list(env.MRM_SEL_PRIVATE);
+const pub = list(env.MRM_SEL_PUBLIC);
+let azs = list(env.MRM_SEL_AZS);
+const errors = [];
+const isSubnetId = id => { const m = /^subnet-[0-9a-f]+/.exec(id); return !!m && m[0] === id; };
+
+for (const id of [...priv, ...pub]) {
+    if (!isSubnetId(id)) errors.push(id + ' is not a subnet ID');
+    else if (!inVpc.has(id)) errors.push(id + ' is not in VPC ' + env.MRM_VPC_ID);
+}
+const all = [...priv, ...pub];
+const dups = all.filter((id, i) => all.indexOf(id) !== i);
+if (dups.length) errors.push('listed more than once: ' + [...new Set(dups)].join(','));
+
+if (!errors.length) {
+    const az = id => inVpc.get(id).AZ;
+    if (priv.length < 2) errors.push('PrivateSubnetIds needs one subnet per AZ in at least 2 AZs (got ' + priv.length + ')');
+    const privAzs = priv.map(az);
+    if (new Set(privAzs).size !== privAzs.length) errors.push('PrivateSubnetIds has more than one subnet in an AZ (' + priv.map(id => id + '=' + az(id)).join(', ') + ')');
+    if (!azs.length) azs = privAzs;
+    if (azs.length !== priv.length) errors.push('AvailabilityZones lists ' + azs.length + ' AZ(s) (' + azs.join(',') + ') but PrivateSubnetIds has ' + priv.length + ' subnet(s)');
+    priv.forEach((id, i) => { if (azs[i] && az(id) !== azs[i]) errors.push('PrivateSubnetIds[' + i + '] ' + id + ' is in ' + az(id) + ', expected ' + azs[i] + ' (same order as AvailabilityZones)'); });
+    if (pub.length) {
+        if (pub.length !== priv.length) errors.push('PublicSubnetIds has ' + pub.length + ' subnet(s); give one per AZ, like PrivateSubnetIds (' + priv.length + ')');
+        pub.forEach((id, i) => { if (azs[i] && az(id) !== azs[i]) errors.push('PublicSubnetIds[' + i + '] ' + id + ' is in ' + az(id) + ', expected ' + azs[i] + ' (same order as AvailabilityZones)'); });
+    }
+}
+if (errors.length) {
+    errors.forEach(e => console.error('  - ' + e));
+    console.error('PrivateSubnetIds / PublicSubnetIds are not valid for this VPC.');
+    process.exit(1);
+}
+
+// Order matters: CDK uses the lists by position.
+const checks = [
+    ['PrivateSubnetIds', env.MRM_DEPLOYED_PRIVATE, priv.join(','),
+     'Changing them replaces the Managed AD directory (users and domain joins are lost), the DNS resolver endpoint and the internal load balancers.'],
+    ['PublicSubnetIds', env.MRM_DEPLOYED_PUBLIC, pub.join(','),
+     'Changing them moves the internet-facing DCV load balancer and connection gateway.'],
+];
+for (const [key, deployed, configured, effect] of checks) {
+    if (deployed && deployed !== configured) {
+        console.error(key + ' differs from the subnets this install is deployed on (or is in a different order).');
+        console.error('  Deployed:   ' + deployed);
+        console.error('  Configured: ' + (configured || '<empty>'));
+        console.error('  ' + effect);
+        console.error('  Set ' + key + ' to the deployed value, in the same order, to continue.');
+        process.exit(1);
+    }
+}
+
+fs.writeFileSync('selected-subnets.json', JSON.stringify({ privateSubnetIds: priv, publicSubnetIds: pub, availabilityZones: azs }, null, 2));
+console.log('Subnets OK: one private' + (pub.length ? ' and one public' : '') + ' subnet in each of ' + azs.join(', '));
+"@
+
+    $tempScript = [System.IO.Path]::GetTempFileName() + ".js"
+    Set-Content -Path $tempScript -Value $validateScript -Encoding UTF8
+    # Passed through the environment: native arguments lose their quotes on Windows
+    $env:MRM_SUBNETS_JSON = ($subnetsJson -join "`n")
+    $env:MRM_SEL_PRIVATE = Get-Param "PrivateSubnetIds"
+    $env:MRM_SEL_PUBLIC = Get-Param "PublicSubnetIds"
+    $env:MRM_SEL_AZS = Get-Param "AvailabilityZones"
+    $env:MRM_VPC_ID = $VpcId
+    $env:MRM_DEPLOYED_PRIVATE = $deployedPrivate
+    $env:MRM_DEPLOYED_PUBLIC = $deployedPublic
+    node $tempScript | Out-Host
+    $nodeExit = $LASTEXITCODE
+    Remove-Item $tempScript -ErrorAction SilentlyContinue
+    Remove-Item Env:MRM_SUBNETS_JSON, Env:MRM_SEL_PRIVATE, Env:MRM_SEL_PUBLIC, Env:MRM_SEL_AZS, Env:MRM_VPC_ID, Env:MRM_DEPLOYED_PRIVATE, Env:MRM_DEPLOYED_PUBLIC -ErrorAction SilentlyContinue
+
+    if ($nodeExit -ne 0) {
+        Remove-Item "selected-subnets.json" -ErrorAction SilentlyContinue
+        Write-Err "The configured subnets were not saved (see above). parameters.json is unchanged."
+        return $false
+    }
+    return $true
 }
 
 function Select-Subnets {
@@ -572,6 +718,14 @@ if ($CheckEgress) {
     if ($saved) {
         $null = Test-PrivateEgress -VpcId $vpcId -SubnetIds ($saved -split ',') -WarnOnly
     }
+    exit 0
+}
+
+# Subnets given explicitly: validate them, no prompt, and keep them
+if (Get-Param "PrivateSubnetIds") {
+    if (-not (Test-ExplicitSubnets -VpcId $vpcId)) { exit 1 }
+    Check-NaclUdpRules -VpcId $vpcId
+    Update-Parameters -VpcId $vpcId
     exit 0
 }
 

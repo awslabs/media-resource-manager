@@ -68,6 +68,15 @@ upgrade to that version; a version without it needs only a redeploy.
   [Deleting Storage](docs/USER_GUIDE.md#deleting-storage).
   ([#152](https://github.com/awslabs/media-resource-manager/pull/152),
   [#118](https://github.com/awslabs/media-resource-manager/issues/118))
+- On Windows, `scripts/analyze-vpc.ps1` checks `PrivateSubnetIds`,
+  `PublicSubnetIds` and `AvailabilityZones` when `PrivateSubnetIds` is set in
+  `parameters.json`, and keeps them, as `scripts/analyze-vpc.sh` does: each
+  subnet must be in the VPC, one per AZ, in the order of `AvailabilityZones`.
+  It stops without changing `parameters.json` when the subnets differ from
+  the ones the install is deployed on, or are in a different order, since
+  that would replace the Managed AD directory.
+  ([#150](https://github.com/awslabs/media-resource-manager/pull/150),
+  [#144](https://github.com/awslabs/media-resource-manager/issues/144))
 - The existing-VPC analyzer (`scripts/analyze-vpc.sh` and
   `scripts/analyze-vpc.ps1`) counts a subnet whose default route goes to an
   internet gateway as public, even when it doesn't assign public IPs, so it
