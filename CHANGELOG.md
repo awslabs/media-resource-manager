@@ -19,7 +19,8 @@ upgrade to that version; a version without it needs only a redeploy.
   hold admin email addresses from earlier deploys. You can delete it or set a
   short retention on it. See
   [Installations that ran v1.4.3 or earlier](docs/UPGRADING.md#installations-that-ran-v143-or-earlier-old-adminsetup-log-group).
-  ([#82](https://github.com/awslabs/media-resource-manager/issues/82))
+  ([#148](https://github.com/awslabs/media-resource-manager/pull/148),
+  [#82](https://github.com/awslabs/media-resource-manager/issues/82))
 
 ## [1.6.0] - 2026-11-25
 
