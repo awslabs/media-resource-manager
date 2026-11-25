@@ -26,8 +26,10 @@ upgrade to that version; a version without it needs only a redeploy.
   how to grant them.
 - With an existing VPC, check before you upgrade that each subnet in
   `PrivateSubnetIds` has a `0.0.0.0/0` route to a NAT gateway, NAT instance
-  or transit gateway (see the VPC analyzer fix below). The deployment runs
-  the new check whenever it runs the VPC analyzer: on a first deploy, when
+  or transit gateway (see the VPC analyzer fix below,
+  [#135](https://github.com/awslabs/media-resource-manager/pull/135)). The
+  deployment runs the new check whenever it runs the VPC analyzer: on a
+  first deploy, when
   `PrivateSubnetIds` changes, and on every deploy of an install that has no
   `PrivateRouteTableIds` saved (its private subnets use the VPC main route
   table) or no `PrivateSubnetIds` and one private subnet per AZ. Such an
@@ -105,6 +107,7 @@ upgrade to that version; a version without it needs only a redeploy.
   route that is needed. A default route the analyzer cannot verify, such as
   a virtual private gateway or a firewall endpoint, gets a warning and the
   deployment continues.
+  ([#135](https://github.com/awslabs/media-resource-manager/pull/135))
 
 ### Removed
 
