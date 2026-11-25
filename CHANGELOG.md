@@ -111,7 +111,7 @@ upgrade to that version; a version without it needs only a redeploy.
   delete. Before, EC2's `InvalidInstanceID.NotFound` error for an instance
   that was already gone failed the cleanup step and left the stack in
   `DELETE_FAILED`.
-  ([#PR](https://github.com/awslabs/media-resource-manager/pull/PR))
+  ([#137](https://github.com/awslabs/media-resource-manager/pull/137))
 
 ### Removed
 
