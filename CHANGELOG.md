@@ -47,6 +47,41 @@ upgrade to that version; a version without it needs only a redeploy.
   number stays unused. Before, each failed attempt used up a number, so
   hostnames skipped numbers.
   ([#5](https://github.com/awslabs/media-resource-manager/issues/5))
+- Deleting a storage resource whose record has no MRM storage stack works.
+  When `cloudFormationStackName` is empty or doesn't start with
+  `<Acronym>-Storage-` (for example `N/A` on a record for a file system MRM
+  didn't create), MRM removes the record and the DataSync tasks and
+  locations it created for that storage, and leaves the file system as it
+  is. **Storage** says that only the MRM record was removed. Before, the
+  delete returned HTTP 500 and the record stayed. MRM now checks a storage
+  stack before it removes the DataSync tasks and locations, so a delete that
+  fails or is refused leaves them in place. **Storage** shows the error when
+  a delete fails.
+  ([#149](https://github.com/awslabs/media-resource-manager/pull/149),
+  [#143](https://github.com/awslabs/media-resource-manager/issues/143))
+- Deleting FSx for Windows File Server storage or an FSx for ONTAP volume
+  that MRM created, from **Storage**, says that a final backup will be kept
+  until it's deleted. The delete dialog mentions it, and after the delete the
+  API response and the
+  **Storage** page give the file system or volume ID, its Region and the
+  commands to find and delete the backup. See
+  [Deleting Storage](docs/USER_GUIDE.md#deleting-storage).
+  ([#152](https://github.com/awslabs/media-resource-manager/pull/152),
+  [#118](https://github.com/awslabs/media-resource-manager/issues/118))
+- On Windows, `scripts/analyze-vpc.ps1` checks `PrivateSubnetIds`,
+  `PublicSubnetIds` and `AvailabilityZones` when `PrivateSubnetIds` is set in
+  `parameters.json`, and keeps them, as `scripts/analyze-vpc.sh` does: each
+  subnet must be in the VPC, one per AZ, in the order of `AvailabilityZones`.
+  It stops without changing `parameters.json` when the subnets differ from
+  the ones the install is deployed on, or are in a different order, since
+  that would replace the Managed AD directory.
+  ([#150](https://github.com/awslabs/media-resource-manager/pull/150),
+  [#144](https://github.com/awslabs/media-resource-manager/issues/144))
+- The existing-VPC analyzer (`scripts/analyze-vpc.sh` and
+  `scripts/analyze-vpc.ps1`) counts a subnet whose default route goes to an
+  internet gateway as public, even when it doesn't assign public IPs, so it
+  isn't offered or picked as a private subnet.
+  ([#117](https://github.com/awslabs/media-resource-manager/pull/117))
 - With Cognito sign-in, the console keeps an active user signed in past the
   1-hour ID token lifetime. It keeps the Cognito refresh token in the tab's
   `sessionStorage`, next to the ID token, and gets a new ID token 5 minutes
