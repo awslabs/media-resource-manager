@@ -56,7 +56,13 @@ describe('hub gateway install script', () => {
 
   it('installs only the connection gateway, not the web viewer', () => {
     expect(script).not.toContain('nice-dcv-web-viewer');
-    expect(script).toContain('for package_pattern in "nice-dcv-connection-gateway.$package_extension"; do');
+    expect(script).not.toContain('nice-dcv-server.tgz');
+    expect(script).toContain('$package_manager install -y "$package_file" || fail');
+  });
+
+  it('stops with an error when a download or the install fails', () => {
+    expect(script).toContain('curl -fsS --connect-timeout 10');
+    expect(script).toContain('systemctl cat dcv-connection-gateway.service');
   });
 
   it('serves no web resources: no local-resources-path, and deletes url in [web-resources]', () => {
@@ -72,7 +78,19 @@ describe('hub gateway ASG', () => {
     expect(asg.UpdatePolicy.AutoScalingRollingUpdate).toEqual(expect.objectContaining({
       MaxBatchSize: 1,
       MinInstancesInService: 1,
+      PauseTime: 'PT5M',
     }));
+  });
+
+  it('replaces a gateway that fails its target group health checks, after a 900 s grace period', () => {
+    const asg = generate().Resources.ConnectionGatewayASG;
+    expect(asg.Properties.HealthCheckType).toBe('ELB');
+    expect(asg.Properties.HealthCheckGracePeriod).toBe(900);
+    expect(asg.Properties.TargetGroupARNs).toEqual([
+      { Ref: 'ConnectionGatewayTcpTargetGroup' },
+      { Ref: 'ConnectionGatewayUdpTargetGroup' },
+      { Ref: 'GatewayBrowserTargetGroup' },
+    ]);
   });
 });
 

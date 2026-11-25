@@ -103,6 +103,21 @@ upgrade to that version; a version without it needs only a redeploy.
   live stacks as already deleted and the cleanup steps as finding nothing. If
   your credentials expire during a run, refresh them and run the script again.
   ([#133](https://github.com/awslabs/media-resource-manager/pull/133))
+- A DCV Connection Gateway that can't download or install its package is
+  replaced instead of staying in service. The install script stops with an
+  `ERROR` line in `/var/log/dcv-connection-gateway-install.log` when a
+  download fails, times out or is empty, when the package install fails, or
+  when the `dcv-connection-gateway` service isn't installed. Downloads retry
+  and time out instead of hanging. The gateway Auto Scaling groups in the
+  primary Region and in regional hubs use ELB health checks with a
+  15-minute grace period, so a gateway that fails its load balancer health
+  checks is replaced. A gateway that can never install (for example, with no
+  outbound internet access) is replaced again after each grace period until
+  the cause is fixed. The script no longer downloads the unused DCV server
+  bundle, and the unused `scripts/connection-gwy-user-data.sh` is removed.
+  Regional hubs get the change when you **Update** them, which replaces the
+  hub's gateway.
+  ([#136](https://github.com/awslabs/media-resource-manager/pull/136))
 
 ### Removed
 
