@@ -21,7 +21,8 @@ upgrade to that version; a version without it needs only a redeploy.
   It stops without changing `parameters.json` when the subnets differ from
   the ones the install is deployed on, or are in a different order, since
   that would replace the Managed AD directory.
-  ([#144](https://github.com/awslabs/media-resource-manager/issues/144))
+  ([#150](https://github.com/awslabs/media-resource-manager/pull/150),
+  [#144](https://github.com/awslabs/media-resource-manager/issues/144))
 
 ## [1.6.0] - 2026-11-25
 
