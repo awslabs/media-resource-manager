@@ -587,6 +587,7 @@ gateway, NAT instance or transit gateway).
 When you set `VpcId`, the deployment script automatically runs `scripts/analyze-vpc.sh` to:
 - Inspect subnet layout
 - Check the subnets in `PrivateSubnetIds` and `PublicSubnetIds` when you set them: each must be in the VPC, one per AZ, in the order of `AvailabilityZones` (filled in from the subnets when empty)
+- Check that each private subnet it will use has outbound internet access: its route table (or the VPC main route table) needs a `0.0.0.0/0` route to a NAT gateway, NAT instance or transit gateway that is not a blackhole. The analyzer stops and names the subnet, AZ and route table when one does not, and warns on a default route it cannot verify (such as a virtual private gateway or a firewall endpoint)
 - Prompt for subnet selection (if multiple subnets per AZ and you run `./deploy.sh` in a terminal)
 - Save `PrivateSubnetIds`, `PublicSubnetIds`, `AvailabilityZones` and the private route tables to parameters.json
 - Check NACLs for DCV UDP/QUIC compatibility

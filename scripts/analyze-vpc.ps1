@@ -319,6 +319,92 @@ selectSubnets().catch(console.error);
     Remove-Item $tempScript -ErrorAction SilentlyContinue
 }
 
+# Check that each selected private subnet has outbound internet access, as
+# check_private_egress in analyze-vpc.sh does. Its route table (the explicit
+# association, else the VPC main table) needs an active 0.0.0.0/0 route to a
+# NAT gateway, transit gateway, NAT instance or network interface. Workstations
+# and the DCV Connection Gateway launched without one never become ready.
+function Test-PrivateEgress {
+    param([string]$VpcId, [string[]]$SubnetIds)
+
+    $region = Get-CurrentRegion
+    Write-Status "Checking outbound internet access of the private subnets..."
+
+    $tablesJson = aws ec2 describe-route-tables `
+        --filters "Name=vpc-id,Values=$VpcId" `
+        --query 'RouteTables' --output json --region $region 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $tablesJson) {
+        Write-Err "Could not read the route tables of VPC $VpcId"
+        return $false
+    }
+    $subnetsJson = aws ec2 describe-subnets `
+        --filters "Name=vpc-id,Values=$VpcId" `
+        --query 'Subnets[*].{SubnetId:SubnetId,AZ:AvailabilityZone}' `
+        --output json --region $region 2>$null
+
+    # Passed through the environment: native arguments lose their quotes on Windows
+    $env:MRM_ROUTE_TABLES = ($tablesJson -join "`n")
+    $env:MRM_SUBNETS = ($subnetsJson -join "`n")
+    $env:MRM_PRIVATE_IDS = ($SubnetIds -join ",")
+
+    $checkScript = @"
+const tables = JSON.parse(process.env.MRM_ROUTE_TABLES || '[]');
+const azOf = new Map(JSON.parse(process.env.MRM_SUBNETS || '[]').map(s => [s.SubnetId, s.AZ]));
+const mainTable = () => tables.find(t => (t.Associations || []).some(a => a.Main));
+const tableFor = id => tables.find(t => (t.Associations || []).some(a => a.SubnetId === id)) || mainTable();
+const defaultRouteOf = t => t && (t.Routes || []).find(r => r.DestinationCidrBlock === '0.0.0.0/0');
+function describeRoute(r) {
+    if (!r) return 'no default route';
+    const state = r.State === 'blackhole' ? ' (blackhole)' : '';
+    if (r.NatGatewayId) return 'NAT gateway ' + r.NatGatewayId + state;
+    if (r.TransitGatewayId) return 'transit gateway ' + r.TransitGatewayId + state;
+    if (r.InstanceId) return 'instance ' + r.InstanceId + state;
+    if (r.NetworkInterfaceId) return 'network interface ' + r.NetworkInterfaceId + state;
+    if (r.VpcPeeringConnectionId) return 'VPC peering ' + r.VpcPeeringConnectionId + state;
+    if (r.GatewayId && r.GatewayId.startsWith('igw-')) return 'internet gateway ' + r.GatewayId + state;
+    if (r.GatewayId) return 'gateway ' + r.GatewayId + state;
+    return 'other' + state;
+}
+function egressOf(r) {
+    if (!r || r.State === 'blackhole') return 'none';
+    if (r.NatGatewayId || r.TransitGatewayId || r.InstanceId || r.NetworkInterfaceId) return 'ok';
+    if (r.VpcPeeringConnectionId || (r.GatewayId && r.GatewayId.startsWith('igw-'))) return 'none';
+    return 'unknown';
+}
+let failed = false;
+for (const id of (process.env.MRM_PRIVATE_IDS || '').split(',').filter(Boolean)) {
+    const t = tableFor(id);
+    const r = defaultRouteOf(t);
+    const where = id + ' (' + (azOf.get(id) || 'unknown AZ') + ')';
+    const table = t ? 'route table ' + t.RouteTableId + ((t.Associations || []).some(a => a.SubnetId === id) ? '' : ' (VPC main route table)') : 'no route table';
+    const egress = t ? egressOf(r) : 'none';
+    if (egress === 'ok') console.log('  OK ' + where + ': ' + table + ' -> ' + describeRoute(r));
+    else if (egress === 'unknown') console.log('  WARNING ' + where + ': ' + table + ' -> ' + describeRoute(r) + '. Check that this target gives outbound internet access.');
+    else { console.log('  ERROR ' + where + ': ' + table + ' -> ' + describeRoute(r)); failed = true; }
+}
+process.exit(failed ? 1 : 0);
+"@
+
+    $tempScript = [System.IO.Path]::GetTempFileName() + ".js"
+    Set-Content -Path $tempScript -Value $checkScript -Encoding UTF8
+    node $tempScript | Out-Host
+    $nodeExit = $LASTEXITCODE
+    Remove-Item $tempScript -ErrorAction SilentlyContinue
+    Remove-Item Env:MRM_ROUTE_TABLES, Env:MRM_SUBNETS, Env:MRM_PRIVATE_IDS -ErrorAction SilentlyContinue
+
+    if ($nodeExit -ne 0) {
+        Write-Err "A private subnet has no outbound internet access (see above)."
+        Write-Err "Private subnets need a 0.0.0.0/0 route to a NAT gateway, NAT instance or transit gateway that is"
+        Write-Err "not a blackhole. Workstations and the DCV Connection Gateway launched in such a subnet cannot"
+        Write-Err "download their software and never become ready."
+        Write-Err "Add that route to the route table shown, or set PrivateSubnetIds to a private subnet with one in"
+        Write-Err "that AZ. On an install that is already deployed, add the route: changing PrivateSubnetIds"
+        Write-Err "replaces the Managed AD directory."
+        return $false
+    }
+    return $true
+}
+
 function Update-Parameters {
     param(
         [string]$VpcId,
@@ -331,6 +417,12 @@ function Update-Parameters {
     }
 
     $selected = Get-Content "selected-subnets.json" | ConvertFrom-Json
+
+    # Check the private subnets before writing anything; stop the deploy if one is isolated
+    if (-not (Test-PrivateEgress -VpcId $VpcId -SubnetIds $selected.privateSubnetIds)) {
+        Remove-Item "selected-subnets.json", "vpc-analysis.json" -ErrorAction SilentlyContinue
+        exit 1
+    }
     $privateIds = $selected.privateSubnetIds -join ","
     $publicIds = $selected.publicSubnetIds -join ","
     $azs = $selected.availabilityZones -join ","
@@ -414,3 +506,6 @@ if ($result -eq 2) {
 
 # Clean up temp files
 Remove-Item "vpc-analysis.json" -ErrorAction SilentlyContinue
+
+# Explicit, so deploy.ps1 reads 0 here rather than the last native command's exit code
+exit 0

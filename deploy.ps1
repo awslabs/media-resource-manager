@@ -85,6 +85,10 @@ if ($vpcId) {
     if (-not $privateSubnetIds -or ($privateSubnetIds -and -not $privateRouteTableIds)) {
         if (Test-Path "scripts/analyze-vpc.ps1") {
             & "scripts/analyze-vpc.ps1"
+            if ($LASTEXITCODE -ne 0) {
+                Write-Err "VPC analysis failed (see above)."
+                exit $LASTEXITCODE
+            }
             $privateSubnetIds = node -p "JSON.parse(require('fs').readFileSync('parameters.json')).find(p => p.ParameterKey === 'PrivateSubnetIds')?.ParameterValue || ''" 2>$null
             if ($privateSubnetIds) {
                 Write-Ok "VPC subnet configuration complete"

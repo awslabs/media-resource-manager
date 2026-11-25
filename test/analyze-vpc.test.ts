@@ -54,6 +54,8 @@ case "$1 $2" in
     if [ -n "$sid" ]; then
       rt=$(node -e "const t = require(process.env.STUB_DIR + '/route-tables.json').find(t => t.Associations.some(a => a.SubnetId === process.argv[1])); console.log(t ? t.RouteTableId : 'None')" "$sid")
       echo "$rt"
+    elif [ -f "$STUB_DIR/route-tables-fail" ]; then
+      echo "An error occurred (UnauthorizedOperation) when calling the DescribeRouteTables operation" >&2; exit 254
     else
       cat "$STUB_DIR/route-tables.json"
     fi ;;
@@ -68,9 +70,24 @@ case "$1 $2" in
 esac
 `;
 
+/** ROUTE_TABLES with the routes of one table replaced, or its subnet associations removed. */
+function withTable(id: string, change: { Routes?: object[]; unassociate?: boolean }): object[] {
+  return ROUTE_TABLES.map(t => {
+    if (t.RouteTableId !== id) return t;
+    return {
+      ...t,
+      ...(change.Routes ? { Routes: change.Routes } : {}),
+      ...(change.unassociate ? { Associations: [] } : {}),
+    };
+  });
+}
+
 interface RunOptions {
   params: Record<string, string>;
   subnets?: object[];
+  routeTables?: object[];
+  /** Make describe-route-tables for the whole VPC fail. */
+  failRouteTables?: boolean;
   stackStatus?: string;
   /** Values of /<PascalName>/Network/<key> in SSM, i.e. the subnets the install is deployed on. */
   deployed?: { PrivateSubnetIds?: string; PublicSubnetIds?: string };
@@ -101,8 +118,9 @@ function run(opts: RunOptions): RunResult {
   fs.mkdirSync(workDir);
   fs.writeFileSync(path.join(stubDir, 'aws'), AWS_STUB, { mode: 0o755 });
   fs.writeFileSync(path.join(stubDir, 'subnets.json'), JSON.stringify(opts.subnets ?? MULTI_SUBNETS));
-  fs.writeFileSync(path.join(stubDir, 'route-tables.json'), JSON.stringify(ROUTE_TABLES));
+  fs.writeFileSync(path.join(stubDir, 'route-tables.json'), JSON.stringify(opts.routeTables ?? ROUTE_TABLES));
   fs.writeFileSync(path.join(stubDir, 'calls.log'), '');
+  if (opts.failRouteTables) fs.writeFileSync(path.join(stubDir, 'route-tables-fail'), '');
   if (opts.stackStatus) fs.writeFileSync(path.join(stubDir, 'stack-status'), opts.stackStatus);
   for (const [key, value] of Object.entries(opts.deployed ?? {})) {
     fs.writeFileSync(path.join(stubDir, `deployed-${key}`), value);
@@ -158,7 +176,10 @@ describe('analyze-vpc.sh', () => {
   });
 
   test('lists a route table shared by both private subnets once', () => {
-    const r = run({ params: { VpcId: VPC_ID, PrivateSubnetIds: 'subnet-0a03,subnet-0b03' } });
+    const r = run({
+      params: { VpcId: VPC_ID, PrivateSubnetIds: 'subnet-0a03,subnet-0b03' },
+      routeTables: withTable('rtb-0mgmt', { Routes: [{ DestinationCidrBlock: '0.0.0.0/0', TransitGatewayId: 'tgw-0abc' }] }),
+    });
     expect(r.status).toBe(0);
     expect(r.params.PrivateRouteTableIds).toBe('rtb-0mgmt');
   });
@@ -259,5 +280,71 @@ describe('analyze-vpc.sh', () => {
     const r = run({ params: { VpcId: '' } });
     expect(r.status).toBe(0);
     expect(r.calls).toBe('');
+  });
+});
+
+// A private subnet without outbound internet access breaks the DCV Connection
+// Gateway and workstations that launch in it, so the analyzer must stop.
+describe('analyze-vpc.sh private subnet egress check', () => {
+  const EXPLICIT = { VpcId: VPC_ID, PrivateSubnetIds: 'subnet-0a02,subnet-0b02', PublicSubnetIds: 'subnet-0a01,subnet-0b01' };
+  const defaultRoute = (route: object) => [{ DestinationCidrBlock: '10.0.0.0/16', GatewayId: 'local' }, { DestinationCidrBlock: '0.0.0.0/0', ...route }];
+
+  test.each<{ name: string; routes: object[]; shown: RegExp }>([
+    { name: 'a NAT gateway', routes: defaultRoute({ NatGatewayId: 'nat-0b', State: 'active' }), shown: /subnet-0b02 \(us-east-1b\): route table rtb-0b02 -> NAT gateway nat-0b/ },
+    { name: 'a transit gateway', routes: defaultRoute({ TransitGatewayId: 'tgw-0abc', State: 'active' }), shown: /-> transit gateway tgw-0abc/ },
+    { name: 'a NAT instance', routes: defaultRoute({ InstanceId: 'i-abcnat', NetworkInterfaceId: 'eni-abcnat', State: 'active' }), shown: /-> instance i-abcnat/ },
+  ])('accepts a private subnet whose default route goes to $name', ({ routes, shown }) => {
+    const r = run({ params: EXPLICIT, routeTables: withTable('rtb-0b02', { Routes: routes }) });
+    expect(r.status).toBe(0);
+    expect(r.output).toMatch(shown);
+    expect(r.params.PrivateRouteTableIds).toBe('rtb-0a02,rtb-0b02');
+  });
+
+  test.each<{ name: string; routes: object[]; shown: string }>([
+    { name: 'no default route', routes: [{ DestinationCidrBlock: '10.0.0.0/16', GatewayId: 'local' }], shown: 'no default route' },
+    { name: 'a blackholed NAT gateway', routes: defaultRoute({ NatGatewayId: 'nat-0gone', State: 'blackhole' }), shown: 'NAT gateway nat-0gone (blackhole)' },
+    { name: 'only an internet gateway', routes: defaultRoute({ GatewayId: 'igw-0abc', State: 'active' }), shown: 'internet gateway igw-0abc' },
+    { name: 'VPC peering', routes: defaultRoute({ VpcPeeringConnectionId: 'pcx-0abc', State: 'active' }), shown: 'VPC peering pcx-0abc' },
+  ])('stops on explicit subnets when one has $name and leaves parameters.json alone', ({ routes, shown }) => {
+    const r = run({ params: EXPLICIT, routeTables: withTable('rtb-0b02', { Routes: routes }) });
+    expect(r.status).toBe(1);
+    expect(r.output).toContain(`subnet-0b02 (us-east-1b): route table rtb-0b02 -> ${shown}`);
+    expect(r.output).toMatch(/subnet-0a02 \(us-east-1a\): route table rtb-0a02 -> NAT gateway nat-0a/);
+    expect(r.output).toMatch(/A private subnet has no outbound internet access/);
+    expect(r.output).toMatch(/0\.0\.0\.0\/0 route to a NAT gateway, NAT instance or transit gateway/);
+    expect(r.params).toEqual(EXPLICIT);
+  });
+
+  test('checks a subnet without its own route table against the VPC main route table', () => {
+    const r = run({ params: EXPLICIT, routeTables: withTable('rtb-0b02', { unassociate: true }) });
+    expect(r.status).toBe(1);
+    expect(r.output).toContain('subnet-0b02 (us-east-1b): route table rtb-0main (VPC main route table) -> internet gateway igw-0abc');
+    expect(r.params).toEqual(EXPLICIT);
+  });
+
+  test('stops on the subnets it picks itself in a VPC with one subnet of each type per AZ', () => {
+    const params = { VpcId: VPC_ID };
+    const r = run({
+      params,
+      subnets: SIMPLE_SUBNETS,
+      routeTables: withTable('rtb-0a02', { Routes: [{ DestinationCidrBlock: '10.0.0.0/16', GatewayId: 'local' }] }),
+    });
+    expect(r.status).toBe(1);
+    expect(r.output).toContain('subnet-0a02 (us-east-1a): route table rtb-0a02 -> no default route');
+    expect(r.params).toEqual(params);
+  });
+
+  test('warns but continues on a default route it cannot verify', () => {
+    const r = run({ params: EXPLICIT, routeTables: withTable('rtb-0b02', { Routes: defaultRoute({ GatewayId: 'vgw-0abc', State: 'active' }) }) });
+    expect(r.status).toBe(0);
+    expect(r.output).toMatch(/subnet-0b02 \(us-east-1b\): route table rtb-0b02 -> gateway vgw-0abc\. Check that this target/);
+    expect(r.params.PrivateSubnetIds).toBe('subnet-0a02,subnet-0b02');
+  });
+
+  test('stops when it cannot read the route tables', () => {
+    const r = run({ params: EXPLICIT, failRouteTables: true });
+    expect(r.status).toBe(1);
+    expect(r.output).toMatch(/Could not read the route tables of VPC vpc-0abc1234def567890/);
+    expect(r.params).toEqual(EXPLICIT);
   });
 });

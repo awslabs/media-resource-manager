@@ -119,7 +119,7 @@ if [[ -n "$VPC_ID" ]]; then
             ANALYZER_RESULT=$?
             
             if [[ $ANALYZER_RESULT -ne 0 ]]; then
-                print_error "VPC analysis failed. For VPCs with multiple subnets per AZ, set PrivateSubnetIds and PublicSubnetIds (parameters.json or the pipeline stack)."
+                print_error "VPC analysis failed (see above). For VPCs with multiple subnets per AZ, set PrivateSubnetIds and PublicSubnetIds (parameters.json or the pipeline stack)."
                 exit $ANALYZER_RESULT
             fi
             

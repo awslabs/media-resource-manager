@@ -68,6 +68,39 @@ describe_vpc_subnets() {
         --output json 2>/dev/null
 }
 
+# JavaScript for the node snippets that read route tables (`tables`, the
+# RouteTables of the VPC): the table a subnet uses (its explicit association,
+# else the VPC main table), the target of its default route, and whether that
+# route gives a private subnet outbound internet access.
+ROUTE_JS='
+const mainTable = () => tables.find(t => (t.Associations || []).some(a => a.Main));
+const tableFor = id => tables.find(t => (t.Associations || []).some(a => a.SubnetId === id)) || mainTable();
+const defaultRouteOf = t => t && (t.Routes || []).find(r => r.DestinationCidrBlock === "0.0.0.0/0");
+function describeRoute(r) {
+    if (!r) return "no default route";
+    const state = r.State === "blackhole" ? " (blackhole)" : "";
+    if (r.NatGatewayId) return "NAT gateway " + r.NatGatewayId + state;
+    if (r.TransitGatewayId) return "transit gateway " + r.TransitGatewayId + state;
+    if (r.InstanceId) return "instance " + r.InstanceId + state;
+    if (r.NetworkInterfaceId) return "network interface " + r.NetworkInterfaceId + state;
+    if (r.VpcPeeringConnectionId) return "VPC peering " + r.VpcPeeringConnectionId + state;
+    if (r.GatewayId && r.GatewayId.startsWith("igw-")) return "internet gateway " + r.GatewayId + state;
+    if (r.GatewayId) return "gateway " + r.GatewayId + state;
+    return "other" + state;
+}
+// "ok": an active route to a NAT gateway, transit gateway, NAT instance or
+// network interface. "unknown": another target that may reach the internet
+// (virtual private gateway, Gateway Load Balancer or firewall endpoint, Cloud
+// WAN). "none": no route, a blackhole, an internet gateway (private subnets
+// have no public IPs) or VPC peering (peering does not carry internet traffic).
+function egressOf(r) {
+    if (!r || r.State === "blackhole") return "none";
+    if (r.NatGatewayId || r.TransitGatewayId || r.InstanceId || r.NetworkInterfaceId) return "ok";
+    if (r.VpcPeeringConnectionId || (r.GatewayId && r.GatewayId.startsWith("igw-"))) return "none";
+    return "unknown";
+}
+'
+
 # Get current region
 get_region() {
     aws configure get region 2>/dev/null || echo "${AWS_REGION:-${AWS_DEFAULT_REGION:-us-east-1}}"
@@ -371,6 +404,58 @@ selectSubnets().catch(console.error);
 "
 }
 
+# Check that each selected private subnet has outbound internet access.
+# Workstations and the DCV Connection Gateway download software at boot; one
+# launched in a subnet without a NAT route never becomes ready. The ASGs span
+# every private subnet, so one isolated subnet is enough to break them.
+check_private_egress() {
+    local vpc_id=$1
+    local tables subnets
+    print_status "🔍 Checking outbound internet access of the private subnets..."
+    tables=$(aws ec2 describe-route-tables --filters "Name=vpc-id,Values=$vpc_id" --query 'RouteTables' --output json 2>&1)
+    if [[ $? -ne 0 ]]; then
+        print_error "Could not read the route tables of VPC $vpc_id: $tables"
+        return 1
+    fi
+    subnets=$(describe_vpc_subnets "$vpc_id")
+
+    echo "$tables" | SUBNETS="$subnets" node -e "
+const fs = require('fs');
+const tables = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8') || '[]');
+${ROUTE_JS}
+const azOf = new Map(JSON.parse(process.env.SUBNETS || '[]').map(s => [s.SubnetId, s.AZ]));
+const { privateSubnetIds } = JSON.parse(fs.readFileSync(process.env.SELECTION_FILE, 'utf8'));
+let failed = false;
+for (const id of privateSubnetIds) {
+    const t = tableFor(id);
+    const r = defaultRouteOf(t);
+    const where = id + ' (' + (azOf.get(id) || 'unknown AZ') + ')';
+    const table = t ? 'route table ' + t.RouteTableId + ((t.Associations || []).some(a => a.SubnetId === id) ? '' : ' (VPC main route table)') : 'no route table';
+    const egress = t ? egressOf(r) : 'none';
+    if (egress === 'ok') {
+        console.log('  ✅ ' + where + ': ' + table + ' -> ' + describeRoute(r));
+    } else if (egress === 'unknown') {
+        console.log('  ⚠️  ' + where + ': ' + table + ' -> ' + describeRoute(r) + '. Check that this target gives outbound internet access.');
+    } else {
+        console.error('  ❌ ' + where + ': ' + table + ' -> ' + describeRoute(r));
+        failed = true;
+    }
+}
+process.exit(failed ? 1 : 0);
+"
+    if [[ $? -ne 0 ]]; then
+        print_error "A private subnet has no outbound internet access (see above)."
+        echo "  Private subnets need a 0.0.0.0/0 route to a NAT gateway, NAT instance or transit gateway that is"
+        echo "  not a blackhole. Workstations and the DCV Connection Gateway launched in such a subnet cannot"
+        echo "  download their software and never become ready."
+        echo "  Add that route to the route table shown, or set PrivateSubnetIds to a private subnet with one in"
+        echo "  that AZ. On an install that is already deployed, add the route: changing PrivateSubnetIds"
+        echo "  replaces the Managed AD directory."
+        return 1
+    fi
+    return 0
+}
+
 # Update parameters.json with selected subnets
 update_parameters() {
     if [[ ! -s "$SELECTION_FILE" ]]; then
@@ -378,12 +463,17 @@ update_parameters() {
         return 1
     fi
     
+    local vpc_id=$(get_vpc_id)
+
+    # Every path (explicit, one per AZ, prompted) saves its subnets here, so
+    # check their outbound access before writing anything.
+    check_private_egress "$vpc_id" || return 1
+
     local private_ids=$(node -p "JSON.parse(require('fs').readFileSync(process.env.SELECTION_FILE)).privateSubnetIds.join(',')")
     local public_ids=$(node -p "JSON.parse(require('fs').readFileSync(process.env.SELECTION_FILE)).publicSubnetIds.join(',')")
     local azs=$(node -p "JSON.parse(require('fs').readFileSync(process.env.SELECTION_FILE)).availabilityZones.join(',')")
     
     # Get VPC CIDR block
-    local vpc_id=$(get_vpc_id)
     local vpc_cidr=$(aws ec2 describe-vpcs --vpc-ids "$vpc_id" --query 'Vpcs[0].CidrBlock' --output text 2>/dev/null)
     
     # Look up route table IDs for private subnets (needed for VPC endpoint association)
@@ -558,22 +648,8 @@ print_selection_help() {
 const fs = require('fs');
 const analysis = JSON.parse(fs.readFileSync(process.env.ANALYSIS_FILE, 'utf8'));
 const tables = JSON.parse(fs.readFileSync('/dev/stdin', 'utf8') || '[]');
-const main = tables.find(t => (t.Associations || []).some(a => a.Main));
-const tableFor = id => tables.find(t => (t.Associations || []).some(a => a.SubnetId === id)) || main;
-function defaultRoute(id) {
-    const t = tableFor(id);
-    const r = t && (t.Routes || []).find(r => r.DestinationCidrBlock === '0.0.0.0/0');
-    if (!r) return 'no default route';
-    const state = r.State === 'blackhole' ? ' (blackhole)' : '';
-    if (r.NatGatewayId) return 'NAT gateway ' + r.NatGatewayId + state;
-    if (r.TransitGatewayId) return 'transit gateway ' + r.TransitGatewayId + state;
-    if (r.InstanceId) return 'instance ' + r.InstanceId + state;
-    if (r.NetworkInterfaceId) return 'network interface ' + r.NetworkInterfaceId + state;
-    if (r.VpcPeeringConnectionId) return 'VPC peering ' + r.VpcPeeringConnectionId + state;
-    if (r.GatewayId && r.GatewayId.startsWith('igw-')) return 'internet gateway ' + r.GatewayId + state;
-    if (r.GatewayId) return 'gateway ' + r.GatewayId + state;
-    return 'other' + state;
-}
+${ROUTE_JS}
+const defaultRoute = id => describeRoute(defaultRouteOf(tableFor(id)));
 console.log('Candidate subnets (default route):');
 for (const az of Object.keys(analysis.subnets).sort()) {
     console.log('  ' + az);
