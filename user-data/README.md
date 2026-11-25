@@ -32,6 +32,11 @@ Installs and configures DCV Connection Gateway.
 4. Configures connection to broker
 5. Optionally configures custom TLS certificate
 
+If a download, the package install or the service setup fails, it logs an
+`ERROR` line to `/var/log/dcv-connection-gateway-install.log` and exits
+non-zero. The gateway Auto Scaling groups use ELB health checks, so they
+replace a gateway that never becomes healthy.
+
 ## Usage
 
 These scripts are used by:

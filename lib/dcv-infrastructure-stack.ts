@@ -761,6 +761,14 @@ ${connectionGatewayInstallScript}`;
       vpcSubnets: {
         subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
       },
+      // Replace a gateway that fails its target group health checks (for
+      // example one whose install failed), not only one whose instance
+      // status check fails. The grace period is well above the measured
+      // launch-to-healthy time. Same health checks in the hub template.
+      healthChecks: autoscaling.HealthChecks.withAdditionalChecks({
+        additionalTypes: [autoscaling.AdditionalHealthCheckType.ELB],
+        gracePeriod: cdk.Duration.seconds(900),
+      }),
       // Replace gateways one at a time when the launch template changes, so
       // a new gateway config reaches running gateways. Gateways have no
       // cfn-signal, so PauseTime gives a new one time to install and start

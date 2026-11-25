@@ -680,7 +680,7 @@ INSTANCE_ID=$(aws ec2 describe-instances \
 aws ssm send-command \
   --instance-ids $INSTANCE_ID \
   --document-name "AWS-RunShellScript" \
-  --parameters 'commands=["cat /var/log/dcv-connection-gwy-install.log | grep -i tls"]'
+  --parameters 'commands=["cat /var/log/dcv-connection-gateway-install.log | grep -i tls"]'
 
 # 4. Verify the certificate being served
 echo | openssl s_client -connect dcv.company.com:8443 -servername dcv.company.com 2>/dev/null | \

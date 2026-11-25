@@ -1436,8 +1436,10 @@ function generateCloudFormationTemplate(config) {
             { Ref: 'ConnectionGatewayUdpTargetGroup' },
             ...(browser ? [browser.targetGroupRef] : [])
           ],
-          HealthCheckType: 'EC2',
-          HealthCheckGracePeriod: 300,
+          // Replace a gateway that fails its target group health checks (for
+          // example one whose install failed). Same as the primary stack.
+          HealthCheckType: 'ELB',
+          HealthCheckGracePeriod: 900,
           Tags: [{ Key: 'Name', Value: { 'Fn::Sub': '${ProductName}-Regional-ConnectionGateway' }, PropagateAtLaunch: true }]
         }
       },
