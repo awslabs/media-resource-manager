@@ -34,6 +34,14 @@ upgrade to that version; a version without it needs only a redeploy.
   regional hub **Update** replaces the hub's DCV Connection Gateway.
   ([#126](https://github.com/awslabs/media-resource-manager/pull/126))
 
+### Changed
+
+- `scripts/create-multipart-upload.py` takes the target bucket, object key
+  and file size as required arguments, and the part size as an option
+  (default 500 MB):
+  `python3 scripts/create-multipart-upload.py <bucket> <key> <file_size_bytes> [--part-size MB]`.
+  ([#134](https://github.com/awslabs/media-resource-manager/pull/134))
+
 ### Fixed
 
 - Windows workstation records store the **Join Domain** setting
