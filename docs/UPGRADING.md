@@ -329,3 +329,42 @@ route tables. The previous endpoint wasn't attached to any route table, so
 DynamoDB access isn't interrupted. Nothing else in the VPC changes: the
 directory, interface endpoints, load balancers, subnets and route tables stay
 as they are.
+
+### Installations that ran v1.4.3 or earlier: old AdminSetup log group
+
+Up to v1.4.3, the AdminSetup function (`<acronym>-create-admin-groups`) wrote
+the `AdminEmails` addresses to its CloudWatch log group on each deploy. From
+v1.4.4 the function is `<acronym>-admin-setup` and logs no email addresses.
+The old log group, `/aws/lambda/<acronym>-create-admin-groups`, stays after
+the old function is removed, and keeps the retention it had then: 365 days
+if a v1.4.1 to v1.4.3 deploy applied MRM's default log retention, and no
+expiry if the installation never ran those versions or set
+`LambdaLogRetentionDays` to `0`. MRM's log retention setting applies only to
+log groups of functions that still exist, so it doesn't change this one.
+
+To check for the log group, run this in the primary Region, with your
+acronym in lowercase (for example `mrm`):
+
+```bash
+ACRONYM=<acronym>
+aws logs describe-log-groups \
+  --log-group-name-prefix "/aws/lambda/$ACRONYM-create-admin-groups" \
+  --query 'logGroups[].[logGroupName,retentionInDays,storedBytes]' --output table
+```
+
+Nothing in MRM uses this log group. To remove the entries, delete the log
+group:
+
+```bash
+aws logs delete-log-group --log-group-name "/aws/lambda/$ACRONYM-create-admin-groups"
+```
+
+This can't be undone. To keep the log group for a short time instead, set a
+short retention, for example 1 day:
+
+```bash
+aws logs put-retention-policy \
+  --log-group-name "/aws/lambda/$ACRONYM-create-admin-groups" --retention-in-days 1
+```
+
+CloudWatch Logs can take up to 72 hours to remove events after they expire.
