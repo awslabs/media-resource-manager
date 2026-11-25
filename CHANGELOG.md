@@ -12,6 +12,16 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Upgrade steps
+
+- Optional, for installations that ran v1.4.3 or earlier: the log group
+  `/aws/lambda/<acronym>-create-admin-groups` in the primary Region may still
+  hold admin email addresses from earlier deploys. You can delete it or set a
+  short retention on it. See
+  [Installations that ran v1.4.3 or earlier](docs/UPGRADING.md#installations-that-ran-v143-or-earlier-old-adminsetup-log-group).
+  ([#148](https://github.com/awslabs/media-resource-manager/pull/148),
+  [#82](https://github.com/awslabs/media-resource-manager/issues/82))
+
 ### Fixed
 
 - Deleting a regional hub is refused while workstations remain in its
@@ -25,7 +35,14 @@ upgrade to that version; a version without it needs only a redeploy.
   you need from them, then terminate them before deleting the hub. Before,
   the delete started, and the hub stack's VPC, subnets and security group
   couldn't be removed while those workstations still used them.
-  ([#145](https://github.com/awslabs/media-resource-manager/issues/145))
+  ([#147](https://github.com/awslabs/media-resource-manager/pull/147),
+  [#145](https://github.com/awslabs/media-resource-manager/issues/145))
+
+### Security
+
+- The AD sign-in Lambda (`ldap-auth`) logs sign-in requests, LDAP binds and
+  user record updates without the sign-in name.
+  ([#146](https://github.com/awslabs/media-resource-manager/pull/146))
 
 ## [1.6.0] - 2026-11-25
 
