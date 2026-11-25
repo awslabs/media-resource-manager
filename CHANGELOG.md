@@ -12,13 +12,15 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
-## [1.5.1] - TBD
+## [1.6.0] - 2026-11-25
 
 Fixes for SMB storage on Windows workstations, the `ResourceAdmin` password
 with AWS Managed Microsoft AD, the DCV Connection Gateway install, console
 sessions and **Connect** in regional hubs, the existing-VPC analyzer and the
-stack cleanup scripts. The pipeline template changed, and regional hubs need
-an update.
+stack cleanup scripts. The pipeline template changed. This release updates
+regional hubs and replaces the DCV Connection Gateways in the primary Region
+and in each hub, so DCV sessions disconnect once and users reconnect from the
+console. Plan the upgrade outside working hours.
 
 ### Upgrade steps
 
@@ -620,8 +622,8 @@ client prompt.
 Earlier releases are listed on the
 [GitHub releases page](https://github.com/awslabs/media-resource-manager/releases).
 
-[Unreleased]: https://github.com/awslabs/media-resource-manager/compare/v1.5.0...HEAD
-[1.5.1]: https://github.com/awslabs/media-resource-manager/compare/v1.5.0...v1.5.1
+[Unreleased]: https://github.com/awslabs/media-resource-manager/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/awslabs/media-resource-manager/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/awslabs/media-resource-manager/compare/v1.4.4...v1.5.0
 [1.4.4]: https://github.com/awslabs/media-resource-manager/compare/v1.4.3...v1.4.4
 [1.4.3]: https://github.com/awslabs/media-resource-manager/compare/v1.4.2...v1.4.3
