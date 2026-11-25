@@ -97,7 +97,7 @@ Metadata:
       AdminGroupName:
         default: "Admin Group Name (comma-separated for multiple)"
       AdMode:
-        default: "AD Mode (managed = MRM creates AD; connector = BYO-AD)"
+        default: "AD Mode (empty = keep current; managed = MRM creates AD; connector = BYO-AD)"
       AdDomainName:
         default: "Customer AD Domain Name (connector mode)"
       AdDnsServerIps:
@@ -244,14 +244,16 @@ Parameters:
 
   AdMode:
     Type: String
-    Default: managed
+    Default: ''
     AllowedValues:
+      - ''
       - managed
       - connector
     Description: >
-      Active Directory provisioning mode. 'managed' (default) creates AWS
-      Managed Microsoft AD inside the MRM VPC and byte-identically matches
-      pre-PR-3 behavior. 'connector' creates an AWS AD Connector that
+      Active Directory provisioning mode. Leave empty to keep the mode in
+      the stored deployment config ('managed' on a new install). 'managed'
+      creates AWS Managed Microsoft AD inside the MRM VPC.
+      'connector' creates an AWS AD Connector that
       proxies to a customer-supplied Active Directory reachable from the
       VPC (BYO-AD). When 'connector', the AdDomainName, AdDnsServerIps,
       and AdServiceAccountSecretArn parameters are all required. See
