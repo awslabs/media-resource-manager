@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 const { DynamoDBClient } = require('@aws-sdk/client-dynamodb');
-const { DynamoDBDocumentClient, GetCommand, UpdateCommand } = require('@aws-sdk/lib-dynamodb');
+const { DynamoDBDocumentClient, GetCommand, UpdateCommand, ScanCommand } = require('@aws-sdk/lib-dynamodb');
 const { SFNClient, StartExecutionCommand } = require('@aws-sdk/client-sfn');
 const { SSMClient, GetParameterCommand } = require('@aws-sdk/client-ssm');
 const { requireAdmin } = require('../shared/authz');
@@ -59,13 +59,20 @@ exports.handler = async (event) => {
       });
     }
     
-    // Check if there are any workstations in this region
-    // Note: This would require a GSI on region, for now we'll skip this check
-    // TODO: Add workstation check when GSI is available
-    
     // Check if this is the primary region (cannot delete primary)
     if (hub.isPrimary) {
       return response(400, { error: 'Cannot delete the primary region' });
+    }
+
+    // Workstations still in the Region use the hub's VPC, subnets and roles,
+    // and its stack can't be deleted around them.
+    const workstationCount = await countActiveWorkstations(region);
+    if (workstationCount > 0) {
+      const noun = workstationCount === 1 ? 'workstation' : 'workstations';
+      return response(409, {
+        error: `Terminate the ${workstationCount} ${noun} in ${region} before deleting its regional hub.`,
+        workstationCount
+      });
     }
     
     // Update status to deleting
@@ -112,6 +119,38 @@ exports.handler = async (event) => {
     return response(500, { error: error.message });
   }
 };
+
+// Workstation records whose instance is gone: the EC2 state handler marks a
+// terminated instance's record 'Terminated', and a failed create is 'failed'.
+const ENDED_STATUSES = ['terminated', 'failed'];
+
+/**
+ * Count the workstation records in a Region whose instance may still exist.
+ * Same filtered scan as getWorkstationCountForRegion in get-regional-hub (the
+ * table has no region index and few items), read to the last page. Records
+ * without a region belong to the primary Region, which can't be deleted, so
+ * they don't count here.
+ */
+async function countActiveWorkstations(region) {
+  let count = 0;
+  let ExclusiveStartKey;
+  do {
+    const page = await docClient.send(new ScanCommand({
+      TableName: WORKSTATION_TABLE,
+      FilterExpression: '#r = :region',
+      ExpressionAttributeNames: { '#r': 'region', '#s': 'status' },
+      ExpressionAttributeValues: { ':region': region },
+      ProjectionExpression: 'instanceId, #s, instanceStatus',
+      ExclusiveStartKey
+    }));
+    count += (page.Items || []).filter(item =>
+      !ENDED_STATUSES.includes(String(item.status || '').toLowerCase()) &&
+      String(item.instanceStatus || '').toLowerCase() !== 'terminated'
+    ).length;
+    ExclusiveStartKey = page.LastEvaluatedKey;
+  } while (ExclusiveStartKey);
+  return count;
+}
 
 function response(statusCode, body) {
   return {

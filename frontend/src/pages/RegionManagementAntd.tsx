@@ -1076,9 +1076,18 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
           <Text strong>Selected regions to delete:</Text>
           <ul>
             {selectedRegions.filter(r => !r.isPrimary).map(r => (
-              <li key={r.region}>{r.displayName} ({r.region})</li>
+              <li key={r.region}>
+                {r.displayName} ({r.region}): {r.workstationCount ?? 0} workstation{(r.workstationCount ?? 0) === 1 ? '' : 's'}
+              </li>
             ))}
           </ul>
+          {selectedRegions.some(r => !r.isPrimary && (r.workstationCount ?? 0) > 0) && (
+            <Alert
+              type="error"
+              message="A regional hub can't be deleted while workstations remain in its Region. Terminate them first."
+              style={{ marginBottom: 16 }}
+            />
+          )}
           {selectedRegions.some(r => r.isPrimary) && (
             <Alert type="info" message="The primary region cannot be deleted and will be skipped." />
           )}

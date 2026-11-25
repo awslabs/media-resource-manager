@@ -12,6 +12,18 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Fixed
+
+- Deleting a regional hub is refused while workstations remain in its
+  Region. The API returns 409 with the count, for example "Terminate the 2
+  workstations in us-west-2 before deleting its regional hub.", and the hub
+  stays as it is. Records of terminated workstations and failed creates
+  don't count. The delete confirmation on **Regions** shows each Region's
+  workstation count. Before, the delete started, and the hub stack's VPC,
+  subnets and security group couldn't be removed while those workstations
+  still used them.
+  ([#145](https://github.com/awslabs/media-resource-manager/issues/145))
+
 ## [1.6.0] - 2026-11-25
 
 Fixes for SMB storage on Windows workstations, the `ResourceAdmin` password
