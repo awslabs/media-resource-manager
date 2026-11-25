@@ -22,6 +22,22 @@ upgrade to that version; a version without it needs only a redeploy.
   ([#148](https://github.com/awslabs/media-resource-manager/pull/148),
   [#82](https://github.com/awslabs/media-resource-manager/issues/82))
 
+### Fixed
+
+- Deleting a regional hub is refused while workstations remain in its
+  Region. The API returns 409 with the count, for example "Terminate the 2
+  workstations in us-west-2 before deleting its regional hub.", and lists
+  the workstations by hostname and instance ID (up to 20, then "and N
+  more"). The hub stays as it is, and no workstation is deleted. Records of
+  terminated workstations and failed creates don't count. The delete dialog
+  on **Regions** shows each Region's workstation count, lists the
+  workstations after a refused delete, and says to snapshot or copy any data
+  you need from them, then terminate them before deleting the hub. Before,
+  the delete started, and the hub stack's VPC, subnets and security group
+  couldn't be removed while those workstations still used them.
+  ([#147](https://github.com/awslabs/media-resource-manager/pull/147),
+  [#145](https://github.com/awslabs/media-resource-manager/issues/145))
+
 ### Security
 
 - The AD sign-in Lambda (`ldap-auth`) logs sign-in requests, LDAP binds and
