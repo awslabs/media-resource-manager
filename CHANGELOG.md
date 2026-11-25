@@ -81,6 +81,20 @@ upgrade to that version; a version without it needs only a redeploy.
   with `Cache-Control: no-cache`, and the hashed bundles under `assets/` with
   a one-year immutable `Cache-Control`.
   ([#124](https://github.com/awslabs/media-resource-manager/pull/124))
+- `delete-stacks.sh` with an acronym argument (`./delete-stacks.sh MRM`)
+  cleans up only the product's own SSM parameters. It takes the product name
+  from `cdk.json`, or the default name, whether or not you pass an acronym,
+  and refuses the SSM step if the parameter path would be `/`. Before, passing
+  an acronym left the product name empty, and the SSM step listed and deleted
+  every parameter in the Region.
+  ([#133](https://github.com/awslabs/media-resource-manager/pull/133))
+- `delete-stacks.sh` stops on AWS CLI errors. It checks your credentials
+  before it starts, counts a stack as deleted only when CloudFormation says
+  it does not exist, and stops with the error when a list call in the cleanup
+  steps fails. Before, an error such as expired credentials made it report
+  live stacks as already deleted and the cleanup steps as finding nothing. If
+  your credentials expire during a run, refresh them and run the script again.
+  ([#133](https://github.com/awslabs/media-resource-manager/pull/133))
 
 ### Removed
 
