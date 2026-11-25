@@ -48,6 +48,14 @@ upgrade to that version; a version without it needs only a redeploy.
   regional hub **Update** replaces the hub's DCV Connection Gateway.
   ([#126](https://github.com/awslabs/media-resource-manager/pull/126))
 
+### Changed
+
+- `scripts/create-multipart-upload.py` takes the target bucket, object key
+  and file size as required arguments, and the part size as an option
+  (default 500 MB):
+  `python3 scripts/create-multipart-upload.py <bucket> <key> <file_size_bytes> [--part-size MB]`.
+  ([#134](https://github.com/awslabs/media-resource-manager/pull/134))
+
 ### Fixed
 
 - Windows workstation records store the **Join Domain** setting
@@ -95,6 +103,20 @@ upgrade to that version; a version without it needs only a redeploy.
   with `Cache-Control: no-cache`, and the hashed bundles under `assets/` with
   a one-year immutable `Cache-Control`.
   ([#124](https://github.com/awslabs/media-resource-manager/pull/124))
+- `delete-stacks.sh` with an acronym argument (`./delete-stacks.sh MRM`)
+  cleans up only the product's own SSM parameters. It takes the product name
+  from `cdk.json`, or the default name, whether or not you pass an acronym,
+  and refuses the SSM step if the parameter path would be `/`. Before, passing
+  an acronym left the product name empty, and the SSM step listed and deleted
+  every parameter in the Region.
+  ([#133](https://github.com/awslabs/media-resource-manager/pull/133))
+- `delete-stacks.sh` stops on AWS CLI errors. It checks your credentials
+  before it starts, counts a stack as deleted only when CloudFormation says
+  it does not exist, and stops with the error when a list call in the cleanup
+  steps fails. Before, an error such as expired credentials made it report
+  live stacks as already deleted and the cleanup steps as finding nothing. If
+  your credentials expire during a run, refresh them and run the script again.
+  ([#133](https://github.com/awslabs/media-resource-manager/pull/133))
 - With an existing VPC (`VpcId`), the VPC analyzer checks that each private
   subnet has outbound internet access. `scripts/analyze-vpc.sh` (and
   `scripts/analyze-vpc.ps1`) looks at the subnet's route table, or the VPC
@@ -123,6 +145,17 @@ upgrade to that version; a version without it needs only a redeploy.
 - The unused `GET /auth/validate` route and its `validate-jwt` Lambda.
   Protected routes validate tokens with the API's JWT authorizer.
   ([#121](https://github.com/awslabs/media-resource-manager/pull/121))
+
+### Fixed
+
+- The pipeline template's `AdMode` parameter defaults to empty, which keeps
+  the mode in the stored deployment config, like the other optional pipeline
+  parameters. A new install still gets `managed`. A pipeline stack that set
+  `connector` through `MRM_PARAM_OVERRIDES` keeps it when the stack is
+  updated with the new template. If your pipeline stack already has
+  `AdMode=managed` set and the deployment runs in connector mode, set
+  `AdMode` to `connector` or leave it empty when you update the stack.
+  ([#125](https://github.com/awslabs/media-resource-manager/pull/125))
 
 ### Security
 

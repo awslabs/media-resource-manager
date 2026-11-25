@@ -1152,6 +1152,8 @@ The script will:
 
 **Important:** The cleanup script auto-detects your region from `aws configure`. Ensure your AWS CLI is configured for the correct region before running.
 
+The script stops if an AWS CLI call fails, for example when your credentials expire during a run. Refresh your credentials and run it again; stacks and resources that are already gone are skipped.
+
 Alternatively, delete stacks manually in reverse order:
 ```bash
 cdk destroy MRM-Events
