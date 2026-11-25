@@ -68,7 +68,38 @@ async function generateHostname() {
     const hostname = `${hostnamePrefix}${paddedNumber}`;
 
     console.log(`Generated hostname: ${hostname} (number: ${hostnameNumber})`);
-    return { hostname, hostnameNumber };
+    return { hostname, hostnameNumber, prefix: hostnamePrefix };
+}
+
+/**
+ * Give a hostname number back when no workstation got it, so the next create
+ * uses it (#5). Only the newest number can go back: if another create has
+ * taken a later one since, the counter has moved on and the number is skipped.
+ */
+async function releaseHostname(reservation) {
+    if (!reservation || !reservation.prefix || !reservation.hostnameNumber) return;
+    const number = reservation.hostnameNumber;
+    try {
+        await dynamodb.send(new UpdateCommand({
+            TableName: process.env.HOSTNAME_COUNTER_TABLE_NAME,
+            Key: { prefix: reservation.prefix },
+            UpdateExpression: 'SET #counter = :previous, lastUpdated = :now',
+            ConditionExpression: '#counter = :number',
+            ExpressionAttributeNames: { '#counter': 'counter' },
+            ExpressionAttributeValues: {
+                ':number': number,
+                ':previous': number - 1,
+                ':now': new Date().toISOString()
+            }
+        }));
+        console.log(`Released unused hostname number ${number} (${reservation.hostname})`);
+    } catch (error) {
+        if (error.name === 'ConditionalCheckFailedException') {
+            console.log(`Hostname number ${number} not released: a later number is already in use`);
+        } else {
+            console.warn(`Could not release hostname number ${number}:`, error.message);
+        }
+    }
 }
 
 exports.handler = async (event) => {
@@ -99,21 +130,31 @@ exports.handler = async (event) => {
     }
 
     if (retrySubnetIndex >= subnetIds.length) {
+        await releaseHostname(event.hostnameReservation);
         throw new Error('All subnets exhausted - insufficient capacity');
     }
 
     const subnetId = subnetIds[retrySubnetIndex];
     console.log(`Attempting to launch in subnet ${subnetId} (attempt ${retrySubnetIndex + 1}/${subnetIds.length}) in region ${targetRegion}`);
 
-    // Generate unique hostname using atomic counter
+    // Generate unique hostname using atomic counter. A capacity retry in the
+    // next subnet passes back the number reserved by the earlier attempt, so
+    // a failed attempt doesn't use up a number (#5).
     let hostname = null;
     let hostnameNumber = null;
-    try {
-        const hostnameResult = await generateHostname();
-        hostname = hostnameResult.hostname;
-        hostnameNumber = hostnameResult.hostnameNumber;
-    } catch (error) {
-        console.warn('Failed to generate hostname, will use fallback:', error.message);
+    let reservation = event.hostnameReservation || null;
+    if (reservation && reservation.hostname && reservation.hostnameNumber) {
+        ({ hostname, hostnameNumber } = reservation);
+        console.log(`Reusing hostname ${hostname} (number: ${hostnameNumber}) from the previous attempt`);
+    } else {
+        reservation = null;
+        try {
+            reservation = await generateHostname();
+            hostname = reservation.hostname;
+            hostnameNumber = reservation.hostnameNumber;
+        } catch (error) {
+            console.warn('Failed to generate hostname, will use fallback:', error.message);
+        }
     }
 
     // Get AMI/pipeline name for workstation display name
@@ -208,6 +249,9 @@ fi
 `;
     const userDataBase64 = Buffer.from(userDataScript).toString('base64');
 
+    // Set once RunInstances succeeds: from then on the number belongs to the
+    // instance, even if a later step fails.
+    let launched = false;
     try {
         const result = await ec2.send(new RunInstancesCommand({
             LaunchTemplate: { LaunchTemplateId: launchTemplateId, Version: '$Latest' },
@@ -233,6 +277,7 @@ fi
             }]
         }));
 
+        launched = true;
         const instanceId = result.Instances[0].InstanceId;
         const currentTime = new Date().toISOString();
 
@@ -299,8 +344,14 @@ fi
                 }));
             }
 
-            return { ...event, error: errorType, errorMessage: error.message, retrySubnetIndex: nextRetryIndex, shouldRetry: willRetry };
+            // Keep the number for the next subnet, or give it back after the last one
+            if (!willRetry) await releaseHostname(reservation);
+            return {
+                ...event, error: errorType, errorMessage: error.message, retrySubnetIndex: nextRetryIndex, shouldRetry: willRetry,
+                hostnameReservation: willRetry ? reservation : null
+            };
         }
+        if (!launched) await releaseHostname(reservation);
         throw error;
     }
 };

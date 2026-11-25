@@ -38,6 +38,7 @@ import {
 import type { ColumnsType } from 'antd/es/table';
 import type { MenuProps } from 'antd';
 import AppLayoutAntd from '../components/AppLayoutAntd';
+import { FinalBackupDetails, FinalBackupNotice } from '../components/FinalBackupDetails';
 import { getAuthToken } from '../utils/auth';
 import { apiCall } from '../utils/api';
 import { listStorageS3Buckets, getStorageConfig, getStoragePricing, S3Bucket, StorageConfig, StoragePricing } from '../utils/storageApi';
@@ -88,7 +89,7 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
   const [primaryRegion, setPrimaryRegion] = useState<string>('');
   const [loading, setLoading] = useState(true);
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
-  const [alert, setAlert] = useState<{ type: 'success' | 'error' | 'info' | 'warning'; message: string } | null>(null);
+  const [alert, setAlert] = useState<{ type: 'success' | 'error' | 'info' | 'warning'; message: string; description?: React.ReactNode } | null>(null);
 
   // Modal states
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -331,16 +332,32 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
       const token = getAuthToken();
       if (!token) throw new Error('No current user');
 
-      await Promise.all(
-        selectedResources.map((r) =>
-          apiCall(`storage/${r.storageId}`, {
+      const results = await Promise.all(
+        selectedResources.map(async (r) => {
+          const response = await apiCall(`storage/${r.storageId}`, {
             method: 'DELETE',
             headers: { Authorization: `Bearer ${token}` },
-          })
-        )
+          });
+          const body = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(body.error || `Failed to delete ${r.name || r.storageId}`);
+          return body;
+        })
       );
 
-      setAlert({ type: 'info', message: `Deletion started for ${selectedResources.length} resource(s). This may take 5-10 minutes.` });
+      // A started stack deletion has status 'deleting'; a record removed
+      // directly returns its own message (for example, storage MRM didn't create).
+      const started = results.filter((b) => b.status === 'deleting').length;
+      const messages = [...new Set(results.filter((b) => b.status !== 'deleting').map((b) => b.message).filter(Boolean))];
+      // FSx for Windows file systems and FSx for ONTAP volumes leave a final backup
+      const finalBackups: FinalBackupNotice[] = results.map((b) => b.finalBackup).filter(Boolean);
+      setAlert({
+        type: 'info',
+        message: [
+          started ? `Deletion started for ${started} resource(s). This may take 5-10 minutes.` : '',
+          ...messages,
+        ].filter(Boolean).join(' '),
+        description: finalBackups.length ? <FinalBackupDetails notices={finalBackups} /> : undefined,
+      });
       setShowDeleteModal(false);
       setSelectedRowKeys([]);
       fetchData();
@@ -627,6 +644,7 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
           <Alert
             type={alert.type}
             message={alert.message}
+            description={alert.description}
             closable
             onClose={() => setAlert(null)}
             style={{ marginBottom: 16 }}
@@ -1129,6 +1147,12 @@ const FilesystemsAntd: React.FC<FilesystemsAntdProps> = ({
             message="This will delete the storage resources and their associated AWS resources. This action cannot be undone."
             style={{ marginBottom: 16 }}
           />
+          {selectedResources.some((r) => r.type === 'fsx-windows' || r.type === 'fsx-ontap') && (
+            <p data-testid="final-backup-note">
+              A final backup will be kept of each FSx for Windows file system and FSx for ONTAP volume that MRM deletes,
+              until you delete the backup.
+            </p>
+          )}
           <p>Are you sure you want to delete {selectedResources.length} storage resource(s)?</p>
           <ul>
             {selectedResources.map((r) => (
