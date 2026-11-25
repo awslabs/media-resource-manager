@@ -77,7 +77,9 @@ const adminEvent = (region: string) => ({
 });
 
 const hub = (region: string, extra: object = {}) => ({ region, status: 'available', cloudFormationStackName: `MRM-Regional-Hub-${region}`, ...extra });
-const ws = (n: number, region: string, extra: object = {}) => ({ instanceId: `i-${String(n).padStart(17, '0')}`, region, status: 'Running', instanceStatus: 'running', ...extra });
+const ws = (n: number, region: string, extra: object = {}) => ({
+  instanceId: `i-${String(n).padStart(17, '0')}`, hostname: `ws-${String(n).padStart(4, '0')}`, region, status: 'Running', instanceStatus: 'running', ...extra,
+});
 
 async function del(region: string) {
   const res = await handler(adminEvent(region));
@@ -102,6 +104,30 @@ describe('delete-regional-hub workstation check', () => {
     expect(r.body.workstationCount).toBe(2);
     expect(kinds()).not.toContain('Update');
     expect(kinds()).not.toContain('StartExecution');
+  });
+
+  test('lists the workstations by hostname and instance ID, with the hint, and deletes nothing', async () => {
+    mockState.workstations = [ws(2, 'us-west-2'), ws(1, 'us-west-2', { hostname: undefined, workstationName: 'edit-bay' })];
+    const r = await del('us-west-2');
+    expect(r.statusCode).toBe(409);
+    expect(r.body.workstations).toEqual([
+      { hostname: 'edit-bay', instanceId: ws(1, 'x').instanceId },
+      { hostname: 'ws-0002', instanceId: ws(2, 'x').instanceId },
+    ]);
+    expect(r.body.moreCount).toBe(0);
+    expect(r.body.hint).toBe('Snapshot or copy any data you need from these workstations, then terminate them before deleting the hub.');
+    // Only reads: the hub record and the workstation scan
+    expect(new Set(kinds())).toEqual(new Set(['Get', 'Scan']));
+  });
+
+  test('lists at most 20 workstations and counts the rest', async () => {
+    mockState.workstations = Array.from({ length: 23 }, (_, i) => ws(i + 1, 'us-west-2'));
+    const r = await del('us-west-2');
+    expect(r.statusCode).toBe(409);
+    expect(r.body.workstationCount).toBe(23);
+    expect(r.body.workstations).toHaveLength(20);
+    expect(r.body.workstations[0].hostname).toBe('ws-0001');
+    expect(r.body.moreCount).toBe(3);
   });
 
   test('uses the singular for one workstation', async () => {

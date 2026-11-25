@@ -64,6 +64,16 @@ interface RegionalHub {
   lastError?: string;
 }
 
+// A 409 from DELETE /regions/{region}: workstations remain in the Region.
+interface HubDeleteRefusal {
+  region: string;
+  displayName: string;
+  error: string;
+  hint?: string;
+  workstations: { hostname: string; instanceId: string }[];
+  moreCount: number;
+}
+
 // Statuses that change on their own, so the page refreshes while any hub has one.
 const TRANSIENT_STATUSES = ['pending', 'validating', 'creating', 'initializing', 'updating', 'deleting'];
 const UPDATABLE_STATUSES = ['available', 'update_failed'];
@@ -258,6 +268,7 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
   const [selectedRowKeys, setSelectedRowKeys] = useState<React.Key[]>([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [deleteRefusals, setDeleteRefusals] = useState<HubDeleteRefusal[]>([]);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [selectedRegion, setSelectedRegion] = useState<RegionalHub | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -453,7 +464,10 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
       if (!token) throw new Error('No current user');
 
       const selectedRegions = regions.filter(r => selectedRowKeys.includes(r.region));
-      
+      const refusals: HubDeleteRefusal[] = [];
+      let deletedCount = 0;
+      setDeleteRefusals([]);
+
       for (const region of selectedRegions) {
         if (region.isPrimary) continue;
 
@@ -464,18 +478,38 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
 
         if (!response.ok) {
           const errorData = await response.json();
+          // Workstations remain in the Region: list them in the dialog and go on
+          if (response.status === 409 && Array.isArray(errorData.workstations)) {
+            refusals.push({
+              region: region.region,
+              displayName: region.displayName,
+              error: errorData.error,
+              hint: errorData.hint,
+              workstations: errorData.workstations,
+              moreCount: errorData.moreCount || 0,
+            });
+            continue;
+          }
           throw new Error(errorData.error || `Failed to delete ${region.region}`);
         }
+        deletedCount++;
       }
 
-      const deletedCount = selectedRegions.filter(r => !r.isPrimary).length;
-      setAlert({
-        type: 'info',
-        message: `Deletion started for ${deletedCount} regional hub(s). This process may take several minutes.`
-      });
-      setSelectedRowKeys([]);
-      setShowDeleteModal(false);
-      fetchRegions();
+      if (deletedCount > 0) {
+        setAlert({
+          type: 'info',
+          message: `Deletion started for ${deletedCount} regional hub(s). This process may take several minutes.`
+        });
+        fetchRegions();
+      }
+      if (refusals.length > 0) {
+        // Keep the dialog open on the refused hubs
+        setDeleteRefusals(refusals);
+        setSelectedRowKeys(refusals.map(r => r.region));
+      } else {
+        setSelectedRowKeys([]);
+        setShowDeleteModal(false);
+      }
     } catch (error) {
       console.error('Error deleting regional hub:', error);
       setAlert({ type: 'error', message: `Failed to delete regional hub: ${(error as Error).message}` });
@@ -760,7 +794,7 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
             </Tooltip>
             <Button
               icon={<DeleteOutlined />}
-              onClick={() => setShowDeleteModal(true)}
+              onClick={() => { setDeleteRefusals([]); setShowDeleteModal(true); }}
               disabled={!canDelete}
             >
               Delete
@@ -1061,7 +1095,7 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
       <Modal
         title="Delete Regional Hub"
         open={showDeleteModal}
-        onCancel={() => setShowDeleteModal(false)}
+        onCancel={() => { setShowDeleteModal(false); setDeleteRefusals([]); }}
         onOk={handleDeleteRegion}
         confirmLoading={deleting}
         okText="Delete"
@@ -1084,10 +1118,31 @@ const RegionManagementAntd: React.FC<RegionManagementAntdProps> = ({
           {selectedRegions.some(r => !r.isPrimary && (r.workstationCount ?? 0) > 0) && (
             <Alert
               type="error"
-              message="A regional hub can't be deleted while workstations remain in its Region. Terminate them first."
+              message="A regional hub can't be deleted while workstations remain in its Region."
+              description="Snapshot or copy any data you need from these workstations, then terminate them before deleting the hub."
               style={{ marginBottom: 16 }}
             />
           )}
+          {deleteRefusals.map(r => (
+            <Alert
+              key={r.region}
+              type="error"
+              data-testid="hub-delete-refusal"
+              message={`${r.displayName} (${r.region}): ${r.error}`}
+              description={
+                <>
+                  <ul style={{ marginBottom: 4 }}>
+                    {r.workstations.map(w => (
+                      <li key={w.instanceId}>{w.hostname || 'Unnamed workstation'} ({w.instanceId})</li>
+                    ))}
+                  </ul>
+                  {r.moreCount > 0 && <div>and {r.moreCount} more</div>}
+                  {r.hint && <div>{r.hint}</div>}
+                </>
+              }
+              style={{ marginBottom: 16 }}
+            />
+          ))}
           {selectedRegions.some(r => r.isPrimary) && (
             <Alert type="info" message="The primary region cannot be deleted and will be skipped." />
           )}

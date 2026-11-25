@@ -16,12 +16,15 @@ upgrade to that version; a version without it needs only a redeploy.
 
 - Deleting a regional hub is refused while workstations remain in its
   Region. The API returns 409 with the count, for example "Terminate the 2
-  workstations in us-west-2 before deleting its regional hub.", and the hub
-  stays as it is. Records of terminated workstations and failed creates
-  don't count. The delete confirmation on **Regions** shows each Region's
-  workstation count. Before, the delete started, and the hub stack's VPC,
-  subnets and security group couldn't be removed while those workstations
-  still used them.
+  workstations in us-west-2 before deleting its regional hub.", and lists
+  the workstations by hostname and instance ID (up to 20, then "and N
+  more"). The hub stays as it is, and no workstation is deleted. Records of
+  terminated workstations and failed creates don't count. The delete dialog
+  on **Regions** shows each Region's workstation count, lists the
+  workstations after a refused delete, and says to snapshot or copy any data
+  you need from them, then terminate them before deleting the hub. Before,
+  the delete started, and the hub stack's VPC, subnets and security group
+  couldn't be removed while those workstations still used them.
   ([#145](https://github.com/awslabs/media-resource-manager/issues/145))
 
 ## [1.6.0] - 2026-11-25

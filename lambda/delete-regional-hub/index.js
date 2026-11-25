@@ -66,12 +66,18 @@ exports.handler = async (event) => {
 
     // Workstations still in the Region use the hub's VPC, subnets and roles,
     // and its stack can't be deleted around them.
-    const workstationCount = await countActiveWorkstations(region);
-    if (workstationCount > 0) {
+    // The workstations are listed, never deleted: they may hold data the
+    // admin needs to keep.
+    const workstations = await findActiveWorkstations(region);
+    if (workstations.length > 0) {
+      const workstationCount = workstations.length;
       const noun = workstationCount === 1 ? 'workstation' : 'workstations';
       return response(409, {
         error: `Terminate the ${workstationCount} ${noun} in ${region} before deleting its regional hub.`,
-        workstationCount
+        hint: 'Snapshot or copy any data you need from these workstations, then terminate them before deleting the hub.',
+        workstationCount,
+        workstations: workstations.slice(0, MAX_LISTED_WORKSTATIONS),
+        moreCount: Math.max(0, workstationCount - MAX_LISTED_WORKSTATIONS)
       });
     }
     
@@ -124,15 +130,19 @@ exports.handler = async (event) => {
 // terminated instance's record 'Terminated', and a failed create is 'failed'.
 const ENDED_STATUSES = ['terminated', 'failed'];
 
+// The 409 lists at most this many workstations, plus a count of the rest.
+const MAX_LISTED_WORKSTATIONS = 20;
+
 /**
- * Count the workstation records in a Region whose instance may still exist.
- * Same filtered scan as getWorkstationCountForRegion in get-regional-hub (the
- * table has no region index and few items), read to the last page. Records
- * without a region belong to the primary Region, which can't be deleted, so
- * they don't count here.
+ * The workstation records in a Region whose instance may still exist, as
+ * { hostname, instanceId }, sorted by hostname. Same filtered scan as
+ * getWorkstationCountForRegion in get-regional-hub (the table has no region
+ * index and few items), read to the last page. Records without a region
+ * belong to the primary Region, which can't be deleted, so they don't count
+ * here.
  */
-async function countActiveWorkstations(region) {
-  let count = 0;
+async function findActiveWorkstations(region) {
+  const found = [];
   let ExclusiveStartKey;
   do {
     const page = await docClient.send(new ScanCommand({
@@ -140,16 +150,17 @@ async function countActiveWorkstations(region) {
       FilterExpression: '#r = :region',
       ExpressionAttributeNames: { '#r': 'region', '#s': 'status' },
       ExpressionAttributeValues: { ':region': region },
-      ProjectionExpression: 'instanceId, #s, instanceStatus',
+      ProjectionExpression: 'instanceId, hostname, workstationName, #s, instanceStatus',
       ExclusiveStartKey
     }));
-    count += (page.Items || []).filter(item =>
-      !ENDED_STATUSES.includes(String(item.status || '').toLowerCase()) &&
-      String(item.instanceStatus || '').toLowerCase() !== 'terminated'
-    ).length;
+    for (const item of page.Items || []) {
+      if (ENDED_STATUSES.includes(String(item.status || '').toLowerCase())) continue;
+      if (String(item.instanceStatus || '').toLowerCase() === 'terminated') continue;
+      found.push({ hostname: item.hostname || item.workstationName || '', instanceId: item.instanceId });
+    }
     ExclusiveStartKey = page.LastEvaluatedKey;
   } while (ExclusiveStartKey);
-  return count;
+  return found.sort((a, b) => a.hostname.localeCompare(b.hostname) || String(a.instanceId).localeCompare(String(b.instanceId)));
 }
 
 function response(statusCode, body) {
