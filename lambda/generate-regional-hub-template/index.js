@@ -1436,8 +1436,10 @@ function generateCloudFormationTemplate(config) {
             { Ref: 'ConnectionGatewayUdpTargetGroup' },
             ...(browser ? [browser.targetGroupRef] : [])
           ],
-          HealthCheckType: 'EC2',
-          HealthCheckGracePeriod: 300,
+          // Replace a gateway that fails its target group health checks (for
+          // example one whose install failed). Same as the primary stack.
+          HealthCheckType: 'ELB',
+          HealthCheckGracePeriod: 900,
           Tags: [{ Key: 'Name', Value: { 'Fn::Sub': '${ProductName}-Regional-ConnectionGateway' }, PropagateAtLaunch: true }]
         }
       },
@@ -3393,6 +3395,14 @@ function generateDcvLambdaResources(acronymLower, privateSubnetRefs, lambdaAsset
                 Effect: 'Allow',
                 Action: ['ec2:DescribeInstances'],
                 Resource: '*'
+              },
+              {
+                // dcv-session-manager reads a Linux workstation's AMI name to pick
+                // the session owner (rocky or ubuntu). No resource-level permissions.
+                Effect: 'Allow',
+                Action: ['ec2:DescribeImages'],
+                Resource: '*',
+                Condition: { StringEquals: { 'aws:RequestedRegion': { Ref: 'AWS::Region' } } }
               },
               {
                 Effect: 'Allow',

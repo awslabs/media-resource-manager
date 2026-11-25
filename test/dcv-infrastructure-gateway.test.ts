@@ -78,8 +78,22 @@ describe('primary gateway (default: CloudFront browser path)', () => {
     const asgs = template.findResources('AWS::AutoScaling::AutoScalingGroup');
     const [, asg] = Object.entries(asgs).find(([id]) => id.startsWith('ConnectionGatewayAsg'))!;
     expect((asg as any).UpdatePolicy.AutoScalingRollingUpdate).toEqual(expect.objectContaining({
-      MaxBatchSize: 1, MinInstancesInService: 1,
+      MaxBatchSize: 1, MinInstancesInService: 1, PauseTime: 'PT5M',
     }));
+  });
+
+  it('replaces a gateway that fails its target group health checks, after a 900 s grace period', () => {
+    const asgs = template.findResources('AWS::AutoScaling::AutoScalingGroup');
+    const [, asg] = Object.entries(asgs).find(([id]) => id.startsWith('ConnectionGatewayAsg'))!;
+    const props = (asg as any).Properties;
+    expect(props.HealthCheckType).toBe('ELB');
+    expect(props.HealthCheckGracePeriod).toBe(900);
+    // NLB TCP 8443, NLB UDP 8444 and the browser ALB HTTPS 8443 target groups.
+    const tgIds = props.TargetGroupARNs.map((ref: any) => ref.Ref).sort();
+    expect(tgIds).toHaveLength(3);
+    expect(tgIds[0]).toMatch(/^ConnectionGatewayTargetGroup/);
+    expect(tgIds[1]).toMatch(/^ConnectionGatewayUdpTargetGroup/);
+    expect(tgIds[2]).toMatch(/^GatewayBrowserTargetGroup/);
   });
 
   const vpcCidrsPrefixList = { 'Fn::GetAtt': ['VpcCidrPrefixList', 'PrefixListId'] };
@@ -391,5 +405,30 @@ describe('vpc-cidr-prefix-list', () => {
     const none = fakeEc2();
     await vpcCidrPrefixList.handle({ RequestType: 'Delete', PhysicalResourceId: 'abc-request', ResourceProperties: props }, none, noSleep);
     expect(none.calls).toEqual([]);
+  });
+});
+
+describe('workstation instance role and SMB mount secrets', () => {
+  const smbMountResource = 'arn:aws:secretsmanager:us-east-1:123456789012:secret:/MediaResourceManager/Workstation/*/SmbMount-*';
+  let statements: any[];
+  beforeAll(() => {
+    const template = synth();
+    const roles = template.findResources('AWS::IAM::Role');
+    const [roleId] = Object.entries(roles).find(([id]) => id.startsWith('WorkstationInstanceRole'))!;
+    const policies = template.findResources('AWS::IAM::Policy');
+    statements = Object.values(policies)
+      .filter((p: any) => JSON.stringify(p.Properties.Roles).includes(`"${roleId}"`))
+      .flatMap((p: any) => p.Properties.PolicyDocument.Statement);
+  }, 120000);
+
+  test('can read only the per-workstation SMB mount secrets path, with GetSecretValue only', () => {
+    const smb = statements.filter(s => JSON.stringify(s.Resource).includes('SmbMount'));
+    expect(smb).toEqual([{ Effect: 'Allow', Action: 'secretsmanager:GetSecretValue', Resource: smbMountResource }]);
+  });
+
+  test('has no read on the AD service-account or storage secrets', () => {
+    const text = JSON.stringify(statements);
+    expect(text).not.toContain('/Identity/');
+    expect(text).not.toContain('/Storage/');
   });
 });

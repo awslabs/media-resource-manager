@@ -722,12 +722,17 @@ export class ApiStack extends cdk.Stack {
         STORAGE_TABLE_NAME: props.storageTable.tableName,
         WORKSTATION_TABLE_NAME: props.workstationTable.tableName,
         PASCAL_CASE_NAME: props.pascalCaseName,
+        // Join Domain default the console uses when it creates a Windows
+        // workstation; used for records that predate the joinDomain field.
+        DEFAULT_WINDOWS_JOIN_DOMAIN: props.useCognitoAuth === false ? 'true' : 'false',
       }
     });
 
     // Grant permissions for FSx SMB mount manager
     props.storageTable.grantReadData(fsxSmbMountManagerFunction);
     props.workstationTable.grantReadData(fsxSmbMountManagerFunction);
+    // Records joinDomain on workstation records that predate the field.
+    props.workstationTable.grant(fsxSmbMountManagerFunction, 'dynamodb:UpdateItem');
     
     // Grant KMS permissions if tables use customer-managed encryption
     if (props.dataEncryptionKey) {
@@ -771,6 +776,27 @@ export class ApiStack extends cdk.Stack {
         `arn:aws:secretsmanager:*:${this.account}:secret:/${props.pascalCaseName}/Storage/*`
       ],
     }));
+    // Per-workstation SMB mount secrets for standalone Windows workstations
+    // (/<ProductName>/Workstation/<instanceId>/SmbMount, primary Region). The
+    // Lambda writes them and sets their resource policy; it never reads them.
+    // Names get a random suffix, so the ARN pattern ends in SmbMount-*;
+    // CreateSecret is authorized on the name without the suffix.
+    fsxSmbMountManagerFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'secretsmanager:CreateSecret',
+        'secretsmanager:PutSecretValue',
+        'secretsmanager:PutResourcePolicy',
+        'secretsmanager:DeleteSecret',
+        'secretsmanager:DescribeSecret',
+      ],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/${props.pascalCaseName}/Workstation/*/SmbMount-*`,
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:/${props.pascalCaseName}/Workstation/*/SmbMount`,
+      ],
+    }));
+    fsxSmbMountManagerFunction.addEnvironment('ACRONYM', props.acronym);
+
     // Grant the mode-agnostic SSM pointer to the service-account secret ARN.
     // The Lambda reads this to resolve the actual secret ARN at runtime.
     fsxSmbMountManagerFunction.addToRolePolicy(new iam.PolicyStatement({
@@ -1084,6 +1110,18 @@ export class ApiStack extends cdk.Stack {
     this.api = new apigateway.RestApi(this, 'WorkstationApi', {
       restApiName: `${props.pascalCaseName}-Workstation-API`,
       description: 'API for managing workstations',
+      deployOptions: {
+        // POST /auth/ldap is the one sign-in route reachable without a token.
+        // Throttle it at the stage so excess requests get a 429 before they
+        // reach the Lambda or the directory. This is a stage-wide cap, not
+        // per client IP.
+        methodOptions: {
+          '/auth/ldap/POST': {
+            throttlingRateLimit: 10,
+            throttlingBurstLimit: 20,
+          },
+        },
+      },
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS,
         allowMethods: apigateway.Cors.ALL_METHODS,
@@ -1859,29 +1897,9 @@ export class ApiStack extends cdk.Stack {
     const directAuthResource = authResource.addResource('ldap');
     const directAuthIntegration = integrate(directLdapAuthFunction);
     
-    // Login endpoint
+    // Login endpoint. Reachable before sign-in by design (it issues the
+    // token); the stage throttles it (see deployOptions.methodOptions).
     directAuthResource.addMethod('POST', directAuthIntegration);
-    
-    // JWT validation endpoint
-    const validateResource = authResource.addResource('validate');
-    const validateFunction = new lambda.Function(this, 'ValidateJwtFunction', {
-      functionName: `${props.acronym.toLowerCase()}-validate-jwt`,
-      runtime: lambda.Runtime.NODEJS_22_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/validate-jwt')),
-      environmentEncryption: props.dataEncryptionKey,
-      environment: {
-        JWT_SECRET_ARN: jwtSecret.secretArn
-      },
-      timeout: cdk.Duration.seconds(10),
-      reservedConcurrentExecutions: 25,
-    });
-
-    // Grant permission to read the JWT secret
-    jwtSecret.grantRead(validateFunction);
-    
-    const validateIntegration = integrate(validateFunction);
-    validateResource.addMethod('GET', validateIntegration);
 
     // DCV Session Manager endpoints
     const dcvResource = this.api.root.addResource('dcv');

@@ -10,6 +10,68 @@ const ec2 = new EC2Client();
 const dynamodb = DynamoDBDocumentClient.from(new DynamoDBClient());
 const ssm = new SSMClient();
 
+// EC2 error codes for instance IDs that no longer exist (or never could). A
+// workstation record can outlive its instance: it was terminated outside MRM,
+// or EC2 stopped listing it about an hour after termination. On stack delete
+// such an instance is already gone, so it counts as cleaned up.
+const GONE_INSTANCE_ERRORS = new Set(['InvalidInstanceID.NotFound', 'InvalidInstanceID.Malformed']);
+const ENDING_STATES = new Set(['shutting-down', 'terminated']);
+const BATCH_SIZE = 100;
+const TERMINATE_ATTEMPTS = 3;
+
+const isGoneInstanceError = (error) => GONE_INSTANCE_ERRORS.has(error?.name) || GONE_INSTANCE_ERRORS.has(error?.Code);
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+function chunks(items, size) {
+    const out = [];
+    for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
+    return out;
+}
+
+// The instances in instanceIds that EC2 still lists. An instance-id filter,
+// unlike InstanceIds, returns no error for IDs that don't exist.
+async function describeExisting(instanceIds) {
+    const found = [];
+    for (const batch of chunks(instanceIds, BATCH_SIZE)) {
+        let NextToken;
+        do {
+            const page = await ec2.send(new DescribeInstancesCommand({
+                Filters: [{ Name: 'instance-id', Values: batch }],
+                NextToken
+            }));
+            for (const reservation of page.Reservations || []) found.push(...(reservation.Instances || []));
+            NextToken = page.NextToken;
+        } while (NextToken);
+    }
+    return found;
+}
+
+// Terminate the instances that exist and aren't already shutting down or
+// terminated. If one disappears between the describe and the terminate, EC2
+// fails that whole TerminateInstances call with InvalidInstanceID.NotFound,
+// so describe again and retry the rest. Any other error fails the cleanup.
+async function terminateExisting(instanceIds) {
+    for (let attempt = 1; ; attempt++) {
+        const existing = await describeExisting(instanceIds);
+        const live = existing.filter(i => !ENDING_STATES.has(i.State?.Name)).map(i => i.InstanceId);
+        const gone = instanceIds.length - existing.length;
+        console.log(`Instances: ${live.length} to terminate, ${existing.length - live.length} already shutting down or terminated, ${gone} no longer exist`);
+        if (live.length === 0) return;
+
+        try {
+            for (const batch of chunks(live, BATCH_SIZE)) {
+                await ec2.send(new TerminateInstancesCommand({ InstanceIds: batch }));
+                console.log(`Terminating instances: ${batch.join(', ')}`);
+            }
+            return;
+        } catch (error) {
+            if (!isGoneInstanceError(error) || attempt >= TERMINATE_ATTEMPTS) throw error;
+            console.log(`An instance disappeared before it was terminated (${error.name}), checking again`);
+            await sleep(5000);
+        }
+    }
+}
+
 exports.handler = async (event) => {
     console.log('Cleanup event:', JSON.stringify({ ...event, ResponseURL: event.ResponseURL && '[REDACTED]' }, null, 2));
 
@@ -56,38 +118,23 @@ exports.handler = async (event) => {
                 }
             }));
 
-            if (workstations.Items?.length > 0) {
-                console.log(`Found \${workstations.Items.length} workstations to clean up`);
-                
-                const instanceIds = workstations.Items.map(item => item.instanceId);
-                
-                // Terminate all instances (running, stopped, etc.)
-                await ec2.send(new TerminateInstancesCommand({
-                  InstanceIds: instanceIds
-                }));
-                
-                console.log(`Terminated instances: \${instanceIds.join(', ')}`);
-                
-                // Wait for termination
-                let attempts = 0;
-                while (attempts < 30) {
-                  const instances = await ec2.send(new DescribeInstancesCommand({
-                    InstanceIds: instanceIds
-                  }));
-                  
-                  const allTerminated = instances.Reservations.every(r => 
-                    r.Instances.every(i => i.State.Name === 'terminated')
-                  );
-                  
-                  if (allTerminated) break;
-                  
-                  await new Promise(resolve => setTimeout(resolve, 10000));
-                  attempts++;
+            const instanceIds = [...new Set((workstations.Items || []).map(item => item.instanceId).filter(Boolean))];
+            if (instanceIds.length > 0) {
+                console.log(`Found ${workstations.Items.length} workstation records with ${instanceIds.length} instance IDs to clean up`);
+
+                // Terminate the instances that still exist (running, stopped, etc.)
+                await terminateExisting(instanceIds);
+
+                // Wait for termination. Instances EC2 no longer lists count as terminated.
+                for (let attempts = 0; attempts < 30; attempts++) {
+                  const remaining = (await describeExisting(instanceIds)).filter(i => i.State?.Name !== 'terminated');
+                  if (remaining.length === 0) break;
+                  await sleep(10000);
                 }
               }
               
               // 2. Aggressively clean up Lambda ENIs
-              console.log(`Cleaning up Lambda ENIs for security group: \${securityGroupId}`);
+              console.log(`Cleaning up Lambda ENIs for security group: ${securityGroupId}`);
               
               let waitAttempts = 0;
               const maxWaitAttempts = 90; // 15 minutes max wait (90 * 10 seconds)
@@ -103,7 +150,7 @@ exports.handler = async (event) => {
                   eni.Description && eni.Description.includes('Lambda')
                 );
                 
-                console.log(`Found \${lambdaEnis.length} Lambda ENIs still attached to security group`);
+                console.log(`Found ${lambdaEnis.length} Lambda ENIs still attached to security group`);
                 
                 if (lambdaEnis.length === 0) {
                   console.log('All Lambda ENIs have been cleaned up');
@@ -112,21 +159,21 @@ exports.handler = async (event) => {
                 
                 // Try to delete available ENIs
                 for (const eni of lambdaEnis) {
-                  console.log(`Processing Lambda ENI: \${eni.NetworkInterfaceId}, Status: \${eni.Status}, Description: \${eni.Description}`);
+                  console.log(`Processing Lambda ENI: ${eni.NetworkInterfaceId}, Status: ${eni.Status}, Description: ${eni.Description}`);
                   
                   if (eni.Status === 'available') {
                     try {
-                      console.log(`Attempting to delete available ENI: \${eni.NetworkInterfaceId}`);
+                      console.log(`Attempting to delete available ENI: ${eni.NetworkInterfaceId}`);
                       await ec2.send(new DeleteNetworkInterfaceCommand({
                         NetworkInterfaceId: eni.NetworkInterfaceId
                       }));
-                      console.log(`Delete request sent for ENI: \${eni.NetworkInterfaceId}`);
+                      console.log(`Delete request sent for ENI: ${eni.NetworkInterfaceId}`);
                     } catch (deleteError) {
-                      console.log(`Failed to delete ENI \${eni.NetworkInterfaceId}: \${deleteError.message}`);
+                      console.log(`Failed to delete ENI ${eni.NetworkInterfaceId}: ${deleteError.message}`);
                       // Continue with other ENIs
                     }
                   } else {
-                    console.log(`ENI \${eni.NetworkInterfaceId} is not available (status: \${eni.Status}), waiting...`);
+                    console.log(`ENI ${eni.NetworkInterfaceId} is not available (status: ${eni.Status}), waiting...`);
                   }
                 }
                 
@@ -149,10 +196,10 @@ exports.handler = async (event) => {
               );
               
               if (remainingLambdaEnis.length > 0) {
-                const errorMsg = `Failed to delete \${remainingLambdaEnis.length} Lambda ENIs after cleanup timeout`;
+                const errorMsg = `Failed to delete ${remainingLambdaEnis.length} Lambda ENIs after cleanup timeout`;
                 console.error(errorMsg);
                 remainingLambdaEnis.forEach(eni => {
-                  console.error(`Remaining ENI: \${eni.NetworkInterfaceId}, Status: \${eni.Status}`);
+                  console.error(`Remaining ENI: ${eni.NetworkInterfaceId}, Status: ${eni.Status}`);
                 });
                 throw new Error(errorMsg);
               } else {

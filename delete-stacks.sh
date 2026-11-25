@@ -3,7 +3,9 @@
 # Script to systematically delete CloudFormation stacks in dependency order
 # Dynamically discovers stacks with the product prefix and deletes them in reverse dependency order
 # Usage: ./delete-stacks.sh [ACRONYM]
-#   If ACRONYM is provided, it overrides the one derived from cdk.json
+#   If ACRONYM is provided, it overrides the one derived from cdk.json. The product
+#   name (used for SSM parameter paths) still comes from cdk.json or the default.
+# Stops on any AWS CLI error other than "stack does not exist"; rerun after fixing it.
 
 REGION="${AWS_DEFAULT_REGION:-$(aws configure get region 2>/dev/null)}"
 if [ -z "$REGION" ]; then
@@ -12,16 +14,46 @@ if [ -z "$REGION" ]; then
 fi
 echo "Using region: $REGION"
 
+# stderr of the last checked AWS CLI call, so errors can be shown and classified
+AWS_ERR=$(mktemp)
+trap 'rm -f "$AWS_ERR"' EXIT
+
+# Stop on an AWS CLI error instead of treating it as "nothing found".
+# Usage: aws_fail "<what failed>" (reads the error from $AWS_ERR)
+aws_fail() {
+    echo "$(date): Error: $1 failed:" >&2
+    cat "$AWS_ERR" >&2
+    echo "Stopping. If your AWS credentials expired, refresh them and rerun ./delete-stacks.sh." >&2
+    exit 1
+}
+
+# Check credentials before doing anything
+if ! ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>"$AWS_ERR"); then
+    aws_fail "AWS credentials check (sts get-caller-identity)"
+fi
+echo "Using account: $ACCOUNT_ID"
+
+# Product name (used for SSM parameter paths) always comes from cdk.json or the default
+PRODUCT_NAME=""
+if [ -f cdk.json ]; then
+    PRODUCT_NAME=$(jq -r '.context.productName // empty' cdk.json 2>/dev/null)
+fi
+PRODUCT_NAME="${PRODUCT_NAME:-Media Resource Manager}"
+echo "Product Name: $PRODUCT_NAME"
+
 # Check if acronym was provided as argument
 if [ -n "$1" ]; then
     ACRONYM="$1"
     echo "Using provided acronym: $ACRONYM"
 else
-    # Get product name from cdk.json and generate acronym
-    PRODUCT_NAME=$(jq -r '.context.productName // "Media Resource Manager"' cdk.json)
     ACRONYM=$(echo "$PRODUCT_NAME" | sed 's/[^A-Za-z ]//g' | awk '{for(i=1;i<=NF;i++) printf toupper(substr($i,1,1))}')
-    echo "Product Name: $PRODUCT_NAME"
     echo "Generated Acronym: $ACRONYM"
+fi
+
+# The acronym is a stack name prefix and goes into JMESPath queries
+if [[ ! "$ACRONYM" =~ ^[A-Za-z0-9]+$ ]]; then
+    echo "Error: Acronym '$ACRONYM' must be one or more letters or digits."
+    exit 1
 fi
 
 # Define the deletion order (reverse of deployment order)
@@ -60,10 +92,12 @@ DELETION_ORDER=(
 
 # Discover all stacks with our prefix
 echo "$(date): Discovering stacks with prefix '$ACRONYM-'..."
-DISCOVERED_STACKS=$(aws cloudformation list-stacks --region "$REGION" \
+if ! DISCOVERED_STACKS=$(aws cloudformation list-stacks --region "$REGION" \
     --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE ROLLBACK_COMPLETE \
     --query "StackSummaries[?starts_with(StackName, \`$ACRONYM-\`)].StackName" \
-    --output text)
+    --output text 2>"$AWS_ERR"); then
+    aws_fail "Listing stacks in $REGION"
+fi
 
 if [ -z "$DISCOVERED_STACKS" ]; then
     echo "$(date): No stacks found with prefix '$ACRONYM-'"
@@ -79,10 +113,12 @@ echo ""
 US_EAST_STACKS=""
 if [ "$REGION" != "us-east-1" ]; then
     echo "$(date): Checking us-east-1 for WAF and cross-region support stacks..."
-    US_EAST_STACKS=$(aws cloudformation list-stacks --region "us-east-1" \
+    if ! US_EAST_STACKS=$(aws cloudformation list-stacks --region "us-east-1" \
         --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE UPDATE_ROLLBACK_COMPLETE ROLLBACK_COMPLETE \
         --query "StackSummaries[?starts_with(StackName, \`$ACRONYM-\`)].StackName" \
-        --output text 2>/dev/null || echo "")
+        --output text 2>"$AWS_ERR"); then
+        aws_fail "Listing stacks in us-east-1"
+    fi
     if [ -n "$US_EAST_STACKS" ]; then
         echo "$(date): Found cross-region stacks in us-east-1:"
         echo "$US_EAST_STACKS" | tr '\t' '\n' | sed 's/^/  - /'
@@ -124,10 +160,14 @@ delete_stack() {
     local stack_name=$1
     echo "$(date): Attempting to delete stack: $stack_name"
     
-    # Check if stack exists
-    if ! aws cloudformation describe-stacks --stack-name "$stack_name" --region "$REGION" >/dev/null 2>&1; then
-        echo "$(date): Stack $stack_name does not exist or already deleted"
-        return 0
+    # Check if stack exists. Only a "does not exist" error means it is gone;
+    # any other error (expired credentials, throttling) stops the script.
+    if ! aws cloudformation describe-stacks --stack-name "$stack_name" --region "$REGION" >/dev/null 2>"$AWS_ERR"; then
+        if grep -q "does not exist" "$AWS_ERR"; then
+            echo "$(date): Stack $stack_name does not exist or already deleted"
+            return 0
+        fi
+        aws_fail "Checking stack $stack_name (describe-stacks)"
     fi
     
     # Initiate deletion
@@ -141,11 +181,12 @@ delete_stack() {
     
     # Wait for deletion to complete
     while true; do
-        status=$(aws cloudformation describe-stacks --stack-name "$stack_name" --region "$REGION" --query 'Stacks[0].StackStatus' --output text 2>/dev/null)
-        
-        if [ $? -ne 0 ]; then
-            echo "$(date): Stack $stack_name successfully deleted"
-            return 0
+        if ! status=$(aws cloudformation describe-stacks --stack-name "$stack_name" --region "$REGION" --query 'Stacks[0].StackStatus' --output text 2>"$AWS_ERR"); then
+            if grep -q "does not exist" "$AWS_ERR"; then
+                echo "$(date): Stack $stack_name successfully deleted"
+                return 0
+            fi
+            aws_fail "Checking deletion status of $stack_name (describe-stacks)"
         fi
         
         case "$status" in
@@ -191,8 +232,11 @@ if [ -n "$US_EAST_STACKS" ]; then
     for stack in $US_EAST_STACKS; do
         echo "$(date): Deleting us-east-1 stack: $stack"
         aws cloudformation delete-stack --stack-name "$stack" --region "us-east-1"
-        aws cloudformation wait stack-delete-complete --stack-name "$stack" --region "us-east-1" 2>/dev/null || true
-        echo "$(date): Deleted $stack"
+        if aws cloudformation wait stack-delete-complete --stack-name "$stack" --region "us-east-1"; then
+            echo "$(date): Deleted $stack"
+        else
+            echo "$(date): Failed to delete $stack (see the error above)"
+        fi
     done
     echo "$(date): Cross-region cleanup completed"
 fi
@@ -213,19 +257,27 @@ PASCAL_CASE=$(echo "$PRODUCT_NAME" | sed 's/ //g; s/[^a-zA-Z0-9]//g')
 echo ""
 echo "$(date): Cleaning up orphaned resources..."
 
-# Delete SSM parameters under the product namespace
-echo "$(date): Deleting SSM parameters under /${PASCAL_CASE}/..."
-SSM_PARAMS=$(aws ssm get-parameters-by-path --path "/${PASCAL_CASE}" --recursive \
-    --query "Parameters[*].Name" --output text --region "$REGION" 2>/dev/null || echo "")
-if [ -n "$SSM_PARAMS" ]; then
-    PARAM_COUNT=$(echo "$SSM_PARAMS" | wc -w)
-    echo "$(date): Found $PARAM_COUNT SSM parameters to delete"
-    for param in $SSM_PARAMS; do
-        aws ssm delete-parameter --name "$param" --region "$REGION" 2>/dev/null || true
-    done
-    echo "$(date): SSM parameters deleted"
+# Delete SSM parameters under the product namespace.
+# Guard: an empty name would make the path "/" and delete every SSM parameter in the Region.
+SSM_PATH="/${PASCAL_CASE}"
+if [ -z "$PASCAL_CASE" ] || [ "$SSM_PATH" = "/" ]; then
+    echo "$(date): Refusing to delete SSM parameters: the product name gives an empty path. Skipping SSM cleanup."
 else
-    echo "$(date): No SSM parameters found"
+    echo "$(date): Deleting SSM parameters under ${SSM_PATH}/..."
+    if ! SSM_PARAMS=$(aws ssm get-parameters-by-path --path "$SSM_PATH" --recursive \
+        --query "Parameters[*].Name" --output text --region "$REGION" 2>"$AWS_ERR"); then
+        aws_fail "Listing SSM parameters under $SSM_PATH"
+    fi
+    if [ -n "$SSM_PARAMS" ]; then
+        PARAM_COUNT=$(echo "$SSM_PARAMS" | wc -w)
+        echo "$(date): Found $PARAM_COUNT SSM parameters to delete"
+        for param in $SSM_PARAMS; do
+            aws ssm delete-parameter --name "$param" --region "$REGION" 2>/dev/null || true
+        done
+        echo "$(date): SSM parameters deleted"
+    else
+        echo "$(date): No SSM parameters found"
+    fi
 fi
 
 # Delete CloudWatch log groups for Lambda functions
@@ -234,9 +286,11 @@ fi
 echo "$(date): Deleting CloudWatch log groups for /aws/lambda/${ACRONYM,,}-*, /aws/lambda/${ACRONYM}-*, and /aws/imagebuilder/${ACRONYM,,}-*..."
 LOG_GROUPS=""
 for prefix in "/aws/lambda/${ACRONYM,,}-" "/aws/lambda/${ACRONYM}-" "${ACRONYM}-" "/aws/imagebuilder/${ACRONYM,,}-" "/aws/imagebuilder/pipeline/${ACRONYM,,}-" "/aws/imagebuilder/${PASCAL_CASE}-" "/aws/imagebuilder/pipeline/${PASCAL_CASE,,}-"; do
-    FOUND=$(aws logs describe-log-groups \
+    if ! FOUND=$(aws logs describe-log-groups \
         --log-group-name-prefix "$prefix" \
-        --query "logGroups[*].logGroupName" --output text --region "$REGION" 2>/dev/null || echo "")
+        --query "logGroups[*].logGroupName" --output text --region "$REGION" 2>"$AWS_ERR"); then
+        aws_fail "Listing log groups with prefix $prefix"
+    fi
     if [ -n "$FOUND" ]; then
         LOG_GROUPS="$LOG_GROUPS $FOUND"
     fi
@@ -254,7 +308,9 @@ fi
 
 # Delete DCV Session Manager DynamoDB tables (created by DCV software, not CloudFormation)
 echo "$(date): Checking for DCV Session Manager DynamoDB tables..."
-DCV_TABLES=$(aws dynamodb list-tables --query "TableNames[?starts_with(@, 'dcv-session-manager-')]" --output text --region "$REGION" 2>/dev/null || echo "")
+if ! DCV_TABLES=$(aws dynamodb list-tables --query "TableNames[?starts_with(@, 'dcv-session-manager-')]" --output text --region "$REGION" 2>"$AWS_ERR"); then
+    aws_fail "Listing DynamoDB tables"
+fi
 if [ -n "$DCV_TABLES" ]; then
     DCV_COUNT=$(echo "$DCV_TABLES" | wc -w)
     echo "$(date): Found $DCV_COUNT DCV Session Manager tables to delete"
@@ -270,9 +326,11 @@ fi
 # Only target our specific agent (install_script_agent) and our acronym-prefixed DCV logs
 echo "$(date): Deleting AgentCore and DCV Session Manager log groups..."
 for prefix in "/aws/bedrock-agentcore/runtimes/install_script_agent" "/aws/codebuild/bedrock-agentcore-install_script_agent" "/aws/vendedlogs/bedrock-agentcore/runtime/" "/aws/ec2/${ACRONYM,,}-dcv-"; do
-    FOUND=$(aws logs describe-log-groups \
+    if ! FOUND=$(aws logs describe-log-groups \
         --log-group-name-prefix "$prefix" \
-        --query "logGroups[*].logGroupName" --output text --region "$REGION" 2>/dev/null || echo "")
+        --query "logGroups[*].logGroupName" --output text --region "$REGION" 2>"$AWS_ERR"); then
+        aws_fail "Listing log groups with prefix $prefix"
+    fi
     if [ -n "$FOUND" ]; then
         for lg in $FOUND; do
             aws logs delete-log-group --log-group-name "$lg" --region "$REGION" 2>/dev/null || true
@@ -293,13 +351,14 @@ imagebuilder_list_all() {
     local all_arns=""
     local next_token=""
     
+    # Returns non-zero when a list call fails; the error is left in $AWS_ERR
     while true; do
         if [ -n "$next_token" ]; then
-            result=$(aws imagebuilder $cmd --query "$query" --next-token "$next_token" --output text --region "$REGION" 2>/dev/null)
-            next_token=$(aws imagebuilder $cmd --next-token "$next_token" --query "nextToken" --output text --region "$REGION" 2>/dev/null)
+            result=$(aws imagebuilder $cmd --query "$query" --next-token "$next_token" --output text --region "$REGION" 2>"$AWS_ERR") || return 1
+            next_token=$(aws imagebuilder $cmd --next-token "$next_token" --query "nextToken" --output text --region "$REGION" 2>"$AWS_ERR") || return 1
         else
-            result=$(aws imagebuilder $cmd --query "$query" --output text --region "$REGION" 2>/dev/null)
-            next_token=$(aws imagebuilder $cmd --query "nextToken" --output text --region "$REGION" 2>/dev/null)
+            result=$(aws imagebuilder $cmd --query "$query" --output text --region "$REGION" 2>"$AWS_ERR") || return 1
+            next_token=$(aws imagebuilder $cmd --query "nextToken" --output text --region "$REGION" 2>"$AWS_ERR") || return 1
         fi
         if [ -n "$result" ] && [ "$result" != "None" ]; then
             all_arns="$all_arns $result"
@@ -312,7 +371,9 @@ imagebuilder_list_all() {
 }
 
 # Delete pipelines (filter by acronym prefix in name)
-PIPELINES=$(imagebuilder_list_all "list-image-pipelines" "imagePipelineList[?starts_with(name, '${ACRONYM,,}-') || starts_with(name, '${PASCAL_CASE}-')].arn")
+if ! PIPELINES=$(imagebuilder_list_all "list-image-pipelines" "imagePipelineList[?starts_with(name, '${ACRONYM,,}-') || starts_with(name, '${PASCAL_CASE}-')].arn"); then
+    aws_fail "Listing Image Builder pipelines"
+fi
 if [ -n "$(echo "$PIPELINES" | tr -d ' ')" ]; then
     PIPE_COUNT=$(echo "$PIPELINES" | wc -w)
     echo "$(date): Deleting $PIPE_COUNT Image Builder pipelines..."
@@ -322,12 +383,16 @@ if [ -n "$(echo "$PIPELINES" | tr -d ' ')" ]; then
 fi
 
 # Delete images (all self-owned — images don't have our name prefix but are tagged)
-IMAGES=$(imagebuilder_list_all "list-images --owner Self" "imageVersionList[*].arn")
+if ! IMAGES=$(imagebuilder_list_all "list-images --owner Self" "imageVersionList[*].arn"); then
+    aws_fail "Listing Image Builder images"
+fi
 if [ -n "$(echo "$IMAGES" | tr -d ' ')" ]; then
     IMG_COUNT=$(echo "$IMAGES" | wc -w)
     echo "$(date): Deleting $IMG_COUNT Image Builder image versions..."
     for arn in $IMAGES; do
-        BUILDS=$(aws imagebuilder list-image-build-versions --image-version-arn "$arn" --query "imageSummaryList[*].arn" --output text --region "$REGION" 2>/dev/null || echo "")
+        if ! BUILDS=$(aws imagebuilder list-image-build-versions --image-version-arn "$arn" --query "imageSummaryList[*].arn" --output text --region "$REGION" 2>"$AWS_ERR"); then
+            aws_fail "Listing Image Builder image build versions"
+        fi
         for build_arn in $BUILDS; do
             aws imagebuilder delete-image --image-build-version-arn "$build_arn" --region "$REGION" 2>/dev/null || true
         done
@@ -335,7 +400,9 @@ if [ -n "$(echo "$IMAGES" | tr -d ' ')" ]; then
 fi
 
 # Delete recipes (filter by acronym prefix in name)
-RECIPES=$(imagebuilder_list_all "list-image-recipes --owner Self" "imageRecipeSummaryList[?starts_with(name, '${ACRONYM,,}-') || starts_with(name, '${PASCAL_CASE}-')].arn")
+if ! RECIPES=$(imagebuilder_list_all "list-image-recipes --owner Self" "imageRecipeSummaryList[?starts_with(name, '${ACRONYM,,}-') || starts_with(name, '${PASCAL_CASE}-')].arn"); then
+    aws_fail "Listing Image Builder recipes"
+fi
 if [ -n "$(echo "$RECIPES" | tr -d ' ')" ]; then
     REC_COUNT=$(echo "$RECIPES" | wc -w)
     echo "$(date): Deleting $REC_COUNT Image Builder recipes..."
@@ -345,7 +412,9 @@ if [ -n "$(echo "$RECIPES" | tr -d ' ')" ]; then
 fi
 
 # Delete infrastructure configurations (filter by acronym prefix in name)
-INFRA_CONFIGS=$(imagebuilder_list_all "list-infrastructure-configurations" "infrastructureConfigurationSummaryList[?starts_with(name, '${ACRONYM,,}-') || starts_with(name, '${PASCAL_CASE}-')].arn")
+if ! INFRA_CONFIGS=$(imagebuilder_list_all "list-infrastructure-configurations" "infrastructureConfigurationSummaryList[?starts_with(name, '${ACRONYM,,}-') || starts_with(name, '${PASCAL_CASE}-')].arn"); then
+    aws_fail "Listing Image Builder infrastructure configurations"
+fi
 if [ -n "$(echo "$INFRA_CONFIGS" | tr -d ' ')" ]; then
     INFRA_COUNT=$(echo "$INFRA_CONFIGS" | wc -w)
     echo "$(date): Deleting $INFRA_COUNT Image Builder infrastructure configs..."
@@ -355,7 +424,9 @@ if [ -n "$(echo "$INFRA_CONFIGS" | tr -d ' ')" ]; then
 fi
 
 # Delete distribution configurations (filter by acronym prefix in name)
-DIST_CONFIGS=$(imagebuilder_list_all "list-distribution-configurations" "distributionConfigurationSummaryList[?starts_with(name, '${ACRONYM,,}-') || starts_with(name, '${PASCAL_CASE}-')].arn")
+if ! DIST_CONFIGS=$(imagebuilder_list_all "list-distribution-configurations" "distributionConfigurationSummaryList[?starts_with(name, '${ACRONYM,,}-') || starts_with(name, '${PASCAL_CASE}-')].arn"); then
+    aws_fail "Listing Image Builder distribution configurations"
+fi
 if [ -n "$(echo "$DIST_CONFIGS" | tr -d ' ')" ]; then
     DIST_COUNT=$(echo "$DIST_CONFIGS" | wc -w)
     echo "$(date): Deleting $DIST_COUNT Image Builder distribution configs..."
@@ -365,12 +436,16 @@ if [ -n "$(echo "$DIST_CONFIGS" | tr -d ' ')" ]; then
 fi
 
 # Delete components (self-owned, all versions — components use various naming)
-COMPONENTS=$(imagebuilder_list_all "list-components --owner Self" "componentVersionList[*].arn")
+if ! COMPONENTS=$(imagebuilder_list_all "list-components --owner Self" "componentVersionList[*].arn"); then
+    aws_fail "Listing Image Builder components"
+fi
 if [ -n "$(echo "$COMPONENTS" | tr -d ' ')" ]; then
     COMP_COUNT=$(echo "$COMPONENTS" | wc -w)
     echo "$(date): Deleting $COMP_COUNT Image Builder components..."
     for arn in $COMPONENTS; do
-        VERSIONS=$(aws imagebuilder list-component-build-versions --component-version-arn "$arn" --query "componentSummaryList[*].arn" --output text --region "$REGION" 2>/dev/null || echo "")
+        if ! VERSIONS=$(aws imagebuilder list-component-build-versions --component-version-arn "$arn" --query "componentSummaryList[*].arn" --output text --region "$REGION" 2>"$AWS_ERR"); then
+            aws_fail "Listing Image Builder component build versions"
+        fi
         for ver_arn in $VERSIONS; do
             aws imagebuilder delete-component --component-build-version-arn "$ver_arn" --region "$REGION" 2>/dev/null || true
         done
@@ -380,8 +455,14 @@ fi
 echo "$(date): Image Builder cleanup complete"
 
 # Handle S3 media bucket (RETAIN policy — requires explicit confirmation)
-MEDIA_BUCKET="${ACRONYM,,}-media-$(aws sts get-caller-identity --query Account --output text)-${REGION}"
-if aws s3api head-bucket --bucket "$MEDIA_BUCKET" 2>/dev/null; then
+MEDIA_BUCKET="${ACRONYM,,}-media-${ACCOUNT_ID}-${REGION}"
+MEDIA_BUCKET_EXISTS=false
+if aws s3api head-bucket --bucket "$MEDIA_BUCKET" 2>"$AWS_ERR"; then
+    MEDIA_BUCKET_EXISTS=true
+elif ! grep -qE "\(404\)|Not Found" "$AWS_ERR"; then
+    aws_fail "Checking media bucket $MEDIA_BUCKET (head-bucket)"
+fi
+if [ "$MEDIA_BUCKET_EXISTS" = true ]; then
     echo ""
     echo "$(date): S3 media bucket still exists: $MEDIA_BUCKET"
     echo "  This bucket has RemovalPolicy.RETAIN because it may contain user data."

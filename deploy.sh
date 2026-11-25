@@ -119,7 +119,7 @@ if [[ -n "$VPC_ID" ]]; then
             ANALYZER_RESULT=$?
             
             if [[ $ANALYZER_RESULT -ne 0 ]]; then
-                print_error "VPC analysis failed. For VPCs with multiple subnets per AZ, set PrivateSubnetIds and PublicSubnetIds (parameters.json or the pipeline stack)."
+                print_error "VPC analysis failed (see above). For VPCs with multiple subnets per AZ, set PrivateSubnetIds and PublicSubnetIds (parameters.json or the pipeline stack)."
                 exit $ANALYZER_RESULT
             fi
             
@@ -133,6 +133,10 @@ if [[ -n "$VPC_ID" ]]; then
         fi
     else
         print_success "VPC subnet configuration already present in parameters.json"
+        # Still check the saved private subnets' outbound access (warning only)
+        if [[ -f "scripts/analyze-vpc.sh" ]]; then
+            bash scripts/analyze-vpc.sh --check-egress
+        fi
     fi
 fi
 

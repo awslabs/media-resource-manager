@@ -130,6 +130,30 @@ describe('ConnectViewer', () => {
     });
   });
 
+  it('says the session is starting and retries until it is ready', async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock
+        .mockResolvedValueOnce(new Response(JSON.stringify({
+          status: 'session-starting', sessionId: 'console', retryAfterSeconds: 5, error: 'still starting',
+        }), { status: 409 }))
+        .mockResolvedValueOnce(sessionResponse('https://d111111abcdef8.cloudfront.net'));
+      await render();
+
+      expect(container.textContent).toContain('Starting your session');
+      expect(container.querySelector('[data-testid="mock-viewer"]')).toBeNull();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(container.querySelector('[data-testid="mock-viewer"]')).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the DCV token out of the URL and browser storage', async () => {
     fetchMock.mockResolvedValue(sessionResponse('https://d111111abcdef8.cloudfront.net'));
     await render();

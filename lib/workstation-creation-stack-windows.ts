@@ -12,6 +12,7 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as path from 'path';
 import { Construct } from 'constructs';
 import { regionalWorkstationPassRoleStatement } from './regional-workstation-role';
+import { invokeRegionalSessionManagerStatement, regionalSessionManagerFunctionName } from './regional-session-manager';
 
 interface WorkstationCreationStackProps extends cdk.StackProps {
   productName: string;
@@ -840,6 +841,7 @@ export class WindowsWorkstationCreationStack extends cdk.Stack {
       environmentEncryption: props.dataEncryptionKey,
       environment: {
         PASCAL_CASE_NAME: props.pascalCaseName,
+        REGIONAL_SESSION_MANAGER_FUNCTION: regionalSessionManagerFunctionName(props.acronym),
       },
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/console-session-ready')),
       timeout: cdk.Duration.seconds(60),
@@ -860,6 +862,8 @@ export class WindowsWorkstationCreationStack extends cdk.Stack {
     if (props.dataEncryptionKey) {
       props.dataEncryptionKey.grantDecrypt(checkConsoleSessionFunction);
     }
+    // Hub workstations: the check runs through the hub's dcv-session-manager.
+    checkConsoleSessionFunction.addToRolePolicy(invokeRegionalSessionManagerStatement(this.account, props.acronym));
 
     // Grant permissions to join domain function
     joinDomainFunction.addToRolePolicy(new iam.PolicyStatement({

@@ -15,6 +15,16 @@ describe('dcv-session-manager Lambda', () => {
     expect(result.stderr).toMatch(/OK/);
   });
 
+  it('passes its Python unit tests (session wait and console session check calls)', () => {
+    const result = spawnSync('python3', ['-m', 'unittest', path.join(__dirname, 'python', 'test_dcv_session_manager_session_wait.py')], {
+      encoding: 'utf8',
+    });
+    if (result.status !== 0) {
+      throw new Error(`${result.stdout}\n${result.stderr}`);
+    }
+    expect(result.stderr).toMatch(/OK/);
+  });
+
   it('passes its Python unit tests (workstation table in the primary Region)', () => {
     const result = spawnSync('python3', ['-m', 'unittest', path.join(__dirname, 'python', 'test_dcv_session_manager_primary_region.py')], {
       encoding: 'utf8',

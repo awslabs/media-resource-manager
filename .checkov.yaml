@@ -65,6 +65,6 @@ skip-check:
 #   This is an AWS limitation, not a security gap.
 
 # Intentional design decisions (not security issues):
-# - CKV_AWS_59 on auth/ldap and auth/validate endpoints:
-#   These endpoints intentionally allow unauthenticated access for login flow.
-#   They validate credentials and return JWT tokens.
+# - CKV_AWS_59 on the auth/ldap endpoint:
+#   The sign-in endpoint intentionally allows unauthenticated access. It
+#   validates credentials and returns a JWT; the stage throttles it.

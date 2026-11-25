@@ -1,5 +1,11 @@
 # VPC Analyzer Script (Windows PowerShell)
 # Analyzes an imported VPC and helps select subnets when multiple exist per AZ
+#
+# -CheckEgress: only check that the saved PrivateSubnetIds have outbound
+# internet access, as a warning (always exit 0). deploy.ps1 runs it when the
+# subnets are already saved.
+
+param([switch]$CheckEgress)
 
 $ErrorActionPreference = "Continue"
 
@@ -46,15 +52,16 @@ function Analyze-Vpc {
         --filters "Name=vpc-id,Values=$VpcId" `
         --query 'RouteTables' --output json --region $region 2>$null
     if (-not $routeTablesJson) { $routeTablesJson = "[]" }
-    $env:ROUTE_TABLES = ($routeTablesJson -join "`n")
 
     # Use node to analyze and display subnet info
     $analysisScript = @"
 const fs = require('fs');
-const subnets = JSON.parse(process.argv[2]);
-const tables = JSON.parse(process.env.ROUTE_TABLES || '[]');
-const mainTable = tables.find(t => (t.Associations || []).some(a => a.Main));
-const tableFor = id => tables.find(t => (t.Associations || []).some(a => a.SubnetId === id)) || mainTable;
+// JSON comes through the environment, not argv: PowerShell passes each line of
+// the aws output as its own argument, and argv[1] is this script's path.
+const subnets = JSON.parse(process.env.MRM_SUBNETS_JSON);
+const tables = JSON.parse(process.env.MRM_CLASSIFY_ROUTE_TABLES || '[]');
+const mainTable = () => tables.find(t => (t.Associations || []).some(a => a.Main));
+const tableFor = id => tables.find(t => (t.Associations || []).some(a => a.SubnetId === id)) || mainTable();
 function routesToIgw(id) {
     const t = tableFor(id);
     const r = t && (t.Routes || []).find(r => r.DestinationCidrBlock === '0.0.0.0/0');
@@ -129,13 +136,19 @@ if (hasMultiplePrivatePerAz || hasMultiplePublicPerAz) {
     $tempScript = [System.IO.Path]::GetTempFileName() + ".js"
     Set-Content -Path $tempScript -Value $analysisScript -Encoding UTF8
 
-    node $tempScript $subnetsJson
+    $env:MRM_SUBNETS_JSON = ($subnetsJson -join "`n")
+    $env:MRM_CLASSIFY_ROUTE_TABLES = ($routeTablesJson -join "`n")
+    node $tempScript | Out-Host
     $nodeExit = $LASTEXITCODE
+    Remove-Item Env:MRM_SUBNETS_JSON, Env:MRM_CLASSIFY_ROUTE_TABLES -ErrorAction SilentlyContinue
     Remove-Item $tempScript -ErrorAction SilentlyContinue
-    Remove-Item Env:ROUTE_TABLES -ErrorAction SilentlyContinue
 
     if ($nodeExit -eq 2) {
         return 2
+    }
+    if ($nodeExit -ne 0) {
+        Write-Err "Could not analyze the subnets of VPC $VpcId (see above)"
+        exit 1
     }
 
     # For simple VPCs, auto-save subnet IDs
@@ -164,7 +177,8 @@ function Check-NaclUdpRules {
     }
 
     $checkScript = @"
-const nacls = JSON.parse(process.argv[2]);
+// JSON comes through the environment (see the subnet analysis script)
+const nacls = JSON.parse(process.env.MRM_NACLS_JSON);
 let hasIssue = false;
 
 for (const nacl of nacls) {
@@ -195,7 +209,12 @@ if (!hasIssue) {
 
     $tempScript = [System.IO.Path]::GetTempFileName() + ".js"
     Set-Content -Path $tempScript -Value $checkScript -Encoding UTF8
-    node $tempScript $naclsJson
+    $env:MRM_NACLS_JSON = ($naclsJson -join "`n")
+    node $tempScript | Out-Host
+    $nodeExit = $LASTEXITCODE
+    Remove-Item Env:MRM_NACLS_JSON -ErrorAction SilentlyContinue
+    # Informational, as in analyze-vpc.sh: a failed check warns and the deploy continues
+    if ($nodeExit -ne 0) { Write-Warn "Could not check the NACL rules (see above)" }
     Remove-Item $tempScript -ErrorAction SilentlyContinue
 }
 
@@ -231,8 +250,13 @@ fs.writeFileSync('selected-subnets.json', JSON.stringify(result, null, 2));
 
     $tempScript = [System.IO.Path]::GetTempFileName() + ".js"
     Set-Content -Path $tempScript -Value $saveScript -Encoding UTF8
-    node $tempScript
+    node $tempScript | Out-Host
+    $nodeExit = $LASTEXITCODE
     Remove-Item $tempScript -ErrorAction SilentlyContinue
+    if ($nodeExit -ne 0) {
+        Write-Err "Could not save the subnet selection (see above)"
+        exit 1
+    }
 
     # Now update parameters.json
     Update-Parameters -VpcId $VpcId -VpcCidr $vpcCidr
@@ -333,7 +357,117 @@ selectSubnets().catch(console.error);
     $tempScript = [System.IO.Path]::GetTempFileName() + ".js"
     Set-Content -Path $tempScript -Value $selectScript -Encoding UTF8
     node $tempScript
+    $nodeExit = $LASTEXITCODE
     Remove-Item $tempScript -ErrorAction SilentlyContinue
+    if ($nodeExit -ne 0) {
+        Write-Err "Subnet selection failed (see above)"
+        exit 1
+    }
+}
+
+# Check that each selected private subnet has outbound internet access, as
+# check_private_egress in analyze-vpc.sh does. Its route table (the explicit
+# association, else the VPC main table) needs an active 0.0.0.0/0 route to a
+# NAT gateway, transit gateway, NAT instance, network interface, VPC endpoint
+# (firewall or Gateway Load Balancer) or Cloud WAN core network. Workstations
+# and the DCV Connection Gateway launched without one never become ready.
+# -WarnOnly: report an isolated subnet as a warning and return $true.
+function Test-PrivateEgress {
+    param([string]$VpcId, [string[]]$SubnetIds, [switch]$WarnOnly)
+
+    $region = Get-CurrentRegion
+    Write-Status "Checking outbound internet access of the private subnets..."
+
+    $tablesJson = aws ec2 describe-route-tables `
+        --filters "Name=vpc-id,Values=$VpcId" `
+        --query 'RouteTables' --output json --region $region 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $tablesJson) {
+        if ($WarnOnly) {
+            Write-Warn "WARNING: could not read the route tables of VPC $VpcId to check the private subnets"
+            return $true
+        }
+        Write-Err "Could not read the route tables of VPC $VpcId"
+        return $false
+    }
+    $subnetsJson = aws ec2 describe-subnets `
+        --filters "Name=vpc-id,Values=$VpcId" `
+        --query 'Subnets[*].{SubnetId:SubnetId,AZ:AvailabilityZone}' `
+        --output json --region $region 2>$null
+
+    # Passed through the environment: native arguments lose their quotes on Windows
+    $env:MRM_ROUTE_TABLES = ($tablesJson -join "`n")
+    $env:MRM_SUBNETS = ($subnetsJson -join "`n")
+    $env:MRM_PRIVATE_IDS = ($SubnetIds -join ",")
+    $env:MRM_EGRESS_MODE = $(if ($WarnOnly) { "warn" } else { "fail" })
+
+    $checkScript = @"
+const tables = JSON.parse(process.env.MRM_ROUTE_TABLES || '[]');
+const azOf = new Map(JSON.parse(process.env.MRM_SUBNETS || '[]').map(s => [s.SubnetId, s.AZ]));
+const mainTable = () => tables.find(t => (t.Associations || []).some(a => a.Main));
+const tableFor = id => tables.find(t => (t.Associations || []).some(a => a.SubnetId === id)) || mainTable();
+const defaultRouteOf = t => t && (t.Routes || []).find(r => r.DestinationCidrBlock === '0.0.0.0/0');
+function describeRoute(r) {
+    if (!r) return 'no default route';
+    const state = r.State === 'blackhole' ? ' (blackhole)' : '';
+    if (r.NatGatewayId) return 'NAT gateway ' + r.NatGatewayId + state;
+    if (r.TransitGatewayId) return 'transit gateway ' + r.TransitGatewayId + state;
+    if (r.InstanceId) return 'instance ' + r.InstanceId + state;
+    if (r.NetworkInterfaceId) return 'network interface ' + r.NetworkInterfaceId + state;
+    if (r.CoreNetworkArn) return 'Cloud WAN core network ' + r.CoreNetworkArn + state;
+    if (r.VpcPeeringConnectionId) return 'VPC peering ' + r.VpcPeeringConnectionId + state;
+    if (r.GatewayId && r.GatewayId.startsWith('igw-')) return 'internet gateway ' + r.GatewayId + state;
+    if (r.GatewayId && r.GatewayId.startsWith('vpce-')) return 'VPC endpoint ' + r.GatewayId + state;
+    if (r.GatewayId) return 'gateway ' + r.GatewayId + state;
+    return 'other' + state;
+}
+function egressOf(r) {
+    if (!r || r.State === 'blackhole') return 'none';
+    if (r.NatGatewayId || r.TransitGatewayId || r.InstanceId || r.NetworkInterfaceId || r.CoreNetworkArn) return 'ok';
+    if (r.GatewayId && r.GatewayId.startsWith('vpce-')) return 'ok';
+    if (r.VpcPeeringConnectionId || (r.GatewayId && r.GatewayId.startsWith('igw-'))) return 'none';
+    return 'unknown';
+}
+let failed = false;
+for (const id of (process.env.MRM_PRIVATE_IDS || '').split(',').filter(Boolean)) {
+    const t = tableFor(id);
+    const r = defaultRouteOf(t);
+    const where = id + ' (' + (azOf.get(id) || 'unknown AZ') + ')';
+    const table = t ? 'route table ' + t.RouteTableId + ((t.Associations || []).some(a => a.SubnetId === id) ? '' : ' (VPC main route table)') : 'no route table';
+    const egress = t ? egressOf(r) : 'none';
+    if (egress === 'ok') console.log('  OK ' + where + ': ' + table + ' -> ' + describeRoute(r));
+    else if (egress === 'unknown') console.log('  WARNING ' + where + ': ' + table + ' -> ' + describeRoute(r) + '. Check that this target gives outbound internet access.');
+    else { console.log('  ' + (process.env.MRM_EGRESS_MODE === 'warn' ? 'WARNING ' : 'ERROR ') + where + ': ' + table + ' -> ' + describeRoute(r)); failed = true; }
+}
+process.exit(failed ? 1 : 0);
+"@
+
+    $tempScript = [System.IO.Path]::GetTempFileName() + ".js"
+    Set-Content -Path $tempScript -Value $checkScript -Encoding UTF8
+    node $tempScript | Out-Host
+    $nodeExit = $LASTEXITCODE
+    Remove-Item $tempScript -ErrorAction SilentlyContinue
+    Remove-Item Env:MRM_ROUTE_TABLES, Env:MRM_SUBNETS, Env:MRM_PRIVATE_IDS, Env:MRM_EGRESS_MODE -ErrorAction SilentlyContinue
+
+    if ($nodeExit -ne 0 -and $WarnOnly) {
+        Write-Warn "WARNING: a private subnet this install is deployed on has no outbound internet access (see above)."
+        Write-Warn "Workstations and the DCV Connection Gateway launched in it cannot download their software and"
+        Write-Warn "never become ready. Add a 0.0.0.0/0 route to a NAT gateway, NAT instance, transit gateway,"
+        Write-Warn "firewall endpoint or Cloud WAN core network (not a blackhole) to the route table shown."
+        Write-Warn "Don't change PrivateSubnetIds instead: that replaces the Managed AD directory."
+        Write-Warn "The deployment continues."
+        return $true
+    }
+    if ($nodeExit -ne 0) {
+        Write-Err "A private subnet has no outbound internet access (see above)."
+        Write-Err "Private subnets need a 0.0.0.0/0 route to a NAT gateway, NAT instance, transit gateway, firewall"
+        Write-Err "endpoint or Cloud WAN core network that is not a blackhole. Workstations and the DCV Connection"
+        Write-Err "Gateway launched in such a subnet cannot download their software and never become ready."
+        Write-Err "Add that route to the route table shown, or set PrivateSubnetIds to a private subnet with one in"
+        Write-Err "that AZ. On an install that is already deployed, add the route: changing PrivateSubnetIds"
+        Write-Err "replaces the Managed AD directory."
+        return $false
+    }
+    return $true
 }
 
 function Update-Parameters {
@@ -344,10 +478,16 @@ function Update-Parameters {
 
     if (-not (Test-Path "selected-subnets.json")) {
         Write-Err "No subnet selection found"
-        return
+        exit 1
     }
 
     $selected = Get-Content "selected-subnets.json" | ConvertFrom-Json
+
+    # Check the private subnets before writing anything; stop the deploy if one is isolated
+    if (-not (Test-PrivateEgress -VpcId $VpcId -SubnetIds $selected.privateSubnetIds)) {
+        Remove-Item "selected-subnets.json", "vpc-analysis.json" -ErrorAction SilentlyContinue
+        exit 1
+    }
     $privateIds = $selected.privateSubnetIds -join ","
     $publicIds = $selected.publicSubnetIds -join ","
     $azs = $selected.availabilityZones -join ","
@@ -397,8 +537,13 @@ console.log('parameters.json updated successfully');
 
     $tempScript = [System.IO.Path]::GetTempFileName() + ".js"
     Set-Content -Path $tempScript -Value $updateScript -Encoding UTF8
-    node $tempScript
+    node $tempScript | Out-Host
+    $nodeExit = $LASTEXITCODE
     Remove-Item $tempScript -ErrorAction SilentlyContinue
+    if ($nodeExit -ne 0) {
+        Write-Err "Could not update parameters.json (see above)"
+        exit 1
+    }
 
     Write-Ok "Subnet configuration saved to parameters.json"
     Write-Host ""
@@ -420,7 +565,19 @@ if (-not $vpcId) {
     exit 0
 }
 
-$result = Analyze-Vpc -VpcId $vpcId
+# -CheckEgress: deploy.ps1 skips the analyzer when the subnets are already
+# saved, and runs only this. Warn, never fail: the install is deployed on them.
+if ($CheckEgress) {
+    $saved = node -p "(JSON.parse(require('fs').readFileSync('parameters.json')).find(p => p.ParameterKey === 'PrivateSubnetIds')?.ParameterValue || '').replace(/\s+/g, '')" 2>$null
+    if ($saved) {
+        $null = Test-PrivateEgress -VpcId $vpcId -SubnetIds ($saved -split ',') -WarnOnly
+    }
+    exit 0
+}
+
+# The return value is the last item of the function's output
+$result = Analyze-Vpc -VpcId $vpcId | Select-Object -Last 1
+if ($result -ne 0 -and $result -ne 2) { exit 1 }
 
 if ($result -eq 2) {
     Select-Subnets -VpcId $vpcId
@@ -431,3 +588,6 @@ if ($result -eq 2) {
 
 # Clean up temp files
 Remove-Item "vpc-analysis.json" -ErrorAction SilentlyContinue
+
+# Explicit, so deploy.ps1 reads 0 here rather than the last native command's exit code
+exit 0

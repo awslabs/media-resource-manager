@@ -13,6 +13,7 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as path from 'path';
 import { Construct } from 'constructs';
 import { regionalWorkstationPassRoleStatement } from './regional-workstation-role';
+import { invokeRegionalSessionManagerStatement, regionalSessionManagerFunctionName } from './regional-session-manager';
 
 interface LinuxWorkstationCreationStackProps extends cdk.StackProps {
   productName: string;
@@ -202,6 +203,7 @@ export class LinuxWorkstationCreationStack extends cdk.Stack {
         PASCAL_CASE_NAME: props.pascalCaseName,
         SESSION_PLATFORM: 'Linux',
         WORKSTATION_TABLE_NAME: props.workstationTable.tableName,
+        REGIONAL_SESSION_MANAGER_FUNCTION: regionalSessionManagerFunctionName(props.acronym),
       },
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambda/console-session-ready')),
       timeout: cdk.Duration.seconds(60),
@@ -318,6 +320,8 @@ export class LinuxWorkstationCreationStack extends cdk.Stack {
     }));
     props.workstationTable.grant(checkConsoleSessionFunction, 'dynamodb:GetItem');
     if (props.dataEncryptionKey) props.dataEncryptionKey.grantDecrypt(checkConsoleSessionFunction);
+    // Hub workstations: the check runs through the hub's dcv-session-manager.
+    checkConsoleSessionFunction.addToRolePolicy(invokeRegionalSessionManagerStatement(this.account, props.acronym));
 
 
     // ============================================
