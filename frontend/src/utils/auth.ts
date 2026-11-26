@@ -104,12 +104,76 @@ const cognitoRefresher: SessionRefresher = {
 };
 
 /**
- * The refresher for this tab's session. Only Cognito sessions can be renewed
- * today: AD sign-in (useCognitoAuth=false) issues a 1-hour token with no
- * refresh token, so it has no refresher and its sessions end as before.
+ * AD sign-in: a session can be refreshed for 12 hours after sign-in. Same
+ * value as SESSION_MAX_SECONDS in lambda/ldap-auth, which enforces it.
  */
-const activeRefresher = (): SessionRefresher | null =>
-  cognitoRefresher.canRefresh() ? cognitoRefresher : null;
+export const AD_SESSION_MAX_SECONDS = 12 * 3600;
+
+/** The claims of this tab's AD session token, or null for any other session. */
+const adSessionClaims = (): { exp: number; auth_time: number } | null => {
+  if (sessionStorage.getItem(REFRESH_TOKEN_KEY)) return null; // Cognito session
+  const token = sessionStorage.getItem(ID_TOKEN_KEY);
+  if (!token || token.split('.').length !== 3) return null;
+  try {
+    const claims = decodePayload(token);
+    if (typeof claims.username !== 'string' || claims.iss) return null;
+    if (!Number.isInteger(claims.exp) || !Number.isInteger(claims.auth_time)) return null;
+    return claims;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * AD sign-in: POST /auth/ldap/refresh with the current, unexpired token. The
+ * API re-checks the user in AD and returns a new 1-hour token with current
+ * admin status. Tokens from before this change carry no auth_time and can't
+ * be refreshed; neither can a token that already lasts until the cap.
+ */
+const adRefresher: SessionRefresher = {
+  canRefresh: () => {
+    const claims = adSessionClaims();
+    if (!claims || claims.exp >= claims.auth_time + AD_SESSION_MAX_SECONDS) return false;
+    // Still valid, measured on the local clock from when the tab received
+    // the token (exp and auth_time are server times: compared only with
+    // each other).
+    const left = secondsLeft();
+    return left !== null && left > 0;
+  },
+  refresh: async () => {
+    const config = await getConfig();
+    const token = sessionStorage.getItem(ID_TOKEN_KEY);
+    if (config.useCognitoAuth || !token) return null;
+    // nosemgrep: gitlab.nodejs_scan.javascript-ssrf-rule-node_ssrf
+    // URL is from deployment config (apiUrl), not user input
+    const response = await fetch(`${config.apiUrl}auth/ldap/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    });
+    if (response.status === 401 || response.status === 403) {
+      console.warn('Session refresh was refused:', response.status);
+      return null;
+    }
+    // Directory or server trouble: retried like a network error
+    if (!response.ok) throw new Error(`Session refresh failed: ${response.status}`);
+    const data = await response.json().catch(() => ({}));
+    if (typeof data?.token !== 'string') return null;
+    // Admin status and names may have changed in AD
+    sessionStorage.setItem(USER_KEY, JSON.stringify(ldapUserFromToken(data.token)));
+    return { idToken: data.token };
+  },
+};
+
+/**
+ * The refresher for this tab's session: Cognito (refresh token) or AD
+ * (/auth/ldap/refresh). Null when the session can't be renewed, and then it
+ * ends when its token expires, as before.
+ */
+const activeRefresher = (): SessionRefresher | null => {
+  if (cognitoRefresher.canRefresh()) return cognitoRefresher;
+  if (adRefresher.canRefresh()) return adRefresher;
+  return null;
+};
 
 /** True when this tab's session can be renewed without signing in again. */
 export const canRefreshSession = (): boolean => activeRefresher() !== null;
@@ -544,6 +608,20 @@ export const isBedrockEnabled = async (): Promise<boolean> => {
   return config.enableBedrockFeatures ?? true; // defaults to true
 };
 
+/** The user object the console keeps for an AD session, from its token. */
+const ldapUserFromToken = (token: string) => {
+  const tokenPayload = decodePayload(token);
+  return {
+    username: tokenPayload.username,
+    attributes: {
+      email: tokenPayload.email,
+      given_name: tokenPayload.given_name,
+      family_name: tokenPayload.family_name,
+      'custom:isAdmin': tokenPayload.isAdmin ? 'true' : 'false'
+    }
+  };
+};
+
 // LDAP Authentication
 export const signInWithLDAP = async (username: string, password: string) => {
   const config = await getConfig();
@@ -575,21 +653,8 @@ export const signInWithLDAP = async (username: string, password: string) => {
   
   const data = await response.json();
   
-  sessionStorage.setItem('auth-token', data.token);
-  
-  // Create user object from token payload for LDAP auth
-  const tokenPayload = JSON.parse(atob(data.token.split('.')[1]));
-  const user = {
-    username: tokenPayload.username,
-    attributes: {
-      email: tokenPayload.email,
-      given_name: tokenPayload.given_name,
-      family_name: tokenPayload.family_name,
-      'custom:isAdmin': tokenPayload.isAdmin ? 'true' : 'false'
-    }
-  };
-  
-  sessionStorage.setItem('auth-user', JSON.stringify(user));
+  sessionStorage.setItem(USER_KEY, JSON.stringify(ldapUserFromToken(data.token)));
+  storeTokens(data.token);
   
   return data;
 };

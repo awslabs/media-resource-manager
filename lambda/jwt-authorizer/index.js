@@ -28,7 +28,9 @@ async function getJwtSecret() {
     return cachedSecret;
 }
 
-// Parse and verify an LDAP JWT token. Verifies the HS256 signature against the
+// Parse and verify an LDAP JWT token. Accepts only the header ldap-auth
+// writes ({"alg":"HS256","typ":"JWT"}), so alg:none and other algorithms are
+// refused before the signature check. Verifies the HS256 signature against the
 // shared secret in Secrets Manager, then checks expiration.
 async function parseJWT(token) {
     try {
@@ -37,6 +39,18 @@ async function parseJWT(token) {
             throw new Error('Malformed token');
         }
         const [header, payload, signature] = parts;
+
+        let decodedHeader;
+        try {
+            decodedHeader = JSON.parse(Buffer.from(header, 'base64url').toString());
+        } catch (e) {
+            throw new Error('Malformed header');
+        }
+        if (!decodedHeader || typeof decodedHeader !== 'object' ||
+            decodedHeader.alg !== 'HS256' || decodedHeader.typ !== 'JWT' ||
+            Object.keys(decodedHeader).length !== 2) {
+            throw new Error('Unsupported header');
+        }
 
         const secret = await getJwtSecret();
         const expectedSignature = crypto.createHmac('sha256', secret)
@@ -186,7 +200,8 @@ exports.handler = async (event) => {
             console.log('Cognito token validated');
         } else {
             userData = await parseJWT(token);
-            console.log('LDAP token validated for user:', userData.username);
+            // Sign-in names are personal data: not logged.
+            console.log('LDAP token validated');
         }
 
         // Normalize user data format

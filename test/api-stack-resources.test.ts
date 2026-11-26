@@ -206,3 +206,46 @@ describe('API stack /auth routes', () => {
     ]));
   });
 });
+
+describe('AD session refresh route (#85)', () => {
+  let resources: Record<string, any>;
+  beforeAll(() => {
+    resources = synth().toJSON().Resources as Record<string, any>;
+  }, 120000);
+
+  const ldapAuth = () => Object.entries(resources).find(([id, r]) =>
+    r.Type === 'AWS::Lambda::Function' && id.startsWith('DirectLdapAuthFunction'))!;
+
+  test('POST /auth/ldap/refresh exists behind the JWT authorizer', () => {
+    const refresh = Object.entries(resources).find(([, r]) =>
+      r.Type === 'AWS::ApiGateway::Resource' && r.Properties.PathPart === 'refresh')!;
+    expect(refresh).toBeDefined();
+    const method = Object.values(resources).find(r =>
+      r.Type === 'AWS::ApiGateway::Method' && r.Properties.HttpMethod === 'POST' &&
+      flat(r.Properties.ResourceId).includes(refresh[0]))!;
+    expect(method.Properties.AuthorizationType).toBe('CUSTOM');
+    expect(method.Properties.AuthorizerId).toBeDefined();
+    expect(flat(method.Properties.Integration.Uri)).toContain(ldapAuth()[0]);
+  });
+
+  test('the sign-in route stays reachable without a token', () => {
+    const ldap = Object.entries(resources).find(([, r]) =>
+      r.Type === 'AWS::ApiGateway::Resource' && r.Properties.PathPart === 'ldap')!;
+    const method = Object.values(resources).find(r =>
+      r.Type === 'AWS::ApiGateway::Method' && r.Properties.HttpMethod === 'POST' &&
+      flat(r.Properties.ResourceId).includes(ldap[0]))!;
+    expect(method.Properties.AuthorizationType).toBe('NONE');
+  });
+
+  test('ldap-auth may read only the AD service-account secret it needs', () => {
+    const [, fn] = ldapAuth();
+    expect(fn.Properties.Environment.Variables.AD_SERVICE_ACCOUNT_SECRET_ARN).toBeDefined();
+    const roleRef = JSON.stringify(fn.Properties.Role['Fn::GetAtt'][0]);
+    const statements = Object.values(resources)
+      .filter(r => r.Type === 'AWS::IAM::Policy' && JSON.stringify(r.Properties.Roles).includes(roleRef))
+      .flatMap(r => r.Properties.PolicyDocument.Statement);
+    const reads = statements.filter(s => [].concat(s.Action).includes('secretsmanager:GetSecretValue' as never));
+    for (const s of reads) expect(flat(s.Resource)).not.toContain('secret:*');
+    expect(flat(reads.map(s => s.Resource))).toContain('AdServiceAccount');
+  });
+});

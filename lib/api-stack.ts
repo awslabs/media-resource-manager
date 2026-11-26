@@ -1120,6 +1120,11 @@ export class ApiStack extends cdk.Stack {
             throttlingRateLimit: 10,
             throttlingBurstLimit: 20,
           },
+          // AD session refresh: signed-in clients, about once an hour each.
+          '/auth/ldap/refresh/POST': {
+            throttlingRateLimit: 10,
+            throttlingBurstLimit: 20,
+          },
         },
       },
       defaultCorsPreflightOptions: {
@@ -1855,6 +1860,9 @@ export class ApiStack extends cdk.Stack {
         // to a group that already exists in the customer's directory (e.g. via
         // the adminGroupName CDK context / CFN parameter).
         ADMIN_GROUP_NAME: ssm.StringParameter.valueForStringParameter(this, `/${props.pascalCaseName}/Auth/AdminGroupName`),
+        // AD service account ({username, password}) used by POST
+        // /auth/ldap/refresh to re-read the signed-in user's AD record.
+        AD_SERVICE_ACCOUNT_SECRET_ARN: props.adServiceAccountSecretArn,
       },
       timeout: cdk.Duration.seconds(30),
       reservedConcurrentExecutions: 15,
@@ -1862,6 +1870,16 @@ export class ApiStack extends cdk.Stack {
 
     // Grant permission to read the JWT secret
     jwtSecret.grantRead(directLdapAuthFunction);
+
+    // Session refresh reads the AD service-account secret to look the user up
+    // (exists, enabled, admin groups). The data key below decrypts it in
+    // managed mode; a customer secret in connector mode is read the same way
+    // the FSx mount manager reads it.
+    directLdapAuthFunction.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [props.adServiceAccountSecretArn],
+    }));
 
     // Grant workstation manager function permission to invoke LDAP auth function
     directLdapAuthFunction.grantInvoke(workstationManagerFunction);
@@ -1900,6 +1918,11 @@ export class ApiStack extends cdk.Stack {
     // Login endpoint. Reachable before sign-in by design (it issues the
     // token); the stage throttles it (see deployOptions.methodOptions).
     directAuthResource.addMethod('POST', directAuthIntegration);
+
+    // AD session refresh. Behind the JWT authorizer like every signed-in
+    // route; the handler verifies the token again and re-checks the user in
+    // AD before it issues a new one.
+    directAuthResource.addResource('refresh').addMethod('POST', directAuthIntegration, { authorizer });
 
     // DCV Session Manager endpoints
     const dcvResource = this.api.root.addResource('dcv');

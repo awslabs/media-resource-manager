@@ -136,8 +136,22 @@ upgrade to that version; a version without it needs only a redeploy.
   token's lifetime, counted from when the tab received it (5 minutes before
   the end, or halfway for tokens that last 10 minutes or less), so a computer
   clock that is wrong doesn't change it, and at most one background refresh
-  starts per minute. AD sign-in (`useCognitoAuth=false`) is unchanged: its
-  session still ends after 1 hour.
+  starts per minute. AD sessions use the same timing.
+  ([#85](https://github.com/awslabs/media-resource-manager/issues/85))
+- With AD sign-in (`useCognitoAuth=false`), the console renews the 1-hour
+  session token through the new `POST /auth/ldap/refresh` route, about 5
+  minutes before it expires, for up to 12 hours after sign-in. The route is
+  behind the API's JWT authorizer. The `ldap-auth` Lambda verifies the
+  current token again (only the `HS256` header MRM issues, the signature and
+  the expiry), reads the user's AD record with the AD service account, and
+  refuses a deleted, disabled or expired account. The new token carries the
+  admin status from the user's current AD groups. The 12-hour cap is counted
+  from a new `auth_time` claim set at sign-in; it is fixed, not a setting.
+  Tokens issued before this version have no `auth_time` and can't be
+  renewed, so those sessions end at their 1-hour expiry, as before. No
+  password or other secret is stored in the browser. The JWT authorizer now
+  accepts only that same `HS256` header for AD tokens, and neither Lambda
+  logs sign-in names.
   ([#85](https://github.com/awslabs/media-resource-manager/issues/85))
 
 ### Security

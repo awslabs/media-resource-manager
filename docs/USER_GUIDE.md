@@ -38,6 +38,19 @@ This guide covers how to use the Media Resource Manager web console for both adm
 
 3. After signing in, you'll land on the **Dashboard**
 
+**How long you stay signed in.** Each browser tab keeps its own session;
+a new tab or window asks you to sign in again. While the tab stays open,
+the console renews your session in the background, so you aren't signed
+out every hour:
+
+- **Cognito:** the session lasts as long as the Cognito refresh token (30
+  days by default).
+- **LDAP (Active Directory):** the session lasts up to 12 hours after you
+  sign in. Each renewal checks your account in Active Directory again: a
+  disabled or deleted account ends the session within an hour, and a
+  change to your admin group membership takes effect at the next renewal.
+  The 12-hour limit is fixed; it isn't a setting.
+
 ### Navigation
 
 The left sidebar provides access to all features:
