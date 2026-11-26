@@ -20,6 +20,25 @@ SESSION_WAIT_BUDGET_SECONDS = 15
 SESSION_POLL_SECONDS = 3
 SESSION_RETRY_AFTER_SECONDS = 5
 
+# DCV session IDs from Session Manager (UUIDs) and console session names.
+SESSION_ID_PATTERN = re.compile(r'^[A-Za-z0-9._-]{1,128}$')
+
+
+def session_connections(sessions, server_ids, session_id):
+    """Connection count and state of one session, if it runs on one of server_ids.
+
+    Returns None when the session isn't found on those servers, so a caller
+    can't read the count of a session on another workstation.
+    """
+    for session in sessions:
+        if session.get('Id') == session_id and (session.get('Server') or {}).get('Id') in server_ids:
+            return {
+                'sessionId': session_id,
+                'state': session.get('State'),
+                'numOfConnections': int(session.get('NumOfConnections') or 0),
+            }
+    return None
+
 def get_workstation_region(server_id):
     """Look up the region for a workstation from DynamoDB.
     
@@ -460,7 +479,11 @@ def lambda_handler(event, context):
         'get-instance-states',
         'get-connection-data',
     }
-    OWNER_OR_ADMIN_ACTIONS = {'create-session'}
+    # get-session-connections (#139): after the console opens a native client
+    # link, it asks whether a client connected to that session. It returns
+    # only the connection count and state of one session on the caller's own
+    # workstation.
+    OWNER_OR_ADMIN_ACTIONS = {'create-session', 'get-session-connections'}
 
     def _forbidden(msg):
         return {
@@ -540,6 +563,13 @@ def lambda_handler(event, context):
                     return _forbidden(
                         'Access denied. You may only connect to workstations assigned to you.'
                     )
+            if action == 'get-session-connections' and not (
+                    isinstance(session_id, str) and SESSION_ID_PATTERN.match(session_id)):
+                return {
+                    'statusCode': 400,
+                    'headers': {'Content-Type': 'application/json', **cors_headers},
+                    'body': json.dumps({'error': 'dcvSessionId is required'})
+                }
         elif action is None:
             return {
                 'statusCode': 400,
@@ -562,7 +592,7 @@ def lambda_handler(event, context):
         # Route to regional Lambda if workstation is in a different region
         # This is needed because the DCV Session Manager Lambda must be in the same
         # VPC as the Session Manager broker to communicate with it
-        if server_id and action in ['create-session', 'describe-servers', 'describe-sessions']:
+        if server_id and action in ['create-session', 'describe-servers', 'describe-sessions', 'get-session-connections']:
             workstation_region = get_workstation_region(server_id)
             if workstation_region and workstation_region != current_region:
                 print(f"Workstation {server_id} is in region {workstation_region}, routing to regional Lambda...")
@@ -1071,6 +1101,40 @@ def lambda_handler(event, context):
                     })
                 }, server_id, caller_username, ssm)
                 
+            elif action == 'get-session-connections':
+                # The session must be on this workstation's DCV server(s).
+                def broker_call(api, payload):
+                    request = urllib.request.Request(
+                        f"{base_url}/{api}",
+                        data=json.dumps(payload).encode(),
+                        headers={
+                            'Authorization': f'Bearer {access_token}',
+                            'Content-Type': 'application/json'
+                        },
+                        method='POST'
+                    )
+                    with safe_urlopen(request, context=ssl_context, timeout=10) as response:
+                        return json.loads(response.read().decode())
+
+                servers = broker_call('describeServers', {}).get('Servers', [])
+                server_ids = {
+                    s.get('Id') for s in servers
+                    if s.get('Id') and s.get('Host', {}).get('Aws', {}).get('EC2InstanceId') == server_id
+                }
+                sessions = broker_call('describeSessions', {'SessionIds': [session_id]}).get('Sessions', [])
+                result = session_connections(sessions, server_ids, session_id)
+                if result is None:
+                    return {
+                        'statusCode': 404,
+                        'headers': {'Content-Type': 'application/json', **cors_headers},
+                        'body': json.dumps({'error': 'Session not found on this workstation'})
+                    }
+                return {
+                    'statusCode': 200,
+                    'headers': cors_headers,
+                    'body': json.dumps(result)
+                }
+
             elif action == 'delete-session':
                 if not session_id:
                     raise Exception('sessionId is required for delete-session')

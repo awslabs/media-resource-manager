@@ -21,7 +21,11 @@ let browserSessionsEnabled = true;
 function Harness() {
   const prompt = useDcvClientPrompt(browserSessionsEnabled);
   connect = prompt.connectWithClient;
-  modalOpen = (prompt.promptModal as React.ReactElement<{ open?: boolean }>).props.open === true;
+  // promptModal holds the install prompt first, then the #139 "didn't connect" message.
+  const [installPrompt] = React.Children.toArray(
+    (prompt.promptModal as React.ReactElement<{ children: React.ReactNode }>).props.children,
+  ) as React.ReactElement<{ open?: boolean }>[];
+  modalOpen = installPrompt.props.open === true;
   return prompt.promptModal;
 }
 

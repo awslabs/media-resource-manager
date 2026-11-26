@@ -15,6 +15,8 @@ import {
   nativeClientUrl,
   parseNativeClientTransport,
   parseNativeClientTransportOverride,
+  nativeConnectionCheck,
+  waitForNativeConnection,
   browserViewerPath,
   openBrowserViewer,
 } from './dcvClient';
@@ -255,6 +257,74 @@ describe('nativeClientUrl', () => {
     it('treats an unknown resolved value as QUIC, like GET /settings', () => {
       expect(nativeClientUrl({ ...session, nativeClientTransport: 'tcp' }, 'websocket')).toBe(quic);
     });
+  });
+});
+
+describe('nativeConnectionCheck (#139)', () => {
+  const session = {
+    sessionId: 's',
+    connectionUrl: 'https://gw.example.com:8443/?authToken=t#s',
+    quicConnectionUrl: 'https://gw.example.com:8444/?authToken=t#s',
+  };
+
+  it('checks a QUIC link and retries the same session over TCP', () => {
+    expect(nativeConnectionCheck(session, 'i-1', 'quic')).toEqual({
+      serverId: 'i-1',
+      sessionId: 's',
+      tcpUrl: 'dcv://gw.example.com:8443/?authToken=t&transport=websocket#s',
+    });
+    expect(nativeConnectionCheck({ ...session, nativeClientTransport: 'quic' }, 'i-1', 'websocket')?.sessionId).toBe('s');
+  });
+
+  it('has nothing to retry for a TCP link or an incomplete response', () => {
+    expect(nativeConnectionCheck(session, 'i-1', 'websocket')).toBeUndefined();
+    expect(nativeConnectionCheck({ ...session, nativeClientTransport: 'websocket' }, 'i-1', 'quic')).toBeUndefined();
+    expect(nativeConnectionCheck({ ...session, quicConnectionUrl: undefined }, 'i-1')).toBeUndefined();
+    expect(nativeConnectionCheck({ ...session, sessionId: undefined }, 'i-1')).toBeUndefined();
+    expect(nativeConnectionCheck(session, undefined)).toBeUndefined();
+  });
+});
+
+describe('waitForNativeConnection (#139)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  async function run(counts: Array<number | Error>, timeoutMs = 20000, signal?: AbortSignal) {
+    const get = vi.fn(async () => {
+      const next = counts.length > 1 ? counts.shift()! : counts[0];
+      if (next instanceof Error) throw next;
+      return next;
+    });
+    const done = waitForNativeConnection(get, { timeoutMs, intervalMs: 4000, signal });
+    await vi.advanceTimersByTimeAsync(timeoutMs + 1000);
+    return { result: await done, calls: get.mock.calls.length };
+  }
+
+  it('is connected as soon as a poll sees a connection', async () => {
+    expect(await run([0, 1])).toEqual({ result: 'connected', calls: 2 });
+  });
+
+  it('is not-connected when every poll answers 0 until the deadline', async () => {
+    expect(await run([0])).toEqual({ result: 'not-connected', calls: 5 });
+  });
+
+  it('is not-connected when some polls fail and the rest answer 0', async () => {
+    expect((await run([new Error('500'), 0])).result).toBe('not-connected');
+  });
+
+  it('is unknown when no poll gets an answer', async () => {
+    expect((await run([new Error('400 Unknown action')])).result).toBe('unknown');
+  });
+
+  it('is unknown and stops polling when aborted', async () => {
+    const controller = new AbortController();
+    const get = vi.fn(async () => 0);
+    const done = waitForNativeConnection(get, { signal: controller.signal });
+    await vi.advanceTimersByTimeAsync(4000);
+    controller.abort();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(await done).toBe('unknown');
+    expect(get).toHaveBeenCalledTimes(1);
   });
 });
 

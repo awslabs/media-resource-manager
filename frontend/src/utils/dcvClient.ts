@@ -113,6 +113,92 @@ export function nativeClientUrl(
   return webPort ? withQueryParam(url, 'webPort', webPort) : url;
 }
 
+/*
+ * Did the native client connect? (#139 Stage A)
+ *
+ * The launch detection above only tells whether an app opened. After a QUIC
+ * link opens, the console asks POST /dcv get-session-connections for the
+ * session's connection count. When no client has connected after about 20
+ * seconds, it offers Retry over TCP with the same session.
+ */
+
+/** Wait this long for a native client connection before offering Retry over TCP. */
+export const NATIVE_CONNECT_CHECK_MS = 20000;
+/** Keep checking this long after that, so the message closes if the client connects late. */
+export const NATIVE_CONNECT_LATE_MS = 40000;
+export const NATIVE_CONNECT_POLL_MS = 4000;
+
+/** What the console needs to check a QUIC launch and retry it over TCP. */
+export interface NativeConnectionCheck {
+  serverId: string;
+  sessionId: string;
+  /** The same session as a TCP (`transport=websocket`) link. */
+  tcpUrl: string;
+}
+
+/**
+ * The check for a create-session response, or undefined when there is
+ * nothing to retry: the link is already TCP, or the response lacks a URL or
+ * session ID.
+ */
+export function nativeConnectionCheck(
+  session: NativeClientUrls & { sessionId?: unknown },
+  serverId: string | undefined,
+  fallbackTransport: NativeClientTransport = DEFAULT_NATIVE_CLIENT_TRANSPORT,
+): NativeConnectionCheck | undefined {
+  const transport = session.nativeClientTransport === undefined
+    ? fallbackTransport
+    : parseNativeClientTransport(session.nativeClientTransport);
+  if (transport !== 'quic' || !session.quicConnectionUrl || !session.connectionUrl) return undefined;
+  if (!serverId || typeof session.sessionId !== 'string' || !session.sessionId) return undefined;
+  return {
+    serverId,
+    sessionId: session.sessionId,
+    tcpUrl: nativeClientUrl({ ...session, nativeClientTransport: 'websocket' }),
+  };
+}
+
+export type NativeConnectionResult = 'connected' | 'not-connected' | 'unknown';
+
+/**
+ * Poll the connection count until a client connects or `timeoutMs` passes.
+ * `unknown` when no poll got an answer (for example a regional hub that
+ * hasn't been updated to the version with get-session-connections), so the
+ * console only reports a failure it actually saw.
+ */
+export async function waitForNativeConnection(
+  getConnectionCount: () => Promise<number>,
+  {
+    timeoutMs = NATIVE_CONNECT_CHECK_MS,
+    intervalMs = NATIVE_CONNECT_POLL_MS,
+    signal,
+  }: { timeoutMs?: number; intervalMs?: number; signal?: AbortSignal } = {},
+): Promise<NativeConnectionResult> {
+  const deadline = Date.now() + timeoutMs;
+  let answered = false;
+  while (!signal?.aborted) {
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', done);
+        resolve();
+      };
+      const timer = setTimeout(done, Math.min(intervalMs, Math.max(0, deadline - Date.now())));
+      signal?.addEventListener('abort', done);
+    });
+    if (signal?.aborted) break;
+    try {
+      const count = await getConnectionCount();
+      answered = true;
+      if (count > 0) return 'connected';
+    } catch {
+      // A failed poll proves nothing either way.
+    }
+    if (Date.now() >= deadline) break;
+  }
+  return answered && !signal?.aborted ? 'not-connected' : 'unknown';
+}
+
 /** Add `name=value` to a URL's query, leaving the rest (the token) exactly as it is. */
 function withQueryParam(url: string, name: string, value: string): string {
   const hashAt = url.indexOf('#');

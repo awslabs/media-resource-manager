@@ -149,6 +149,10 @@ Once your workstation is running:
   applies. **Default** means no override at that level, and an override stays
   as set when the Settings value changes. Native client links only: browser
   sessions always use TCP.
+- If the client opens over QUIC but doesn't connect within about 20 seconds,
+  the console shows **The DCV client didn't connect** with **Retry over
+  TCP**, which opens the same session over TCP port 8443. If TCP works every
+  time, ask an administrator to set the workstation or your user to TCP.
 
 ### Stopping a Workstation
 

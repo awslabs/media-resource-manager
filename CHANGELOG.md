@@ -28,6 +28,16 @@ upgrade to that version; a version without it needs only a redeploy.
   admin-only and accept `quic`, `websocket` or `null`.
   ([#164](https://github.com/awslabs/media-resource-manager/pull/164),
   [#138](https://github.com/awslabs/media-resource-manager/issues/138))
+- After the console opens a native client link over QUIC, it checks whether
+  a client connected to the session. When none has after about 20 seconds, it
+  shows "The DCV client didn't connect" with **Retry over TCP**, which opens
+  the same session over TCP, and short troubleshooting tips. The message
+  closes if the client connects later. The check uses the new `POST /dcv`
+  action `get-session-connections`, which returns the connection count of one
+  session on the caller's own workstation (owner or admin). For workstations
+  in a regional hub, the check runs after the hub's next **Update**; until
+  then the console shows no message, as before.
+  ([#139](https://github.com/awslabs/media-resource-manager/issues/139))
 
 ## [1.6.1] - 2026-11-26
 

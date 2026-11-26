@@ -82,6 +82,13 @@ export class DcvApiService {
     return this.makeApiCall('delete-session', { sessionId });
   }
 
+  /** How many clients are connected to one session on the caller's workstation (#139). */
+  static async getSessionConnections(serverId: string, dcvSessionId: string): Promise<number> {
+    const data = await this.makeApiCall('get-session-connections', { serverId, dcvSessionId });
+    if (typeof data.numOfConnections !== 'number') throw new Error('No connection count in the response');
+    return data.numOfConnections;
+  }
+
   static async getSessionsForUser(userId: string): Promise<DcvSession[]> {
     const sessions = await this.describeSessions();
     console.log('All sessions from describeSessions:', sessions);

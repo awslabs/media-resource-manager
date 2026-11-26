@@ -39,6 +39,7 @@ import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
 import {
   nativeClientUrl,
+  nativeConnectionCheck,
   parseNativeClientTransport,
   parseNativeClientTransportOverride,
   DEFAULT_NATIVE_CLIENT_TRANSPORT,
@@ -302,7 +303,11 @@ const WorkstationDetailsAntd: React.FC<WorkstationDetailsAntdProps> = ({
       const sessionData = await response.json();
       if (sessionData.error) throw new Error(sessionData.error);
 
-      await connectWithClient(nativeClientUrl(sessionData, nativeClientTransport), instanceId);
+      await connectWithClient(
+        nativeClientUrl(sessionData, nativeClientTransport),
+        instanceId,
+        nativeConnectionCheck(sessionData, instanceId, nativeClientTransport),
+      );
     } catch (error) {
       console.error('Error connecting to workstation:', error);
       setAlert({ type: 'error', message: `Failed to connect: ${(error as Error).message}` });
