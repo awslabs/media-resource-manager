@@ -132,6 +132,7 @@ upgrade to that version; a version without it needs only a redeploy.
   description starts with `AWS Lambda VPC ENI-<acronym>-`, and prints each
   ID. It waits up to 10 minutes for such interfaces that are still in use
   to be released, then deletes the stack.
+  ([#158](https://github.com/awslabs/media-resource-manager/pull/158))
 - With Cognito sign-in, the console keeps an active user signed in past the
   1-hour ID token lifetime. It keeps the Cognito refresh token in the tab's
   `sessionStorage`, next to the ID token, and gets a new ID token 5 minutes
