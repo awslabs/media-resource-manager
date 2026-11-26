@@ -37,7 +37,8 @@ upgrade to that version; a version without it needs only a redeploy.
   session on the caller's own workstation (owner or admin). For workstations
   in a regional hub, the check runs after the hub's next **Update**; until
   then the console shows no message, as before.
-  ([#139](https://github.com/awslabs/media-resource-manager/issues/139))
+  ([#166](https://github.com/awslabs/media-resource-manager/pull/166),
+  [#139](https://github.com/awslabs/media-resource-manager/issues/139))
 
 ## [1.6.1] - 2026-11-26
 
