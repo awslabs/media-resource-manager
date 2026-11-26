@@ -124,6 +124,21 @@ upgrade to that version; a version without it needs only a redeploy.
   Before, it retried such a stack every 30 seconds without end, and exited
   with code 0 even when stacks were left.
   ([#155](https://github.com/awslabs/media-resource-manager/pull/155))
+- With Cognito sign-in, the console keeps an active user signed in past the
+  1-hour ID token lifetime. It keeps the Cognito refresh token in the tab's
+  `sessionStorage`, next to the ID token, and gets a new ID token 5 minutes
+  before the current one expires, when a page loads with an expired one, and
+  when the API answers 401. Calls made during a refresh wait for it and are
+  sent with the new token. When Cognito refuses the refresh token (expired
+  or revoked), the console clears the session and shows the sign-in page.
+  **Sign out** clears all three values and revokes the refresh token. A new
+  tab or window still needs its own sign-in. The refresh time comes from the
+  token's lifetime, counted from when the tab received it (5 minutes before
+  the end, or halfway for tokens that last 10 minutes or less), so a computer
+  clock that is wrong doesn't change it, and at most one background refresh
+  starts per minute. AD sign-in (`useCognitoAuth=false`) is unchanged: its
+  session still ends after 1 hour.
+  ([#85](https://github.com/awslabs/media-resource-manager/issues/85))
 
 ### Security
 

@@ -68,7 +68,7 @@ import DcvSessions from './pages/DcvSessions';
 import Navigation from './components/Navigation';
 import { setApiUrl } from './utils/api';
 import { apiCall } from './utils/api';
-import { signOut as cognitoSignOut } from './utils/auth';
+import { signOut as cognitoSignOut, clearSession, getFreshAuthToken, startTokenRefresh } from './utils/auth';
 
 // Loaded on demand: it carries the Amazon DCV Web UI and Web Client SDKs.
 const ConnectViewer = lazy(() => import('./pages/ConnectViewer'));
@@ -145,8 +145,7 @@ function App() {
     console.error = (...args) => {
       const message = args.join(' ');
       if (message.includes('No current user')) {
-        sessionStorage.removeItem('auth-user');
-        sessionStorage.removeItem('auth-token');
+        clearSession();
         setUser(null);
       }
       originalConsoleError.apply(console, args);
@@ -190,7 +189,9 @@ function App() {
     try {
       // Check for stored user and token in sessionStorage
       const storedUser = sessionStorage.getItem('auth-user');
-      const storedToken = sessionStorage.getItem('auth-token');
+      // Refreshes an expired or expiring ID token when the session has a
+      // Cognito refresh token (#85).
+      const storedToken = sessionStorage.getItem('auth-token') ? await getFreshAuthToken() : null;
       
       if (storedUser && storedToken) {
         // Verify token is still valid by checking expiry
@@ -200,18 +201,19 @@ function App() {
             const user = JSON.parse(storedUser);
             console.log('Found valid session token:', user);
             setUser(user);
+            startTokenRefresh();
             setLoading(false);
             return;
           } else {
             console.log('Token expired, clearing session');
-            sessionStorage.removeItem('auth-user');
-            sessionStorage.removeItem('auth-token');
+            clearSession();
           }
         } catch (error) {
           console.log('Invalid token format, clearing session');
-          sessionStorage.removeItem('auth-user');
-          sessionStorage.removeItem('auth-token');
+          clearSession();
         }
+      } else if (storedUser) {
+        clearSession();
       }
       
       console.log('No valid session found');
@@ -235,15 +237,13 @@ function App() {
         // If willRedirect is true, page will redirect so no need to update state
       } else {
         // LDAP mode - just clear local session
-        sessionStorage.removeItem('auth-user');
-        sessionStorage.removeItem('auth-token');
+        clearSession();
         setUser(null);
       }
     } catch (error) {
       console.error('Error signing out:', error);
       // Even if signout fails, clear our state
-      sessionStorage.removeItem('auth-user');
-      sessionStorage.removeItem('auth-token');
+      clearSession();
       setUser(null);
     }
   };
