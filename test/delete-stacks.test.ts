@@ -52,6 +52,10 @@ case "$1 $2" in
       fail) echo DELETE_FAILED > "$STUB_DIR/stacks/$name" ;;
       *) rm -f "$STUB_DIR/stacks/$name" ;;
     esac ;;
+  "cloudformation wait")
+    if [ -f "$STUB_DIR/stacks/$(arg_after --stack-name "$@")" ]; then
+      echo "Waiter StackDeleteComplete failed: stub" >&2; exit 255
+    fi ;;
   "ssm get-parameters-by-path")
     if [ -f "$STUB_DIR/ssm-fail" ]; then expired GetParametersByPath; fi
     if [ -f "$STUB_DIR/ssm-params" ]; then cat "$STUB_DIR/ssm-params"; fi ;;
@@ -88,6 +92,8 @@ interface RunOptions {
    * fail: the stack goes to DELETE_FAILED.
    */
   deleteMode?: Record<string, 'refuse' | 'ignore' | 'ignore-then-refuse' | 'fail'>;
+  /** AWS_DEFAULT_REGION (default us-east-1). Another Region also runs the us-east-1 stack step. */
+  region?: string;
 }
 
 interface RunResult {
@@ -137,7 +143,7 @@ function run(opts: RunOptions): RunResult {
     ...process.env,
     PATH: `${stubDir}:${process.env.PATH}`,
     STUB_DIR: stubDir,
-    AWS_DEFAULT_REGION: 'us-east-1',
+    AWS_DEFAULT_REGION: opts.region ?? 'us-east-1',
   };
   const result = spawnSync('bash', [SCRIPT, ...(opts.args ?? [])], {
     cwd: workDir, env, input: 'y\nn\n', encoding: 'utf8', timeout: 60000,
@@ -155,6 +161,8 @@ describe('delete-stacks.sh', () => {
     const r = run({ args: ['MRM'], listed: ['MRM-Api', 'MRM-Infrastructure'], ssmParams: ['/MediaResourceManager/a'] });
     expect(r.status).toBe(0);
     expect(r.liveAfter).toEqual([]);
+    expect(r.output).toMatch(/Cleanup complete!/);
+    expect(r.output).not.toMatch(/Teardown incomplete/);
     expect(r.output).toMatch(/Stack MRM-Api successfully deleted/);
     expect(r.calls).toMatch(/ssm get-parameters-by-path --path \/MediaResourceManager --recursive/);
     expect(r.calls).not.toMatch(/--path \/ /);
@@ -229,7 +237,9 @@ describe('delete-stacks.sh', () => {
       statusOf: { 'MRM-Infrastructure': 'UPDATE_COMPLETE' },
       deleteMode: { 'MRM-Dcv-Infrastructure': 'fail', 'MRM-Infrastructure': 'ignore' },
     });
-    expect(r.status).toBe(0);
+    expect(r.status).toBe(1);
+    expect(r.output).toMatch(/Teardown incomplete. These stacks were not deleted[^\n]*\n {2}- MRM-Dcv-Infrastructure\n {2}- MRM-Infrastructure\n/);
+    expect(r.output).not.toMatch(/Cleanup complete!/);
     expect(r.output).toMatch(/Stack MRM-Dcv-Infrastructure deletion failed \(DELETE_FAILED\)/);
     expect(r.output).toMatch(/Stacks later in the order may be blocked by it/);
     expect(r.output).toMatch(/Giving up on MRM-Infrastructure: its status is still UPDATE_COMPLETE after 3 retries of delete-stack/);
@@ -243,7 +253,8 @@ describe('delete-stacks.sh', () => {
 
   test('prints the error and moves on when delete-stack is refused', () => {
     const r = run({ args: ['MRM'], listed: ['MRM-Api', 'MRM-Infrastructure'], deleteMode: { 'MRM-Api': 'refuse' } });
-    expect(r.status).toBe(0);
+    expect(r.status).toBe(1);
+    expect(r.output).toMatch(/Teardown incomplete. These stacks were not deleted[^\n]*\n {2}- MRM-Api\nFix the cause/);
     expect(r.output).toMatch(/Failed to initiate deletion of MRM-Api:/);
     expect(r.output).toMatch(/cannot be deleted while TerminationProtection is enabled/);
     expect(r.output).toMatch(/Stack MRM-Infrastructure successfully deleted/);
@@ -258,12 +269,22 @@ describe('delete-stacks.sh', () => {
       statusOf: { 'MRM-Infrastructure': 'UPDATE_COMPLETE' },
       deleteMode: { 'MRM-Infrastructure': 'ignore-then-refuse' },
     });
-    expect(r.status).toBe(0);
+    expect(r.status).toBe(1);
+    expect(r.output).toMatch(/Teardown incomplete. These stacks were not deleted[^\n]*\n {2}- MRM-Infrastructure\n/);
     expect(r.output).toMatch(/retrying deletion \(1 of 3\)/);
     expect(r.output).toMatch(/delete-stack for MRM-Infrastructure failed:\n.*TerminationProtection/);
     expect(r.output).toMatch(/Giving up on MRM-Infrastructure/);
     expect(r.output).not.toMatch(/Earlier stacks that ended DELETE_FAILED/);
     expect(deleteCalls(r.calls, 'MRM-Infrastructure')).toBe(4);
+  });
+
+  test('lists a us-east-1 stack whose delete was refused in the summary and exits 1', () => {
+    // The stub's list-stacks returns the same stacks for every Region.
+    const r = run({ args: ['MRM'], region: 'us-west-2', listed: ['MRM-Waf'], deleteMode: { 'MRM-Waf': 'refuse' } });
+    expect(r.status).toBe(1);
+    expect(r.output).toMatch(/Deleting us-east-1 stack: MRM-Waf\n.*Failed to initiate deletion of MRM-Waf:\n.*TerminationProtection/);
+    expect(r.calls).not.toMatch(/cloudformation wait/);
+    expect(r.output).toMatch(/Teardown incomplete[^\n]*\n {2}- MRM-Waf\n {2}- MRM-Waf \(us-east-1\)\n/);
   });
 
   test('rejects an acronym with characters that are not letters or digits', () => {

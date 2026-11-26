@@ -118,8 +118,11 @@ upgrade to that version; a version without it needs only a redeploy.
   because another stack still imports its exports), it gives up on that
   stack after 3 retries, says why and names any earlier stack that ended
   `DELETE_FAILED`, then goes on to the next stack. When a stack ends
-  `DELETE_FAILED`, it says that later stacks may be blocked by it. Before,
-  it retried such a stack every 30 seconds without end.
+  `DELETE_FAILED`, it says that later stacks may be blocked by it. When any
+  stack wasn't deleted, the script ends with a list of those stacks and
+  exits with code 1, so a caller can tell the teardown is incomplete.
+  Before, it retried such a stack every 30 seconds without end, and exited
+  with code 0 even when stacks were left.
   ([#155](https://github.com/awslabs/media-resource-manager/pull/155))
 
 ### Security

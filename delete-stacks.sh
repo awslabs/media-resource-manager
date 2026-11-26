@@ -233,12 +233,15 @@ delete_stack() {
 
 echo "$(date): Starting systematic stack deletion..."
 
+# Stacks that were not deleted (refused, given up on or DELETE_FAILED), for the final summary
+NOT_DELETED_STACKS=()
+
 for stack in "${STACKS_TO_DELETE[@]}"; do
-    delete_stack "$stack"
-    if [ $? -eq 0 ]; then
+    if delete_stack "$stack"; then
         echo "$(date): Successfully processed $stack"
     else
         echo "$(date): Failed to delete $stack, continuing with next stack..."
+        NOT_DELETED_STACKS+=("$stack")
     fi
     echo "----------------------------------------"
 done
@@ -254,10 +257,12 @@ if [ -n "$US_EAST_STACKS" ]; then
         if ! aws cloudformation delete-stack --stack-name "$stack" --region "us-east-1" 2>"$AWS_ERR"; then
             echo "$(date): Failed to initiate deletion of $stack:"
             cat "$AWS_ERR"
+            NOT_DELETED_STACKS+=("$stack (us-east-1)")
         elif aws cloudformation wait stack-delete-complete --stack-name "$stack" --region "us-east-1"; then
             echo "$(date): Deleted $stack"
         else
             echo "$(date): Failed to delete $stack (see the error above)"
+            NOT_DELETED_STACKS+=("$stack (us-east-1)")
         fi
     done
     echo "$(date): Cross-region cleanup completed"
@@ -516,4 +521,12 @@ if [ "$MEDIA_BUCKET_EXISTS" = true ]; then
 fi
 
 echo ""
+if [ ${#NOT_DELETED_STACKS[@]} -gt 0 ]; then
+    echo "$(date): Teardown incomplete. These stacks were not deleted (see the messages above):"
+    for stack in "${NOT_DELETED_STACKS[@]}"; do
+        echo "  - $stack"
+    done
+    echo "Fix the cause and rerun ./delete-stacks.sh."
+    exit 1
+fi
 echo "$(date): Cleanup complete!"
