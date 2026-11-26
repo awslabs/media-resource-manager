@@ -592,6 +592,7 @@ const SettingsAntd: React.FC<SettingsAntdProps> = ({
               />
               <Text type="secondary" style={{ fontSize: 13, display: 'block', marginTop: 6 }}>
                 How the Amazon DCV client connects. Use TCP when a firewall or security agent blocks UDP.
+                Admins can override it for one workstation (workstation details) or one user (user details).
               </Text>
             </div>
           </Card>

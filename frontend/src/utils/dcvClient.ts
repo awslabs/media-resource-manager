@@ -65,6 +65,20 @@ export function parseNativeClientTransport(value: unknown): NativeClientTranspor
 export interface NativeClientUrls {
   connectionUrl?: string;
   quicConnectionUrl?: string;
+  /**
+   * The protocol resolved for this caller and workstation (#138): the
+   * workstation override, then the user override, then the Settings value.
+   * When present it wins over the `fallbackTransport` argument of `nativeClientUrl`.
+   */
+  nativeClientTransport?: unknown;
+}
+
+/** A workstation or user override: a protocol, or `null` to follow the next level. */
+export type NativeClientTransportOverride = NativeClientTransport | null;
+
+/** Read an override from an API response; anything unknown means no override. */
+export function parseNativeClientTransportOverride(value: unknown): NativeClientTransportOverride {
+  return value === 'quic' || value === 'websocket' ? value : null;
 }
 
 /**
@@ -76,12 +90,18 @@ export interface NativeClientUrls {
  *   over WebSocket on it.
  * - `transport=websocket`: connect over TCP and skip QUIC entirely (#47). This
  *   is the reliable choice when UDP is blocked.
+ *
+ * `fallbackTransport` is the Settings value from GET /settings. The session's own
+ * `nativeClientTransport`, resolved by POST /dcv, wins when present.
  */
 export function nativeClientUrl(
   session: NativeClientUrls,
-  transport: NativeClientTransport = DEFAULT_NATIVE_CLIENT_TRANSPORT,
+  fallbackTransport: NativeClientTransport = DEFAULT_NATIVE_CLIENT_TRANSPORT,
 ): string {
   const { connectionUrl, quicConnectionUrl } = session;
+  const transport = session.nativeClientTransport === undefined
+    ? fallbackTransport
+    : parseNativeClientTransport(session.nativeClientTransport);
   if (transport === 'websocket' || !quicConnectionUrl) {
     if (!connectionUrl) throw new Error('The session response has no connection URL');
     const url = toDcvClientUrl(connectionUrl);

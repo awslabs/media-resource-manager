@@ -41,6 +41,20 @@ is a rebuild.
   ([#148](https://github.com/awslabs/media-resource-manager/pull/148),
   [#82](https://github.com/awslabs/media-resource-manager/issues/82))
 
+### Added
+
+- Administrators can set the native client protocol for one workstation
+  (workstation details) or one user (user details): **Default**, **QUIC
+  (UDP)** or **TCP (WebSocket)**. The workstation setting wins, then the user
+  setting, then **Settings → Session Management → Native client protocol**.
+  With no override set, connections use the Settings value as before.
+  `POST /dcv` `create-session` returns the resolved `nativeClientTransport`,
+  and the console builds the native client link from it. The user setting is
+  `GET`/`PUT /users/{id}/native-client-transport`, and the workstation
+  setting is `nativeClientTransport` in `PUT /workstations/{id}`; both are
+  admin-only and accept `quic`, `websocket` or `null`.
+  ([#138](https://github.com/awslabs/media-resource-manager/issues/138))
+
 ### Fixed
 
 - Deleting a regional hub is refused while workstations remain in its

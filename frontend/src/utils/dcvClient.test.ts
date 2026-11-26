@@ -14,6 +14,7 @@ import {
   toDcvClientUrl,
   nativeClientUrl,
   parseNativeClientTransport,
+  parseNativeClientTransportOverride,
   browserViewerPath,
   openBrowserViewer,
 } from './dcvClient';
@@ -232,6 +233,38 @@ describe('nativeClientUrl', () => {
   it('throws when the response has no usable URL', () => {
     expect(() => nativeClientUrl({})).toThrow(/no connection URL/);
     expect(() => nativeClientUrl({ quicConnectionUrl: session.quicConnectionUrl }, 'websocket')).toThrow(/no connection URL/);
+  });
+
+  describe('with the protocol POST /dcv resolved (#138)', () => {
+    const tcp = 'dcv://gw.example.com:8443/?authToken=t&transport=websocket#s';
+    const quic = 'dcv://gw.example.com:8444/?authToken=t&webPort=8443#s';
+
+    it('connects over TCP when an override resolved to websocket, though Settings say QUIC', () => {
+      expect(nativeClientUrl({ ...session, nativeClientTransport: 'websocket' }, 'quic')).toBe(tcp);
+    });
+
+    it('connects over QUIC when an override resolved to quic, though Settings say TCP', () => {
+      expect(nativeClientUrl({ ...session, nativeClientTransport: 'quic' }, 'websocket')).toBe(quic);
+    });
+
+    it('uses the Settings value when the response has no resolved protocol', () => {
+      expect(nativeClientUrl(session, 'websocket')).toBe(tcp);
+      expect(nativeClientUrl(session, 'quic')).toBe(quic);
+    });
+
+    it('treats an unknown resolved value as QUIC, like GET /settings', () => {
+      expect(nativeClientUrl({ ...session, nativeClientTransport: 'tcp' }, 'websocket')).toBe(quic);
+    });
+  });
+});
+
+describe('parseNativeClientTransportOverride', () => {
+  it('keeps quic and websocket and maps anything else to no override', () => {
+    expect(parseNativeClientTransportOverride('websocket')).toBe('websocket');
+    expect(parseNativeClientTransportOverride('quic')).toBe('quic');
+    expect(parseNativeClientTransportOverride(null)).toBeNull();
+    expect(parseNativeClientTransportOverride(undefined)).toBeNull();
+    expect(parseNativeClientTransportOverride('tcp')).toBeNull();
   });
 });
 

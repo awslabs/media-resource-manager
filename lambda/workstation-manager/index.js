@@ -23,6 +23,10 @@ const directoryServiceData = new DirectoryServiceDataClient({ region: process.en
 const lambdaClient = new LambdaClient({ region: process.env.AWS_REGION });
 const cognitoClient = new CognitoIdentityProviderClient({ region: process.env.AWS_REGION });
 
+// Per-workstation native client protocol override (#138), the same values as
+// Settings > Native client protocol. dcv-session-manager reads it on connect.
+const NATIVE_CLIENT_TRANSPORTS = ['quic', 'websocket'];
+
 // Base image SSM parameter mappings - these are AWS public parameters available in all regions
 const BASE_IMAGE_SSM_PARAMS = {
   'windows-2025': '/aws/service/ami-windows-latest/Windows_Server-2025-English-Full-Base',
@@ -1145,6 +1149,22 @@ async function updateWorkstation(instanceId, updateData) {
       } else {
         updateExpression.push('assignedUserId = :assignedUserId');
         expressionAttributeValues[':assignedUserId'] = updateData.assignedUserId;
+      }
+    }
+    
+    if (updateData.nativeClientTransport !== undefined) {
+      // null or '' clears the override, so the user's override or the global setting applies.
+      if (updateData.nativeClientTransport === null || updateData.nativeClientTransport === '') {
+        removeExpression.push('nativeClientTransport');
+      } else if (NATIVE_CLIENT_TRANSPORTS.includes(updateData.nativeClientTransport)) {
+        updateExpression.push('nativeClientTransport = :nativeClientTransport');
+        expressionAttributeValues[':nativeClientTransport'] = updateData.nativeClientTransport;
+      } else {
+        return {
+          statusCode: 400,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders },
+          body: JSON.stringify({ error: `nativeClientTransport must be one of: ${NATIVE_CLIENT_TRANSPORTS.join(', ')}, or null` })
+        };
       }
     }
     
