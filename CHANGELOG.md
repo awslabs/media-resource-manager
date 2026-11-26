@@ -90,9 +90,12 @@ upgrade to that version; a version without it needs only a redeploy.
   sent with the new token. When Cognito refuses the refresh token (expired
   or revoked), the console clears the session and shows the sign-in page.
   **Sign out** clears all three values and revokes the refresh token. A new
-  tab or window still needs its own sign-in. AD sign-in
-  (`useCognitoAuth=false`) is unchanged: its session still ends after 1
-  hour.
+  tab or window still needs its own sign-in. The refresh time comes from the
+  token's lifetime, counted from when the tab received it (5 minutes before
+  the end, or halfway for tokens that last 10 minutes or less), so a computer
+  clock that is wrong doesn't change it, and at most one background refresh
+  starts per minute. AD sign-in (`useCognitoAuth=false`) is unchanged: its
+  session still ends after 1 hour.
   ([#85](https://github.com/awslabs/media-resource-manager/issues/85))
 
 ### Security

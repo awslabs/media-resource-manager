@@ -36,28 +36,21 @@ const ID_TOKEN_KEY = 'auth-token';
 const USER_KEY = 'auth-user';
 // Cognito refresh token, used only to get a new ID token (#85).
 const REFRESH_TOKEN_KEY = 'auth-refresh-token';
+// Local time (ms) this tab received the stored ID token.
+const RECEIVED_AT_KEY = 'auth-token-received-at';
 
-/** Refresh the ID token this many seconds before it expires. */
+/** Refresh the ID token this many seconds before it expires (at most half its lifetime). */
 export const REFRESH_MARGIN_SECONDS = 300;
 /** Retry a background refresh that failed on the network after this many seconds. */
 const REFRESH_RETRY_SECONDS = 60;
+/** At most one background or proactive refresh starts per this many seconds. */
+export const MIN_REFRESH_INTERVAL_SECONDS = 60;
 
 const nowSeconds = () => Math.floor(Date.now() / 1000);
 
 /** Decode a JWT payload. JWTs use base64url, which atob() rejects ('-', '_'). */
 const decodePayload = (token: string) =>
   JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-
-/** The `exp` claim of a JWT, or null when it can't be read. */
-const tokenExpiry = (token: string | null): number | null => {
-  if (!token || token.split('.').length !== 3) return null;
-  try {
-    const payload = decodePayload(token);
-    return typeof payload.exp === 'number' ? payload.exp : null;
-  } catch {
-    return null;
-  }
-};
 
 /** Tokens a refresh returns. */
 export interface RefreshedTokens {
@@ -122,11 +115,51 @@ const activeRefresher = (): SessionRefresher | null =>
 export const canRefreshSession = (): boolean => activeRefresher() !== null;
 
 
+/**
+ * Timing of the stored ID token, measured on this browser's clock only.
+ * `exp` and `iat` come from the server's clock, which can differ from the
+ * local one by any amount, so they are never compared with Date.now(): the
+ * token's lifetime (exp - iat) runs from the local time it was received.
+ * A token stored before this tab recorded that time (or without iat) falls
+ * back to exp against the local clock, once; the next refresh records it.
+ */
+const tokenTiming = (): { secondsLeft: number; marginSeconds: number } | null => {
+  const token = sessionStorage.getItem(ID_TOKEN_KEY);
+  if (!token || token.split('.').length !== 3) return null;
+  let payload: { exp?: unknown; iat?: unknown };
+  try {
+    payload = decodePayload(token);
+  } catch {
+    return null;
+  }
+  if (typeof payload.exp !== 'number') return null;
+  const lifetime = typeof payload.iat === 'number' && payload.exp > payload.iat ? payload.exp - payload.iat : null;
+  const marginSeconds = lifetime === null ? REFRESH_MARGIN_SECONDS : Math.min(REFRESH_MARGIN_SECONDS, lifetime / 2);
+  const nowMs = Date.now();
+  let receivedAt = Number(sessionStorage.getItem(RECEIVED_AT_KEY));
+  if (lifetime !== null && Number.isFinite(receivedAt) && receivedAt > 0) {
+    // A clock set back after receipt: count from now, not from the future.
+    if (receivedAt > nowMs) {
+      receivedAt = nowMs;
+      sessionStorage.setItem(RECEIVED_AT_KEY, String(nowMs));
+    }
+    return { secondsLeft: receivedAt / 1000 + lifetime - nowMs / 1000, marginSeconds };
+  }
+  return { secondsLeft: payload.exp - nowMs / 1000, marginSeconds };
+};
+
+/** Seconds until the stored ID token expires (local measure), or null when unreadable. */
+const secondsLeft = (): number | null => tokenTiming()?.secondsLeft ?? null;
+
 /** True when the stored ID token expires within the refresh margin (or is unreadable). */
 export const idTokenNeedsRefresh = (): boolean => {
-  const exp = tokenExpiry(sessionStorage.getItem(ID_TOKEN_KEY));
-  return exp === null || exp - nowSeconds() <= REFRESH_MARGIN_SECONDS;
+  const timing = tokenTiming();
+  return timing === null || timing.secondsLeft <= timing.marginSeconds;
 };
+
+// Local time (ms) the last background or proactive refresh started.
+let lastRefreshStartedAt = 0;
+const refreshFloorMs = () => Math.max(0, lastRefreshStartedAt + MIN_REFRESH_INTERVAL_SECONDS * 1000 - Date.now());
 
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -138,9 +171,11 @@ const stopTokenRefresh = () => {
 /** Remove every token and the user from this tab's session. */
 export const clearSession = () => {
   stopTokenRefresh();
+  lastRefreshStartedAt = 0;
   sessionStorage.removeItem(ID_TOKEN_KEY);
   sessionStorage.removeItem(USER_KEY);
   sessionStorage.removeItem(REFRESH_TOKEN_KEY);
+  sessionStorage.removeItem(RECEIVED_AT_KEY);
 };
 
 /** After a refresh is refused: clear the session and reload, which shows sign-in. */
@@ -151,11 +186,13 @@ const signOutAfterRefreshFailure = () => {
 
 const storeTokens = (idToken: string, refreshToken?: string) => {
   sessionStorage.setItem(ID_TOKEN_KEY, idToken);
+  sessionStorage.setItem(RECEIVED_AT_KEY, String(Date.now()));
   if (refreshToken) sessionStorage.setItem(REFRESH_TOKEN_KEY, refreshToken);
   startTokenRefresh();
 };
 
 let refreshInFlight: Promise<string | null> | null = null;
+const isRefreshInFlight = () => refreshInFlight !== null;
 
 /**
  * Get a new ID token from the session's refresher (Cognito: the stored
@@ -188,22 +225,26 @@ export const refreshSession = (): Promise<string | null> => {
 export const startTokenRefresh = () => {
   stopTokenRefresh();
   if (!canRefreshSession()) return;
-  const exp = tokenExpiry(sessionStorage.getItem(ID_TOKEN_KEY));
-  const delaySeconds = exp === null ? 0 : Math.max(0, exp - REFRESH_MARGIN_SECONDS - nowSeconds());
+  const timing = tokenTiming();
+  const dueMs = timing === null ? 0 : Math.max(0, (timing.secondsLeft - timing.marginSeconds) * 1000);
+  // Never sooner than the floor after the last refresh started, so no clock
+  // or token lifetime can turn this into a loop.
+  const delayMs = Math.max(dueMs, refreshFloorMs());
   refreshTimer = setTimeout(async () => {
     refreshTimer = null;
     try {
+      lastRefreshStartedAt = Date.now();
       if (!(await refreshSession())) signOutAfterRefreshFailure();
     } catch {
-      const current = tokenExpiry(sessionStorage.getItem(ID_TOKEN_KEY));
-      if (current !== null && current > nowSeconds() + REFRESH_RETRY_SECONDS) {
+      const current = secondsLeft();
+      if (current !== null && current > REFRESH_RETRY_SECONDS) {
         console.warn('Session refresh failed on the network; retrying');
         refreshTimer = setTimeout(startTokenRefresh, REFRESH_RETRY_SECONDS * 1000);
       } else {
         signOutAfterRefreshFailure();
       }
     }
-  }, delaySeconds * 1000);
+  }, delayMs);
 };
 
 /**
@@ -215,6 +256,12 @@ export const getFreshAuthToken = async (): Promise<string | null> => {
   const token = sessionStorage.getItem(ID_TOKEN_KEY);
   if (!idTokenNeedsRefresh()) return token;
   if (!canRefreshSession()) return getAuthToken();
+  // Join a refresh in flight; otherwise start one only past the floor, and
+  // until then send the current token (a 401 still refreshes once).
+  if (!isRefreshInFlight()) {
+    if (refreshFloorMs() > 0) return getAuthToken();
+    lastRefreshStartedAt = Date.now();
+  }
   try {
     const refreshed = await refreshSession();
     if (!refreshed) clearSession();

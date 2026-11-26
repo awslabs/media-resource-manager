@@ -175,6 +175,68 @@ describe('refresh before expiry', () => {
   });
 });
 
+describe('refresh timing uses the token lifetime, not the local clock', () => {
+  /** A Cognito-style ID token issued at `iat` (server clock) for `lifetime` seconds. */
+  const serverToken = (iat: number, lifetime: number) => {
+    serial += 1;
+    const header = btoa(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+    const body = btoa(JSON.stringify({ iat, exp: iat + lifetime, email: 'user@example.com', marker: `t-${serial}` }));
+    return `${header}.${body}.sig-${serial}`;
+  };
+  const refreshes = () => calls.filter(c => c.url === COGNITO && JSON.parse(String(c.init.body)).AuthFlow === 'REFRESH_TOKEN_AUTH');
+
+  /** Cognito: sign-in and each refresh return a token of `lifetime` seconds, stamped by `serverNow()`. */
+  const cognitoIssuing = (lifetime: number, serverNow: () => number): Handler => (_url, init) => {
+    const body = JSON.parse(String(init.body));
+    const auth = { IdToken: serverToken(serverNow(), lifetime), AccessToken: 'access' };
+    return json(200, { AuthenticationResult: body.AuthFlow === 'USER_PASSWORD_AUTH' ? { ...auth, RefreshToken: REFRESH } : auth });
+  };
+
+  it('with the local clock 56 minutes fast, refreshes once and schedules the next 55 minutes later', async () => {
+    vi.useFakeTimers();
+    const serverStart = now();
+    cognito = cognitoIssuing(3600, () => serverStart + 60); // the server's clock barely moves
+    await signInWithCognitoCredentials('user@example.com', 'pw-for-test'); // pragma: allowlist secret
+
+    vi.setSystemTime(Date.now() + 56 * 60 * 1000);
+    const token = sessionStorage.getItem('auth-token')!;
+    await apiCall('/workstations', { headers: { Authorization: `Bearer ${token}` } });
+    expect(refreshes()).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(refreshes()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(49 * 60 * 1000); // 54 minutes after the refresh
+    expect(refreshes()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000); // 56 minutes after it
+    expect(refreshes()).toHaveLength(2);
+  });
+
+  it('does not loop with a 5-minute ID token lifetime (refreshes at half its lifetime)', async () => {
+    vi.useFakeTimers();
+    cognito = cognitoIssuing(300, () => now());
+    await signInWithCognitoCredentials('user@example.com', 'pw-for-test'); // pragma: allowlist secret
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    expect(refreshes()).toHaveLength(4); // at 150, 300, 450 and 600 s
+  });
+
+  it('starts at most one background or proactive refresh per 60 seconds', async () => {
+    vi.useFakeTimers();
+    cognito = cognitoIssuing(20, () => now()); // margin 10 s, below the floor
+    await signInWithCognitoCredentials('user@example.com', 'pw-for-test'); // pragma: allowlist secret
+    await vi.advanceTimersByTimeAsync(15 * 1000);
+    expect(refreshes()).toHaveLength(1);
+
+    // The token is due again, but the floor holds: these calls use it as it is.
+    const token = sessionStorage.getItem('auth-token')!;
+    await Promise.all(['/a', '/b', '/c'].map(p => apiCall(p, { headers: { Authorization: `Bearer ${token}` } })));
+    expect(refreshes()).toHaveLength(1);
+    expect(apiCalls().map(c => bearer(c.init))).toEqual([token, token, token]);
+
+    await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+    expect(refreshes().length).toBeLessThanOrEqual(11);
+  });
+});
+
 describe('base64url tokens', () => {
   it("reads the expiry of a token whose payload has '-' or '_' and doesn't refresh it early", async () => {
     // Real Cognito tokens are base64url; this payload encodes to '/' and '+',
