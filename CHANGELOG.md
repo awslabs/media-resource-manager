@@ -82,6 +82,26 @@ upgrade to that version; a version without it needs only a redeploy.
   internet gateway as public, even when it doesn't assign public IPs, so it
   isn't offered or picked as a private subnet.
   ([#117](https://github.com/awslabs/media-resource-manager/pull/117))
+- When `deploy.sh` or `deploy.ps1` can't read the Lambda concurrent
+  executions quota (for example without credentials, a Region or
+  `servicequotas:GetServiceQuota` permission), or the result isn't a number,
+  it says "Could not check Lambda concurrency quota (non-blocking)" and goes
+  on. `deploy.sh` requests a quota increase only after it has read a quota
+  below 2000. Before, a failed read counted as a quota of 0, and `deploy.sh`
+  then requested an increase.
+- `deploy.sh` and `deploy.ps1` stop with an error that names the Lambda
+  function when `npm install --omit=dev` fails for a folder under `lambda/`,
+  as they do for the CDK and frontend installs. Before, `deploy.ps1` carried
+  on, and `deploy.sh` stopped without a message of its own.
+- When `cdk diff` fails, `deploy.sh` and `deploy.ps1` show its error output,
+  repeat its last 20 lines and warn that the deployment may fail for the same
+  reason. Before, they hid the error and said a failed diff was normal on a
+  first deploy with an imported VPC.
+- `deploy.sh` and `deploy.ps1` don't compare the CDK CLI and `aws-cdk-lib`
+  minor versions before `npm install`. The CDK CLI has its own version line
+  (2.1000.0 and later), so that check couldn't catch an older CLI. The
+  scripts run the CDK CLI that `package.json` pins in `devDependencies`
+  (`aws-cdk`), which `npm install` installs.
 
 ### Security
 
