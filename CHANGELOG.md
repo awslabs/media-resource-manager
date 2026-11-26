@@ -24,6 +24,14 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ### Fixed
 
+- `cdk synth` and `cdk diff` without an AWS account (no credentials and no
+  `CDK_DEFAULT_ACCOUNT`) stop with "The AWS account is unknown, so the
+  Cognito domain prefix cannot be built. Set AWS credentials, or set
+  CDK_DEFAULT_ACCOUNT to synthesize without credentials." Before, they
+  failed with a `domainPrefix` validation error from the Cognito domain.
+  With an account, the domain prefix and the synthesized templates are
+  unchanged.
+  ([#156](https://github.com/awslabs/media-resource-manager/issues/156))
 - Deleting a regional hub is refused while workstations remain in its
   Region. The API returns 409 with the count, for example "Terminate the 2
   workstations in us-west-2 before deleting its regional hub.", and lists
