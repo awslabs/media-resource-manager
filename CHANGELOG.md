@@ -153,6 +153,13 @@ upgrade to that version; a version without it needs only a redeploy.
   accepts only that same `HS256` header for AD tokens, and neither Lambda
   logs sign-in names.
   ([#85](https://github.com/awslabs/media-resource-manager/issues/85))
+- When a session ends while the **Users** page or the **Dashboard** is
+  loading, the browser console doesn't log `SyntaxError: Unexpected end of
+  input`. The Users page loads users and groups only when there is a token,
+  and both pages read the response body only for a successful response. For
+  a failed response other than 401, they log the HTTP status and keep the
+  current list; the Users page also shows "Failed to fetch users".
+  ([#157](https://github.com/awslabs/media-resource-manager/issues/157))
 
 ### Security
 
