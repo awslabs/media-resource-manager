@@ -25,7 +25,7 @@ upgrade to that version; a version without it needs only a redeploy.
   issued before the upgrade keep the lifetime they were issued with (30 days
   by default), so users who are signed in when you upgrade can stay
   signed in until that token expires. Their next sign-in lasts up to
-  12 hours.
+  12 hours. ([#167](https://github.com/awslabs/media-resource-manager/pull/167))
 
 ### Changed
 
@@ -34,6 +34,7 @@ upgrade to that version; a version without it needs only a redeploy.
   client issues refresh tokens that expire 12 hours after sign-in. ID and
   access tokens still last 1 hour, and the console still renews them in the
   background until the refresh token expires.
+  ([#167](https://github.com/awslabs/media-resource-manager/pull/167))
 
 ### Fixed
 
