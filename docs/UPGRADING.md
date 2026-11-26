@@ -9,6 +9,71 @@ An upgrade has two parts: update the pipeline stack with the new release's
 template and tag, then let the build deploy the release. Regional hubs are
 updated separately from the console.
 
+## Upgrade with the script
+
+`scripts/upgrade.sh` runs the steps on this page with your own AWS
+credentials. Run it in AWS CloudShell or a local shell, in the Region of the
+installation, from a clone of the repository:
+
+```bash
+git clone --depth 1 https://github.com/awslabs/media-resource-manager.git
+cd media-resource-manager
+scripts/upgrade.sh <tag> --dry-run   # show the plan; changes nothing
+scripts/upgrade.sh <tag>             # upgrade, asking before each change
+```
+
+It needs bash, the AWS CLI v2, git and Node.js, which CloudShell has. There
+is no PowerShell version; on Windows, use CloudShell or WSL.
+
+The script:
+
+1. Finds the installation: the pipeline stack (pass `--stack <name>` if the
+   account has more than one), or, with `--clone`, the `deploy.sh` install
+   run from the current folder. It reads the installed version from
+   `GitBranch`, or from the clone's tag.
+2. Reads `releases.json` at the target tag. The file describes each release:
+   whether the pipeline template changed, whether regional hubs need an
+   update, whether DCV sessions disconnect, and whether an admin must act.
+   For every release after the installed one, up to the target, it picks the
+   [full path](#1-before-you-start) if any of them changed the pipeline
+   template or has no metadata, and the [quick path](#quick-path) otherwise.
+3. Checks that no build is running and no regional hub is being created,
+   updated or deleted, then shows the plan: the releases and their notes,
+   the path, the hubs that will need **Update**, and whether DCV sessions may
+   disconnect. It asks before it goes on.
+4. Saves the pipeline stack's parameters and template to
+   `mrm-rollback-<stack>-<time>.json` and `.yaml` in the current folder,
+   creates a change set (with the template from the tag on the full path),
+   shows the changes with replaced or removed resources first, and asks
+   again. Answering no deletes the change set. It stops if the change set
+   would change `AdMode`.
+5. Executes the change set and follows the build to the end, starting one if
+   the stack update didn't. On a failure it prints the build log link.
+6. Lists the regional hubs that show **Update available**, with the console
+   steps to [update them](#7-update-regional-hubs). Hub updates run in the
+   console as the signed-in admin, so the script doesn't do them.
+7. Prints the rollback commands for the saved files.
+
+Options: `--yes` answers yes to both questions, for automation.
+`--param Key=Value` sets a stack parameter that the Upgrade notes call out,
+for example `--param DcvBrowserPath=direct`. `--repo <url>` reads the release
+from another Git repository than the pipeline's `RepoUrl`; the script warns
+when that isn't the official repository.
+
+`--dry-run` makes only read calls (`describe-stacks`,
+`list-builds-for-project`, `batch-get-builds`, a `scan` of the hub table) and
+writes no files. It can't show the change set, because creating one is a
+write; the upgrade shows it before asking to execute it.
+
+For a `deploy.sh` install, run the script with `--clone` (or without
+`--stack` in an account with no pipeline stack) from the clone you deploy
+from. It checks out the tag and runs `./deploy.sh -y`, then lists the hubs.
+
+The rest of this page is the reference for each step, and for upgrading by
+hand.
+
+## Upgrade by hand
+
 The commands below use these shell variables. Set them first:
 
 ```bash

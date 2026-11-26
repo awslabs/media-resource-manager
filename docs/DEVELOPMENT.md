@@ -210,6 +210,34 @@ every release has:
 - **Full changelog**: the compare link,
   `https://github.com/awslabs/media-resource-manager/compare/vA.B.C...vX.Y.Z`.
 
+**Release metadata.** `releases.json` in the repo root has one entry per
+release, newest first. `scripts/upgrade.sh` reads it at the target tag to
+choose the upgrade path and list the hubs to update, so every release tag
+must include its own entry. In the release prep pull request, add the entry
+with the fields a person decides, matching the Upgrade notes:
+
+```json
+{ "version": "1.7.0", "sessionsDisconnect": true, "adminAction": false, "notes": "Update regional hubs after the deploy. ..." }
+```
+
+- `sessionsDisconnect`: the deploy or a hub **Update** replaces a DCV
+  Connection Gateway or otherwise ends DCV sessions.
+- `adminAction`: an admin must do something besides the redeploy and the hub
+  updates, such as set a parameter or check permissions.
+- `notes`: the Upgrade notes in one or two plain sentences.
+
+`scripts/release.sh` then runs `node scripts/release-metadata.js <version>`,
+which fills in the computed fields and stops if the entry is missing:
+
+- `pipelineTemplateChanged`: `scripts/deploy-pipeline.yaml` differs from the
+  previous release tag.
+- `hubFingerprint`: the regional hub `templateVersion` the release deploys
+  (from `lib/regional-hub-version.ts`, computed on a clean export of the
+  commit).
+- `hubUpdate`: the fingerprint differs from the previous release's.
+
+Run it with `--ref <tag>` to fill in an entry for an earlier tag.
+
 ## Architecture Rules
 
 - **API Lambda integrations use one invoke permission per function.** In

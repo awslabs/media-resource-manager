@@ -22,6 +22,27 @@ upgrade to that version; a version without it needs only a redeploy.
   ([#148](https://github.com/awslabs/media-resource-manager/pull/148),
   [#82](https://github.com/awslabs/media-resource-manager/issues/82))
 
+### Added
+
+- `scripts/upgrade.sh <tag>` upgrades an installation with one command, in
+  CloudShell or a local shell, with the caller's own credentials. It finds
+  the pipeline stack (or a `deploy.sh` clone with `--clone`), reads the
+  release metadata of every release up to the target, and picks the quick or
+  full path. It shows the plan (hubs that will need **Update**, possible DCV
+  session disconnects, admin actions) and asks before it changes anything.
+  It saves the stack's parameters and template for a rollback, shows the
+  change set and asks again, follows the build, and lists the regional hubs
+  to update with the console steps. `--dry-run` shows the plan and makes no
+  changes. See
+  [Upgrade with the script](docs/UPGRADING.md#upgrade-with-the-script).
+  ([#140](https://github.com/awslabs/media-resource-manager/issues/140))
+- `releases.json` describes each release from v1.4.0 on: whether the
+  pipeline template changed, the regional hub fingerprint, whether hubs need
+  an update, whether DCV sessions disconnect, whether an admin must act, and
+  short upgrade notes. `scripts/release.sh` fills in the computed fields with
+  `scripts/release-metadata.js`.
+  ([#140](https://github.com/awslabs/media-resource-manager/issues/140))
+
 ### Fixed
 
 - Deleting a regional hub is refused while workstations remain in its
