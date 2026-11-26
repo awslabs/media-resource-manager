@@ -1385,8 +1385,10 @@ function generateCloudFormationTemplate(config) {
             { Ref: 'SessionManagerApiTargetGroup' },
             { Ref: 'SessionManagerResolverTargetGroup' }
           ],
-          HealthCheckType: 'EC2',
-          HealthCheckGracePeriod: 600,
+          // Replace a Session Manager whose setup failed (the install script
+          // stops the broker on a failure). Same as the primary stack.
+          HealthCheckType: 'ELB',
+          HealthCheckGracePeriod: 1800,
           Tags: [{ Key: 'Name', Value: { 'Fn::Sub': '${ProductName}-Regional-SessionManager' }, PropagateAtLaunch: true }]
         }
       },
