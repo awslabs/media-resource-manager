@@ -107,6 +107,14 @@ upgrade to that version; a version without it needs only a redeploy.
   scripts run the CDK CLI that `package.json` pins in `devDependencies`
   (`aws-cdk`), which `npm install` installs.
   ([#155](https://github.com/awslabs/media-resource-manager/pull/155))
+- `delete-stacks.sh` shows the error when a `delete-stack` call fails. When
+  a stack's status stays outside `DELETE_*` (for example `UPDATE_COMPLETE`
+  because another stack still imports its exports), it gives up on that
+  stack after 3 retries, says why and names any earlier stack that ended
+  `DELETE_FAILED`, then goes on to the next stack. When a stack ends
+  `DELETE_FAILED`, it says that later stacks may be blocked by it. Before,
+  it retried such a stack every 30 seconds without end.
+  ([#155](https://github.com/awslabs/media-resource-manager/pull/155))
 
 ### Security
 

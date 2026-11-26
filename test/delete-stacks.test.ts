@@ -37,7 +37,21 @@ case "$1 $2" in
     name=$(arg_after --stack-name "$@")
     if [ -f "$STUB_DIR/stacks/$name" ]; then cat "$STUB_DIR/stacks/$name"
     else echo "An error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id $name does not exist" >&2; exit 254; fi ;;
-  "cloudformation delete-stack") rm -f "$STUB_DIR/stacks/$(arg_after --stack-name "$@")" ;;
+  "cloudformation delete-stack")
+    name=$(arg_after --stack-name "$@")
+    refused() {
+      echo "An error occurred (ValidationError) when calling the DeleteStack operation: Stack [$name] cannot be deleted while TerminationProtection is enabled" >&2
+      exit 254
+    }
+    case "$(cat "$STUB_DIR/delete-mode/$name" 2>/dev/null)" in
+      refuse) refused ;;
+      ignore) ;;
+      ignore-then-refuse)
+        if [ -f "$STUB_DIR/delete-mode/$name.called" ]; then refused; fi
+        touch "$STUB_DIR/delete-mode/$name.called" ;;
+      fail) echo DELETE_FAILED > "$STUB_DIR/stacks/$name" ;;
+      *) rm -f "$STUB_DIR/stacks/$name" ;;
+    esac ;;
   "ssm get-parameters-by-path")
     if [ -f "$STUB_DIR/ssm-fail" ]; then expired GetParametersByPath; fi
     if [ -f "$STUB_DIR/ssm-params" ]; then cat "$STUB_DIR/ssm-params"; fi ;;
@@ -65,6 +79,15 @@ interface RunOptions {
   expiredAtStart?: boolean;
   ssmParams?: string[];
   ssmFail?: boolean;
+  /** Status describe-stacks returns for a live stack (default CREATE_COMPLETE). */
+  statusOf?: Record<string, string>;
+  /**
+   * How delete-stack behaves per stack (default: the stack is deleted).
+   * refuse: the call fails. ignore: the call succeeds and nothing changes.
+   * ignore-then-refuse: the first call succeeds and changes nothing, later calls fail.
+   * fail: the stack goes to DELETE_FAILED.
+   */
+  deleteMode?: Record<string, 'refuse' | 'ignore' | 'ignore-then-refuse' | 'fail'>;
 }
 
 interface RunResult {
@@ -89,12 +112,18 @@ function run(opts: RunOptions): RunResult {
   const workDir = path.join(root, 'work');
   fs.mkdirSync(path.join(stubDir, 'stacks'), { recursive: true });
   fs.mkdirSync(workDir);
+  fs.mkdirSync(path.join(stubDir, 'delete-mode'));
   fs.writeFileSync(path.join(stubDir, 'aws'), AWS_STUB, { mode: 0o755 });
+  // The wait loop sleeps 30 s between polls; log instead of sleeping.
+  fs.writeFileSync(path.join(stubDir, 'sleep'), '#!/bin/bash\necho "sleep $*" >> "$STUB_DIR/calls.log"\n', { mode: 0o755 });
   fs.writeFileSync(path.join(stubDir, 'calls.log'), '');
   fs.writeFileSync(path.join(stubDir, 'describe-count'), '0');
   fs.writeFileSync(path.join(stubDir, 'listed'), opts.listed.join('\t'));
   for (const name of opts.live ?? opts.listed) {
-    fs.writeFileSync(path.join(stubDir, 'stacks', name), 'CREATE_COMPLETE');
+    fs.writeFileSync(path.join(stubDir, 'stacks', name), opts.statusOf?.[name] ?? 'CREATE_COMPLETE');
+  }
+  for (const [name, mode] of Object.entries(opts.deleteMode ?? {})) {
+    fs.writeFileSync(path.join(stubDir, 'delete-mode', name), mode);
   }
   if (opts.expireAfter !== undefined) fs.writeFileSync(path.join(stubDir, 'expire-after'), String(opts.expireAfter));
   if (opts.expiredAtStart) fs.writeFileSync(path.join(stubDir, 'expired'), '');
@@ -188,6 +217,53 @@ describe('delete-stacks.sh', () => {
     expect(r.output).toMatch(/Generated Acronym: SPT/);
     expect(r.calls).toMatch(/--path \/StudioProductionTools /);
     expect(r.liveAfter).toEqual([]);
+  });
+
+  const deleteCalls = (calls: string, name: string) =>
+    calls.split('\n').filter((l) => l.startsWith(`aws cloudformation delete-stack --stack-name ${name} `)).length;
+
+  test('gives up on a stack CloudFormation does not start deleting, and names an earlier DELETE_FAILED stack', () => {
+    const r = run({
+      args: ['MRM'],
+      listed: ['MRM-Dcv-Infrastructure', 'MRM-Infrastructure'],
+      statusOf: { 'MRM-Infrastructure': 'UPDATE_COMPLETE' },
+      deleteMode: { 'MRM-Dcv-Infrastructure': 'fail', 'MRM-Infrastructure': 'ignore' },
+    });
+    expect(r.status).toBe(0);
+    expect(r.output).toMatch(/Stack MRM-Dcv-Infrastructure deletion failed \(DELETE_FAILED\)/);
+    expect(r.output).toMatch(/Stacks later in the order may be blocked by it/);
+    expect(r.output).toMatch(/Giving up on MRM-Infrastructure: its status is still UPDATE_COMPLETE after 3 retries of delete-stack/);
+    expect(r.output).toMatch(/another stack still imports this stack's exports/);
+    expect(r.output).toMatch(/Earlier stacks that ended DELETE_FAILED: MRM-Dcv-Infrastructure/);
+    // The first call plus 3 retries, then the script moves on to the cleanup steps.
+    expect(deleteCalls(r.calls, 'MRM-Infrastructure')).toBe(4);
+    expect(r.liveAfter.sort()).toEqual(['MRM-Dcv-Infrastructure', 'MRM-Infrastructure']);
+    expect(r.calls).toMatch(/ssm get-parameters-by-path/);
+  });
+
+  test('prints the error and moves on when delete-stack is refused', () => {
+    const r = run({ args: ['MRM'], listed: ['MRM-Api', 'MRM-Infrastructure'], deleteMode: { 'MRM-Api': 'refuse' } });
+    expect(r.status).toBe(0);
+    expect(r.output).toMatch(/Failed to initiate deletion of MRM-Api:/);
+    expect(r.output).toMatch(/cannot be deleted while TerminationProtection is enabled/);
+    expect(r.output).toMatch(/Stack MRM-Infrastructure successfully deleted/);
+    expect(deleteCalls(r.calls, 'MRM-Api')).toBe(1);
+    expect(r.liveAfter).toEqual(['MRM-Api']);
+  });
+
+  test('prints the error of a refused retry and still gives up after 3 retries', () => {
+    const r = run({
+      args: ['MRM'],
+      listed: ['MRM-Infrastructure'],
+      statusOf: { 'MRM-Infrastructure': 'UPDATE_COMPLETE' },
+      deleteMode: { 'MRM-Infrastructure': 'ignore-then-refuse' },
+    });
+    expect(r.status).toBe(0);
+    expect(r.output).toMatch(/retrying deletion \(1 of 3\)/);
+    expect(r.output).toMatch(/delete-stack for MRM-Infrastructure failed:\n.*TerminationProtection/);
+    expect(r.output).toMatch(/Giving up on MRM-Infrastructure/);
+    expect(r.output).not.toMatch(/Earlier stacks that ended DELETE_FAILED/);
+    expect(deleteCalls(r.calls, 'MRM-Infrastructure')).toBe(4);
   });
 
   test('rejects an acronym with characters that are not letters or digits', () => {

@@ -156,6 +156,9 @@ if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     exit 0
 fi
 
+MAX_DELETE_RETRIES=3
+DELETE_FAILED_STACKS=()
+
 delete_stack() {
     local stack_name=$1
     echo "$(date): Attempting to delete stack: $stack_name"
@@ -171,15 +174,17 @@ delete_stack() {
     fi
     
     # Initiate deletion
-    aws cloudformation delete-stack --stack-name "$stack_name" --region "$REGION"
-    if [ $? -ne 0 ]; then
-        echo "$(date): Failed to initiate deletion of $stack_name"
+    if ! aws cloudformation delete-stack --stack-name "$stack_name" --region "$REGION" 2>"$AWS_ERR"; then
+        echo "$(date): Failed to initiate deletion of $stack_name:"
+        cat "$AWS_ERR"
         return 1
     fi
     
     echo "$(date): Deletion initiated for $stack_name, waiting for completion..."
     
-    # Wait for deletion to complete
+    # Wait for deletion to complete. A status other than DELETE_* means
+    # CloudFormation hasn't started the delete; give up after MAX_DELETE_RETRIES.
+    local retries=0
     while true; do
         if ! status=$(aws cloudformation describe-stacks --stack-name "$stack_name" --region "$REGION" --query 'Stacks[0].StackStatus' --output text 2>"$AWS_ERR"); then
             if grep -q "does not exist" "$AWS_ERR"; then
@@ -199,12 +204,27 @@ delete_stack() {
                 return 0
                 ;;
             "DELETE_FAILED")
-                echo "$(date): Stack $stack_name deletion failed"
+                echo "$(date): Stack $stack_name deletion failed (DELETE_FAILED). See its Events in the CloudFormation console."
+                echo "$(date): Stacks later in the order may be blocked by it: a stack can't be deleted while $stack_name still imports its exports."
+                DELETE_FAILED_STACKS+=("$stack_name")
                 return 1
                 ;;
             *)
-                echo "$(date): $stack_name status: $status, retrying deletion..."
-                aws cloudformation delete-stack --stack-name "$stack_name" --region "$REGION"
+                if [ "$retries" -ge "$MAX_DELETE_RETRIES" ]; then
+                    echo "$(date): Giving up on $stack_name: its status is still $status after $MAX_DELETE_RETRIES retries of delete-stack."
+                    echo "  The likely cause is that another stack still imports this stack's exports, so CloudFormation won't delete it."
+                    if [ ${#DELETE_FAILED_STACKS[@]} -gt 0 ]; then
+                        echo "  Earlier stacks that ended DELETE_FAILED: ${DELETE_FAILED_STACKS[*]}"
+                    fi
+                    echo "  Delete the importing stack first, then rerun ./delete-stacks.sh."
+                    return 1
+                fi
+                retries=$((retries + 1))
+                echo "$(date): $stack_name status: $status, retrying deletion ($retries of $MAX_DELETE_RETRIES)..."
+                if ! aws cloudformation delete-stack --stack-name "$stack_name" --region "$REGION" 2>"$AWS_ERR"; then
+                    echo "$(date): delete-stack for $stack_name failed:"
+                    cat "$AWS_ERR"
+                fi
                 sleep 30
                 ;;
         esac
@@ -231,8 +251,10 @@ if [ -n "$US_EAST_STACKS" ]; then
     echo "$(date): Deleting cross-region stacks in us-east-1..."
     for stack in $US_EAST_STACKS; do
         echo "$(date): Deleting us-east-1 stack: $stack"
-        aws cloudformation delete-stack --stack-name "$stack" --region "us-east-1"
-        if aws cloudformation wait stack-delete-complete --stack-name "$stack" --region "us-east-1"; then
+        if ! aws cloudformation delete-stack --stack-name "$stack" --region "us-east-1" 2>"$AWS_ERR"; then
+            echo "$(date): Failed to initiate deletion of $stack:"
+            cat "$AWS_ERR"
+        elif aws cloudformation wait stack-delete-complete --stack-name "$stack" --region "us-east-1"; then
             echo "$(date): Deleted $stack"
         else
             echo "$(date): Failed to delete $stack (see the error above)"
