@@ -97,12 +97,13 @@ if [[ -n "$VPC_ID" ]]; then
         # Run VPC analyzer — it writes subnet IDs to parameters.json for all VPC types
         if [[ -f "scripts/analyze-vpc.sh" ]]; then
             chmod +x scripts/analyze-vpc.sh
-            ./scripts/analyze-vpc.sh
-            ANALYZER_RESULT=$?
+            # "|| ..." keeps set -e from exiting before the message below
+            ANALYZER_RESULT=0
+            ./scripts/analyze-vpc.sh || ANALYZER_RESULT=$?
             
             if [[ $ANALYZER_RESULT -ne 0 ]]; then
                 print_error "VPC analysis failed (see above). For VPCs with multiple subnets per AZ, set PrivateSubnetIds and PublicSubnetIds (parameters.json or the pipeline stack)."
-                exit $ANALYZER_RESULT
+                exit 1
             fi
             
             # Verify subnets were written
@@ -186,7 +187,10 @@ print_success "CDK dependencies installed successfully"
 print_status "📦 Installing Lambda layer dependencies..."
 if [[ -d "layers/ldap/nodejs" ]]; then
     cd layers/ldap/nodejs
-    npm install
+    if ! npm install; then
+        print_error "LDAP layer dependency installation failed!"
+        exit 1
+    fi
     cd ../../..
     print_success "LDAP layer dependencies installed"
 fi

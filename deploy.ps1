@@ -121,7 +121,9 @@ Write-Status "Installing Lambda layer dependencies..."
 if (Test-Path "layers/ldap/nodejs") {
     Push-Location "layers/ldap/nodejs"
     npm install
+    $npmExit = $LASTEXITCODE
     Pop-Location
+    if ($npmExit -ne 0) { Write-Err "LDAP layer dependency installation failed!"; exit 1 }
     Write-Ok "LDAP layer dependencies installed"
 }
 

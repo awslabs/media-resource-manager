@@ -90,10 +90,16 @@ upgrade to that version; a version without it needs only a redeploy.
   below 2000. Before, a failed read counted as a quota of 0, and `deploy.sh`
   then requested an increase.
   ([#155](https://github.com/awslabs/media-resource-manager/pull/155))
-- `deploy.sh` and `deploy.ps1` stop with an error that names the Lambda
-  function when `npm install --omit=dev` fails for a folder under `lambda/`,
-  as they do for the CDK and frontend installs. Before, `deploy.ps1` carried
-  on, and `deploy.sh` stopped without a message of its own.
+- `deploy.sh` and `deploy.ps1` stop with an error when `npm install` fails
+  for the LDAP layer (`layers/ldap/nodejs`), or `npm install --omit=dev`
+  fails for a folder under `lambda/` (the error names the function), as they
+  do for the CDK and frontend installs. Before, `deploy.ps1` carried on, and
+  `deploy.sh` stopped without a message of its own.
+  ([#155](https://github.com/awslabs/media-resource-manager/pull/155))
+- When the existing-VPC analyzer fails, `deploy.sh` prints "VPC analysis
+  failed (see above)" with the hint to set `PrivateSubnetIds` and
+  `PublicSubnetIds`, then exits with code 1. Before, it exited at the
+  analyzer without that message.
   ([#155](https://github.com/awslabs/media-resource-manager/pull/155))
 - When `cdk diff` fails, `deploy.sh` and `deploy.ps1` show its error output,
   repeat its last 20 lines and warn that the deployment may fail for the same
