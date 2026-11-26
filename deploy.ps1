@@ -32,22 +32,6 @@ if (-not (Test-Path "package.json")) {
     exit 1
 }
 
-# Check CDK CLI version compatibility with aws-cdk-lib
-$cdkLibVersion = (node -p "require('./package.json').dependencies['aws-cdk-lib'] || ''" 2>$null) -replace '[\^~]', ''
-$cdkCliVersion = ((npx cdk --version 2>$null) -split ' ')[0]
-if ($cdkLibVersion -and $cdkCliVersion) {
-    $cdkLibMinor = [int]($cdkLibVersion -split '\.')[1]
-    $cdkCliMinor = [int]($cdkCliVersion -split '\.')[1]
-    if ($cdkCliMinor -lt $cdkLibMinor) {
-        Write-Err "CDK CLI version ($cdkCliVersion) is older than aws-cdk-lib ($cdkLibVersion)."
-        Write-Err "This can cause silent deployment failures (assets not uploaded, schema mismatch)."
-        Write-Host ""
-        Write-Host "  Fix: npm install -g aws-cdk@latest"
-        Write-Host ""
-        exit 1
-    }
-}
-
 # Check for required config files and copy from examples if missing
 if (-not (Test-Path "cdk.json")) {
     if (Test-Path "cdk.example.json") {
@@ -108,16 +92,22 @@ if ($vpcId) {
 # Check Lambda concurrent executions quota
 Write-Status "Checking Lambda concurrent executions quota..."
 $desiredQuota = 2000
+# A failed aws call (no credentials, no Region, access denied) must not read as a quota of 0.
+$quotaRead = $false
 try {
-    $currentQuota = [int](aws service-quotas get-service-quota --service-code lambda --quota-code "L-B99A9384" --query 'Quota.Value' --output text 2>$null)
-    if ($currentQuota -ge $desiredQuota) {
-        Write-Ok "Lambda concurrent executions quota is sufficient ($currentQuota >= $desiredQuota)"
-    } else {
-        Write-Warn "Lambda concurrent executions quota is $currentQuota (recommended: $desiredQuota)"
-        Write-Warn "Consider requesting a quota increase via the AWS Console"
+    $quotaOut = aws service-quotas get-service-quota --service-code lambda --quota-code "L-B99A9384" --query 'Quota.Value' --output text 2>$null
+    if ($LASTEXITCODE -eq 0 -and "$quotaOut".Trim() -match '^[0-9]+(\.[0-9]+)?$') {
+        $currentQuota = [int][double]("$quotaOut".Trim())
+        $quotaRead = $true
     }
-} catch {
-    Write-Warn "Could not check Lambda quota (non-blocking)"
+} catch {}
+if (-not $quotaRead) {
+    Write-Warn "Could not check Lambda concurrency quota (non-blocking)"
+} elseif ($currentQuota -ge $desiredQuota) {
+    Write-Ok "Lambda concurrent executions quota is sufficient ($currentQuota >= $desiredQuota)"
+} else {
+    Write-Warn "Lambda concurrent executions quota is $currentQuota (recommended: $desiredQuota)"
+    Write-Warn "Consider requesting a quota increase via the AWS Console"
 }
 
 # Install CDK dependencies
@@ -131,7 +121,9 @@ Write-Status "Installing Lambda layer dependencies..."
 if (Test-Path "layers/ldap/nodejs") {
     Push-Location "layers/ldap/nodejs"
     npm install
+    $npmExit = $LASTEXITCODE
     Pop-Location
+    if ($npmExit -ne 0) { Write-Err "LDAP layer dependency installation failed!"; exit 1 }
     Write-Ok "LDAP layer dependencies installed"
 }
 
@@ -143,8 +135,10 @@ Get-ChildItem "lambda/*/package.json" -ErrorAction SilentlyContinue | ForEach-Ob
     Write-Status "  Installing dependencies for $lambdaName..."
     Push-Location $lambdaDir
     npm install --omit=dev
+    $npmExit = $LASTEXITCODE
     Pop-Location
-    if ($LASTEXITCODE -eq 0) { Write-Ok "  $lambdaName dependencies installed" }
+    if ($npmExit -ne 0) { Write-Err "Dependency installation failed for lambda/$lambdaName!"; exit 1 }
+    Write-Ok "  $lambdaName dependencies installed"
 }
 
 # Install frontend dependencies and build
@@ -177,9 +171,20 @@ Write-Ok "Frontend built successfully"
 
 # Show changes
 Write-Status "Checking for changes..."
-npx cdk diff --all 2>$null
-if ($LASTEXITCODE -ne 0) {
-    Write-Warn "Could not generate diff (normal on first deploy with imported VPC)"
+# Show stderr too (cdk writes the diff and its errors there). "Continue" keeps
+# Windows PowerShell 5.1 from stopping on the first stderr line.
+$prevErrorAction = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    $diffLines = @(npx cdk diff --all 2>&1 | ForEach-Object { $line = "$_"; Write-Host $line; $line })
+    $diffExit = $LASTEXITCODE
+} finally {
+    $ErrorActionPreference = $prevErrorAction
+}
+if ($diffExit -ne 0) {
+    Write-Warn "Could not generate a diff (cdk diff exit code $diffExit). Last lines of its output:"
+    $diffLines | Select-Object -Last 20 | ForEach-Object { Write-Host "    $_" }
+    Write-Warn "Check the error above before you continue: the deployment may fail for the same reason."
 }
 
 # Confirm deployment
