@@ -171,7 +171,8 @@ upgrade to that version; a version without it needs only a redeploy.
   a workstation failed at the DCV readiness step. A running Session Manager
   isn't replaced on upgrade; new instances get the change. Regional hubs
   get it when you **Update** them.
-  ([#84](https://github.com/awslabs/media-resource-manager/issues/84))
+  ([#161](https://github.com/awslabs/media-resource-manager/pull/161),
+  [#84](https://github.com/awslabs/media-resource-manager/issues/84))
 
 ### Security
 
