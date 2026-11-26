@@ -35,13 +35,15 @@ upgrade to that version; a version without it needs only a redeploy.
   to update with the console steps. `--dry-run` shows the plan and makes no
   changes. See
   [Upgrade with the script](docs/UPGRADING.md#upgrade-with-the-script).
-  ([#140](https://github.com/awslabs/media-resource-manager/issues/140))
+  ([#165](https://github.com/awslabs/media-resource-manager/pull/165),
+  [#140](https://github.com/awslabs/media-resource-manager/issues/140))
 - `releases.json` describes each release from v1.4.0 on: whether the
   pipeline template changed, the regional hub fingerprint, whether hubs need
   an update, whether DCV sessions disconnect, whether an admin must act, and
   short upgrade notes. `scripts/release.sh` fills in the computed fields with
   `scripts/release-metadata.js`.
-  ([#140](https://github.com/awslabs/media-resource-manager/issues/140))
+  ([#165](https://github.com/awslabs/media-resource-manager/pull/165),
+  [#140](https://github.com/awslabs/media-resource-manager/issues/140))
 
 ### Fixed
 
