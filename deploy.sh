@@ -57,24 +57,6 @@ if [[ ! -f "package.json" ]]; then
     exit 1
 fi
 
-# Check CDK CLI version compatibility with aws-cdk-lib
-CDK_LIB_VERSION=$(node -p "require('./package.json').dependencies['aws-cdk-lib'] || ''" 2>/dev/null | sed 's/[\^~]//')
-CDK_CLI_VERSION=$(npx cdk --version 2>/dev/null | awk '{print $1}')
-if [[ -n "$CDK_LIB_VERSION" && -n "$CDK_CLI_VERSION" ]]; then
-    CDK_LIB_MAJOR_MINOR=$(echo "$CDK_LIB_VERSION" | cut -d. -f1-2)
-    CDK_CLI_MAJOR_MINOR=$(echo "$CDK_CLI_VERSION" | cut -d. -f1-2)
-    CDK_LIB_MINOR=$(echo "$CDK_LIB_VERSION" | cut -d. -f2)
-    CDK_CLI_MINOR=$(echo "$CDK_CLI_VERSION" | cut -d. -f2)
-    if [[ "$CDK_CLI_MINOR" -lt "$CDK_LIB_MINOR" ]]; then
-        print_error "CDK CLI version ($CDK_CLI_VERSION) is older than aws-cdk-lib ($CDK_LIB_VERSION)."
-        print_error "This can cause silent deployment failures (assets not uploaded, schema mismatch)."
-        echo ""
-        echo "  Fix: sudo npm install -g aws-cdk@latest"
-        echo ""
-        exit 1
-    fi
-fi
-
 # Check for required config files and copy from examples if missing
 if [[ ! -f "cdk.json" ]]; then
     if [[ -f "cdk.example.json" ]]; then
@@ -115,12 +97,13 @@ if [[ -n "$VPC_ID" ]]; then
         # Run VPC analyzer — it writes subnet IDs to parameters.json for all VPC types
         if [[ -f "scripts/analyze-vpc.sh" ]]; then
             chmod +x scripts/analyze-vpc.sh
-            ./scripts/analyze-vpc.sh
-            ANALYZER_RESULT=$?
+            # "|| ..." keeps set -e from exiting before the message below
+            ANALYZER_RESULT=0
+            ./scripts/analyze-vpc.sh || ANALYZER_RESULT=$?
             
             if [[ $ANALYZER_RESULT -ne 0 ]]; then
                 print_error "VPC analysis failed (see above). For VPCs with multiple subnets per AZ, set PrivateSubnetIds and PublicSubnetIds (parameters.json or the pipeline stack)."
-                exit $ANALYZER_RESULT
+                exit 1
             fi
             
             # Verify subnets were written
@@ -145,24 +128,21 @@ print_status "🔍 Checking Lambda concurrent executions quota..."
 LAMBDA_QUOTA_CODE="L-B99A9384"
 DESIRED_QUOTA=2000
 
-# Get current quota value
+# Get current quota value. A failed read (no credentials, no Region, access
+# denied) or a non-numeric result skips the check and never requests an increase.
+QUOTA_READ_OK=true
 CURRENT_QUOTA=$(aws service-quotas get-service-quota \
     --service-code lambda \
     --quota-code "$LAMBDA_QUOTA_CODE" \
     --query 'Quota.Value' \
-    --output text 2>/dev/null || echo "0")
+    --output text 2>/dev/null) || QUOTA_READ_OK=false
 
-if [[ "$CURRENT_QUOTA" == "None" ]] || [[ -z "$CURRENT_QUOTA" ]]; then
-    CURRENT_QUOTA=0
-fi
-
-# Convert to integer for comparison
-CURRENT_QUOTA_INT=${CURRENT_QUOTA%.*}
-
-if [[ "$CURRENT_QUOTA_INT" -ge "$DESIRED_QUOTA" ]]; then
-    print_success "Lambda concurrent executions quota is sufficient ($CURRENT_QUOTA_INT >= $DESIRED_QUOTA)"
+if [[ "$QUOTA_READ_OK" != "true" ]] || [[ ! "$CURRENT_QUOTA" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    print_warning "Could not check Lambda concurrency quota (non-blocking)"
+elif [[ "${CURRENT_QUOTA%.*}" -ge "$DESIRED_QUOTA" ]]; then
+    print_success "Lambda concurrent executions quota is sufficient (${CURRENT_QUOTA%.*} >= $DESIRED_QUOTA)"
 else
-    print_warning "Lambda concurrent executions quota is $CURRENT_QUOTA_INT (recommended: $DESIRED_QUOTA)"
+    print_warning "Lambda concurrent executions quota is ${CURRENT_QUOTA%.*} (recommended: $DESIRED_QUOTA)"
     
     # Check for pending quota increase requests
     PENDING_REQUEST=$(aws service-quotas list-requested-service-quota-change-history-by-quota \
@@ -207,7 +187,10 @@ print_success "CDK dependencies installed successfully"
 print_status "📦 Installing Lambda layer dependencies..."
 if [[ -d "layers/ldap/nodejs" ]]; then
     cd layers/ldap/nodejs
-    npm install
+    if ! npm install; then
+        print_error "LDAP layer dependency installation failed!"
+        exit 1
+    fi
     cd ../../..
     print_success "LDAP layer dependencies installed"
 fi
@@ -220,7 +203,10 @@ for pkg in lambda/*/package.json; do
         lambda_name=$(basename "$lambda_dir")
         print_status "  Installing dependencies for $lambda_name..."
         cd "$lambda_dir"
-        npm install --omit=dev
+        if ! npm install --omit=dev; then
+            print_error "Dependency installation failed for $lambda_dir!"
+            exit 1
+        fi
         cd - > /dev/null
         print_success "  $lambda_name dependencies installed"
     fi
@@ -256,8 +242,15 @@ print_success "Frontend built successfully"
 
 # Show what will change before deploying
 print_status "🔍 Checking for changes..."
-if ! npx cdk diff --all 2>/dev/null; then
-    print_warning "Could not generate diff (normal on first deploy with imported VPC)"
+DIFF_OUTPUT=$(mktemp)
+if npx cdk diff --all 2>&1 | tee "$DIFF_OUTPUT"; then
+    rm -f "$DIFF_OUTPUT"
+else
+    DIFF_EXIT=${PIPESTATUS[0]}
+    print_warning "Could not generate a diff (cdk diff exit code $DIFF_EXIT). Last lines of its output:"
+    tail -n 20 "$DIFF_OUTPUT" | sed 's/^/    /'
+    print_warning "Check the error above before you continue: the deployment may fail for the same reason."
+    rm -f "$DIFF_OUTPUT"
 fi
 
 echo ""

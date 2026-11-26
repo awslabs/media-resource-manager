@@ -82,6 +82,48 @@ upgrade to that version; a version without it needs only a redeploy.
   internet gateway as public, even when it doesn't assign public IPs, so it
   isn't offered or picked as a private subnet.
   ([#117](https://github.com/awslabs/media-resource-manager/pull/117))
+- When `deploy.sh` or `deploy.ps1` can't read the Lambda concurrent
+  executions quota (for example without credentials, a Region or
+  `servicequotas:GetServiceQuota` permission), or the result isn't a number,
+  it says "Could not check Lambda concurrency quota (non-blocking)" and goes
+  on. `deploy.sh` requests a quota increase only after it has read a quota
+  below 2000. Before, a failed read counted as a quota of 0, and `deploy.sh`
+  then requested an increase.
+  ([#155](https://github.com/awslabs/media-resource-manager/pull/155))
+- `deploy.sh` and `deploy.ps1` stop with an error when `npm install` fails
+  for the LDAP layer (`layers/ldap/nodejs`), or `npm install --omit=dev`
+  fails for a folder under `lambda/` (the error names the function), as they
+  do for the CDK and frontend installs. Before, `deploy.ps1` carried on, and
+  `deploy.sh` stopped without a message of its own.
+  ([#155](https://github.com/awslabs/media-resource-manager/pull/155))
+- When the existing-VPC analyzer fails, `deploy.sh` prints "VPC analysis
+  failed (see above)" with the hint to set `PrivateSubnetIds` and
+  `PublicSubnetIds`, then exits with code 1. Before, it exited at the
+  analyzer without that message.
+  ([#155](https://github.com/awslabs/media-resource-manager/pull/155))
+- When `cdk diff` fails, `deploy.sh` and `deploy.ps1` show its error output,
+  repeat its last 20 lines and warn that the deployment may fail for the same
+  reason. Before, they hid the error and said a failed diff was normal on a
+  first deploy with an imported VPC.
+  ([#155](https://github.com/awslabs/media-resource-manager/pull/155),
+  [#156](https://github.com/awslabs/media-resource-manager/issues/156))
+- `deploy.sh` and `deploy.ps1` don't compare the CDK CLI and `aws-cdk-lib`
+  minor versions before `npm install`. The CDK CLI has its own version line
+  (2.1000.0 and later), so that check couldn't catch an older CLI. The
+  scripts run the CDK CLI that `package.json` pins in `devDependencies`
+  (`aws-cdk`), which `npm install` installs.
+  ([#155](https://github.com/awslabs/media-resource-manager/pull/155))
+- `delete-stacks.sh` shows the error when a `delete-stack` call fails. When
+  a stack's status stays outside `DELETE_*` (for example `UPDATE_COMPLETE`
+  because another stack still imports its exports), it gives up on that
+  stack after 3 retries, says why and names any earlier stack that ended
+  `DELETE_FAILED`, then goes on to the next stack. When a stack ends
+  `DELETE_FAILED`, it says that later stacks may be blocked by it. When any
+  stack wasn't deleted, the script ends with a list of those stacks and
+  exits with code 1, so a caller can tell the teardown is incomplete.
+  Before, it retried such a stack every 30 seconds without end, and exited
+  with code 0 even when stacks were left.
+  ([#155](https://github.com/awslabs/media-resource-manager/pull/155))
 - With Cognito sign-in, the console keeps an active user signed in past the
   1-hour ID token lifetime. It keeps the Cognito refresh token in the tab's
   `sessionStorage`, next to the ID token, and gets a new ID token 5 minutes
