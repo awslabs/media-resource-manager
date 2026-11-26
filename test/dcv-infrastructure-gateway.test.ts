@@ -96,6 +96,29 @@ describe('primary gateway (default: CloudFront browser path)', () => {
     expect(tgIds[2]).toMatch(/^GatewayBrowserTargetGroup/);
   });
 
+  it('replaces a Session Manager that fails its target group health checks, after a 1800 s grace period', () => {
+    const asgs = template.findResources('AWS::AutoScaling::AutoScalingGroup');
+    const [, asg] = Object.entries(asgs).find(([id]) => id.startsWith('SessionManagerAsg'))!;
+    const props = (asg as any).Properties;
+    expect(props.HealthCheckType).toBe('ELB');
+    expect(props.HealthCheckGracePeriod).toBe(1800);
+    // Agent 8445, API 8443 and resolver 8447 target groups.
+    expect(props.TargetGroupARNs).toHaveLength(3);
+    // No forced replacement of the running Session Manager on upgrade.
+    expect((asg as any).UpdatePolicy?.AutoScalingRollingUpdate).toBeUndefined();
+    expect((asg as any).UpdatePolicy?.AutoScalingReplacingUpdate).toBeUndefined();
+  });
+
+  it('gives the Session Manager user data that resumes after a restart, under the 16 KB limit', () => {
+    const lts = template.findResources('AWS::EC2::LaunchTemplate');
+    const [, lt] = Object.entries(lts).find(([id]) => id.startsWith('SessionManagerLaunchTemplate'))!;
+    const userData = (lt as any).Properties.LaunchTemplateData.UserData['Fn::Base64'];
+    expect(typeof userData).toBe('string');
+    expect(Buffer.byteLength(userData, 'utf8')).toBeLessThan(16384);
+    expect(userData).toContain('export PRODUCT_NAME="MediaResourceManager"');
+    expect(userData).toContain('PER_BOOT_COPY="$PER_BOOT_DIR/mrm-session-manager-setup.sh"');
+  });
+
   const vpcCidrsPrefixList = { 'Fn::GetAtt': ['VpcCidrPrefixList', 'PrefixListId'] };
   const ruleFromVpcCidrs = (groupIdPrefix: string, port: number) => {
     const rules = template.findResources('AWS::EC2::SecurityGroupIngress', {

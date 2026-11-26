@@ -11,25 +11,49 @@
 # 2. Configure DynamoDB persistence
 # 3. Register an API client
 # 4. Store credentials in SSM Parameter Store
+#
+# Restarts: user data runs once per instance, so the script first copies
+# itself (with the exports above it) to cloud-init's per-boot folder. If the
+# instance restarts before setup ends, the copy runs setup again on the next
+# boot. Every step can run twice. The registered API client is kept in a
+# root-only file until its parameters are stored, so a rerun reuses it. At the
+# end the script enables the broker, writes a done marker and removes the copy
+# and the client file, so later boots do nothing.
+#
+# A failure logs an ERROR line, stops the broker and exits non-zero without the
+# marker. The next boot retries, and the ASG's ELB health checks replace an
+# instance that never becomes healthy.
 
-LOG_PATH="/var/log/dcv-session-manager-install.log"
+LOG_PATH="${LOG_PATH:-/var/log/dcv-session-manager-install.log}"
 LOG_GROUP="/aws/ec2/${ACRONYM:-mrm}-dcv-session-manager"
+STATE_DIR="${MRM_SM_STATE_DIR:-/var/lib/mrm}"
+DONE_MARKER="$STATE_DIR/session-manager-setup.done"
+CLIENT_FILE="$STATE_DIR/sm-client.env"
+PER_BOOT_DIR="${MRM_PER_BOOT_DIR:-/var/lib/cloud/scripts/per-boot}"
+PER_BOOT_COPY="$PER_BOOT_DIR/mrm-session-manager-setup.sh"
+LOCK_FILE="${MRM_SM_LOCK_FILE:-/run/mrm-sm-setup.lock}"
+CONFIG_FILE="${CONFIG_FILE:-/etc/dcv-session-manager-broker/session-manager-broker.properties}"
+SERVICE="dcv-session-manager-broker"
 
-# Get instance metadata using IMDSv2
-TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
-if [ -n "$TOKEN" ]; then
-  INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "unknown")
-  REGION=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
-else
-  INSTANCE_ID=$(curl -s http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "unknown")
-  REGION=$(curl -s http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+# One run at a time, and nothing to do once setup has finished.
+if command -v flock >/dev/null 2>&1 && exec 9>"$LOCK_FILE"; then
+  flock -n 9 || { echo "$(date -u) Session Manager setup is already running" | tee -a "$LOG_PATH"; exit 0; }
+fi
+if [ -f "$DONE_MARKER" ]; then
+  rm -f "$PER_BOOT_COPY" "$CLIENT_FILE"
+  exit 0
 fi
 
-# Setup CloudWatch logging for better debugging
-if [ "$INSTANCE_ID" != "unknown" ]; then
-  aws logs create-log-group --log-group-name "$LOG_GROUP" --region "$REGION" 2>/dev/null || true
-  aws logs create-log-stream --log-group-name "$LOG_GROUP" --log-stream-name "$INSTANCE_ID" --region "$REGION" 2>/dev/null || true
+# Run again on every boot until setup finishes.
+SELF="$(readlink -f "$0")"
+mkdir -p "$PER_BOOT_DIR"
+if ! [ "$SELF" -ef "$PER_BOOT_COPY" ]; then
+  install -m 0700 "$SELF" "$PER_BOOT_COPY" \
+    || echo "$(date -u) WARNING: Could not copy setup to $PER_BOOT_COPY; a restart won't resume it" | tee -a "$LOG_PATH"
 fi
+install -d -m 0700 "$STATE_DIR"
+
+INSTANCE_ID="unknown"
 
 # Logging function - writes to both local file and CloudWatch
 log_message() {
@@ -40,14 +64,47 @@ log_message() {
   fi
 }
 
+# Stop the broker so the instance fails its target group health checks.
+fail() {
+  log_message "ERROR: $*"
+  systemctl stop "$SERVICE" >/dev/null 2>&1 || true
+  exit 1
+}
+
+# download URL FILE: fails on an HTTP error, a timeout or an empty file.
+download() {
+  curl -fsS --connect-timeout 10 --max-time 600 --retry 5 --retry-delay 5 --retry-connrefused -o "$2" "$1" \
+    || fail "Download failed: $1. Check that the instance has outbound HTTPS access (NAT gateway or proxy)."
+  [ -s "$2" ] || fail "Download is missing or empty: $1"
+}
+
+# Get instance metadata using IMDSv2
+IMDS_CURL=(curl -fsS --connect-timeout 2 --retry 3)
+TOKEN=$("${IMDS_CURL[@]}" -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
+if [ -n "$TOKEN" ]; then
+  INSTANCE_ID=$("${IMDS_CURL[@]}" -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "unknown")
+  REGION=$("${IMDS_CURL[@]}" -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+else
+  INSTANCE_ID=$("${IMDS_CURL[@]}" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "unknown")
+  REGION=$("${IMDS_CURL[@]}" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)
+fi
+[ -n "$INSTANCE_ID" ] || INSTANCE_ID="unknown"
+[ -n "$REGION" ] || { INSTANCE_ID="unknown"; fail "Could not read the Region from instance metadata"; }
+
+# Setup CloudWatch logging for better debugging
+if [ "$INSTANCE_ID" != "unknown" ]; then
+  aws logs create-log-group --log-group-name "$LOG_GROUP" --region "$REGION" 2>/dev/null || true
+  aws logs create-log-stream --log-group-name "$LOG_GROUP" --log-stream-name "$INSTANCE_ID" --region "$REGION" 2>/dev/null || true
+fi
+
 log_message "Starting DCV Session Manager installation..."
 log_message "Instance: $INSTANCE_ID, Region: $REGION"
 
 # Detect OS type and version
-read -r system version <<<$(echo $(cat /etc/os-release | grep "^ID=\|^VERSION_ID=" | sort | cut -d"=" -f2 | tr -d "\"" | tr '[:upper:]' '[:lower:]'))
+read -r system version <<<$(echo $(cat "${OS_RELEASE_FILE:-/etc/os-release}" | grep "^ID=\|^VERSION_ID=" | sort | cut -d"=" -f2 | tr -d "\"" | tr '[:upper:]' '[:lower:]'))
 major_version="${version%.*}"
 CLOUDFRONT_PREFIX="https://d1uj6qtbmh3dt5.cloudfront.net"
-TMP_DIR="$(mktemp -d /tmp/dcv-install-XXXXXX)"
+TMP_DIR="$(mktemp -d -t dcv-install-XXXXXX)" || fail "Could not create a temporary directory"
 
 log_message "Detected OS: $system $version (major: $major_version)"
 
@@ -83,44 +140,44 @@ case $system in
         fi
         ;;
     *)
-        log_message "ERROR: Unsupported OS '$system'"
-        exit 1
+        fail "Unsupported OS '$system'"
         ;;
 esac
 
-if [ -z "$package_type" ]; then
-    log_message "ERROR: Unsupported OS version '$system $version'"
-    exit 1
-fi
+[ -n "$package_type" ] || fail "Unsupported OS version '$system $version'"
 
 log_message "Using package type: $package_type, manager: $package_manager"
 
 # Download and install DCV Session Manager
 log_message "Downloading DCV Session Manager..."
+download "$CLOUDFRONT_PREFIX/NICE-GPG-KEY" "$TMP_DIR/NICE-GPG-KEY"
 if [ "$package_manager" = "apt" ]; then
-    curl -o "$TMP_DIR/NICE-GPG-KEY" "$CLOUDFRONT_PREFIX/NICE-GPG-KEY"
-    gpg --import "$TMP_DIR/NICE-GPG-KEY"
-    curl -o "$TMP_DIR/nice-dcv-session-manager-broker.$package_extension" "$CLOUDFRONT_PREFIX/nice-dcv-session-manager-broker_all.$package_type.$package_extension"
+    gpg --import "$TMP_DIR/NICE-GPG-KEY" || fail "Could not import the NICE GPG key"
+    package_url="$CLOUDFRONT_PREFIX/nice-dcv-session-manager-broker_all.$package_type.$package_extension"
 else
-    rpm --import "$CLOUDFRONT_PREFIX/NICE-GPG-KEY"
-    curl -o "$TMP_DIR/nice-dcv-session-manager-broker.$package_extension" "$CLOUDFRONT_PREFIX/nice-dcv-session-manager-broker-$package_type.noarch.$package_extension"
+    rpm --import "$TMP_DIR/NICE-GPG-KEY" || fail "Could not import the NICE GPG key"
+    package_url="$CLOUDFRONT_PREFIX/nice-dcv-session-manager-broker-$package_type.noarch.$package_extension"
 fi
+package_file="$TMP_DIR/nice-dcv-session-manager-broker.$package_extension"
+download "$package_url" "$package_file"
 
 log_message "Installing DCV Session Manager..."
-$package_manager install -y "$TMP_DIR/nice-dcv-session-manager-broker.$package_extension"
+$package_manager install -y "$package_file" || fail "Package install failed: $package_file"
 
 # Clean up temp files
 rm -rf "$TMP_DIR"
 
-# Enable and start the service initially
+systemctl cat "$SERVICE.service" >/dev/null 2>&1 || fail "$SERVICE.service is not installed"
+
+# Start the service once before configuring it. It is enabled only when
+# setup has finished, so a restart before then leaves it stopped.
 log_message "Starting DCV Session Manager service..."
-systemctl enable dcv-session-manager-broker
-systemctl start dcv-session-manager-broker
+systemctl start "$SERVICE"
 
 # Wait for service to be running
 log_message "Waiting for DCV Session Manager to start..."
 for i in {1..30}; do
-    if systemctl is-active --quiet dcv-session-manager-broker; then
+    if systemctl is-active --quiet "$SERVICE"; then
         log_message "DCV Session Manager is running (attempt $i)"
         break
     fi
@@ -130,10 +187,11 @@ done
 
 # Stop service to configure it
 log_message "Stopping service for configuration..."
-systemctl stop dcv-session-manager-broker
+systemctl stop "$SERVICE"
 
-# Configure DCV Session Manager
-CONFIG_FILE="/etc/dcv-session-manager-broker/session-manager-broker.properties"
+# Configure DCV Session Manager. Each edit matches only the unedited line,
+# so a second run changes nothing.
+[ -f "$CONFIG_FILE" ] || fail "Broker config file is missing: $CONFIG_FILE"
 log_message "Configuring DCV Session Manager..."
 
 # Enable gateway
@@ -156,13 +214,13 @@ sed -i "s/^# dynamodb-table-name-prefix = DcvSm-/dynamodb-table-name-prefix = $T
 
 # Start service with new configuration
 log_message "Starting DCV Session Manager with new configuration..."
-systemctl start dcv-session-manager-broker
+systemctl start "$SERVICE"
 
 # Wait for broker to be fully ready (responding on port 8443)
 log_message "Waiting for broker to be fully initialized..."
 BROKER_READY=false
 for i in {1..60}; do
-    if systemctl is-active --quiet dcv-session-manager-broker; then
+    if systemctl is-active --quiet "$SERVICE"; then
         if curl -sk --connect-timeout 2 https://localhost:8443/ >/dev/null 2>&1; then
             log_message "Broker is fully ready (attempt $i)"
             BROKER_READY=true
@@ -173,15 +231,29 @@ for i in {1..60}; do
     sleep 5
 done
 
-if [ "$BROKER_READY" = "false" ]; then
-    log_message "WARNING: Broker may not be fully ready after 5 minutes"
+[ "$BROKER_READY" = "true" ] || fail "Broker did not answer on port 8443 within 5 minutes"
+
+client_valid() {
+  [ -n "$CLIENT_NAME" ] && [ ${#CLIENT_ID} -gt 10 ] && [ ${#CLIENT_PASSWORD} -gt 10 ]
+}
+
+# Reuse the API client registered before a restart, if there is one.
+SUCCESS=false
+if [ -f "$CLIENT_FILE" ]; then
+    { read -r CLIENT_NAME; read -r CLIENT_ID; read -r CLIENT_PASSWORD; } < "$CLIENT_FILE"
+    if client_valid; then
+        log_message "Reusing API client $CLIENT_NAME registered before the restart"
+        DCV_EXIT_CODE=0
+        SUCCESS=true
+    else
+        rm -f "$CLIENT_FILE"
+    fi
 fi
 
 # Register API client with retry logic
-log_message "Registering DCV API client..."
 MAX_RETRIES=3
 RETRY_COUNT=0
-SUCCESS=false
+[ "$SUCCESS" = "true" ] || log_message "Registering DCV API client..."
 
 while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$SUCCESS" = "false" ]; do
     log_message "Registration attempt $((RETRY_COUNT + 1)) of $MAX_RETRIES"
@@ -196,9 +268,14 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$SUCCESS" = "false" ]; do
         CLIENT_ID=$(echo "$DCV_OUTPUT" | grep -E "^\s*client-id:" | sed 's/.*client-id:\s*//' | tr -d ' \n\r')
         CLIENT_PASSWORD=$(echo "$DCV_OUTPUT" | grep -E "^\s*client-password:" | sed 's/.*client-password:\s*//' | tr -d ' \n\r')
         
-        if [ -n "$CLIENT_ID" ] && [ -n "$CLIENT_PASSWORD" ] && [ ${#CLIENT_ID} -gt 10 ] && [ ${#CLIENT_PASSWORD} -gt 10 ]; then
+        if client_valid; then
             log_message "Successfully parsed credentials"
             SUCCESS=true
+            # Root-only copy until the parameters are stored (removed at the end).
+            if ! (umask 077 && printf '%s\n' "$CLIENT_NAME" "$CLIENT_ID" "$CLIENT_PASSWORD" > "$CLIENT_FILE"); then
+                rm -f "$CLIENT_FILE"
+                log_message "WARNING: Could not save the API client; a restart before the end registers a new one"
+            fi
         else
             log_message "ERROR: Failed to parse credentials from output"
         fi
@@ -215,22 +292,25 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$SUCCESS" = "false" ]; do
     fi
 done
 
-# Store credentials in SSM Parameter Store
-if [ "$SUCCESS" = "true" ]; then
-    log_message "Storing credentials in SSM Parameter Store..."
-    
-    # Use PRODUCT_NAME env var if set, otherwise default
-    PARAM_PREFIX="/${PRODUCT_NAME:-MediaResourceManager}/DCV/SessionManager"
-    
-    aws ssm put-parameter --name "$PARAM_PREFIX/ClientName" --value "$CLIENT_NAME" --type "String" --overwrite --region "$REGION" || { log_message "Failed to store ClientName"; exit 1; }
-    aws ssm put-parameter --name "$PARAM_PREFIX/ClientId" --value "$CLIENT_ID" --type "String" --overwrite --region "$REGION" || { log_message "Failed to store ClientId"; exit 1; }
-    aws ssm put-parameter --name "$PARAM_PREFIX/ClientPassword" --value "$CLIENT_PASSWORD" --type "SecureString" --overwrite --region "$REGION" || { log_message "Failed to store ClientPassword"; exit 1; }
-    aws ssm put-parameter --name "$PARAM_PREFIX/ClientExitCode" --value "$DCV_EXIT_CODE" --type "String" --overwrite --region "$REGION" || { log_message "Failed to store ClientExitCode"; exit 1; }
-    # Note: Endpoint parameter is set by CloudFormation/CDK with the NLB DNS name (not instance private DNS)
-    
-    log_message "SUCCESS: DCV Session Manager installed and configured"
-else
-    log_message "FATAL: Failed to register API client after $MAX_RETRIES attempts"
-    aws ssm put-parameter --name "/${PRODUCT_NAME:-MediaResourceManager}/DCV/SessionManager/ClientExitCode" --value "1" --type "String" --overwrite --region "$REGION" || true
-    exit 1
+# Use PRODUCT_NAME env var if set, otherwise default
+PARAM_PREFIX="/${PRODUCT_NAME:-MediaResourceManager}/DCV/SessionManager"
+
+if [ "$SUCCESS" = "false" ]; then
+    aws ssm put-parameter --name "$PARAM_PREFIX/ClientExitCode" --value "1" --type "String" --overwrite --region "$REGION" || true
+    fail "Failed to register API client after $MAX_RETRIES attempts"
 fi
+
+# Store credentials in SSM Parameter Store
+log_message "Storing credentials in SSM Parameter Store..."
+aws ssm put-parameter --name "$PARAM_PREFIX/ClientName" --value "$CLIENT_NAME" --type "String" --overwrite --region "$REGION" || fail "Failed to store ClientName"
+aws ssm put-parameter --name "$PARAM_PREFIX/ClientId" --value "$CLIENT_ID" --type "String" --overwrite --region "$REGION" || fail "Failed to store ClientId"
+aws ssm put-parameter --name "$PARAM_PREFIX/ClientPassword" --value "$CLIENT_PASSWORD" --type "SecureString" --overwrite --region "$REGION" || fail "Failed to store ClientPassword"
+aws ssm put-parameter --name "$PARAM_PREFIX/ClientExitCode" --value "$DCV_EXIT_CODE" --type "String" --overwrite --region "$REGION" || fail "Failed to store ClientExitCode"
+# Note: Endpoint parameter is set by CloudFormation/CDK with the NLB DNS name (not instance private DNS)
+
+# Setup has finished: start the broker on later boots, and stop rerunning.
+systemctl enable "$SERVICE" || fail "Could not enable $SERVICE.service"
+touch "$DONE_MARKER" || fail "Could not write $DONE_MARKER"
+rm -f "$CLIENT_FILE" "$PER_BOOT_COPY"
+
+log_message "SUCCESS: DCV Session Manager installed and configured"

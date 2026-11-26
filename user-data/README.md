@@ -17,6 +17,16 @@ Installs and configures DCV Session Manager broker.
 3. Configures DynamoDB persistence
 4. Registers an API client
 5. Stores credentials in SSM Parameter Store
+6. Enables the broker and writes a done marker
+
+It copies itself to `/var/lib/cloud/scripts/per-boot/` first, so a restart
+before the end runs setup again on the next boot. A rerun reuses the API
+client it already registered (kept in the root-only
+`/var/lib/mrm/sm-client.env` until the parameters are stored). After
+`/var/lib/mrm/session-manager-setup.done` exists, later boots do nothing. A
+failure logs an `ERROR` line to `/var/log/dcv-session-manager-install.log`,
+stops the broker and exits non-zero. The Session Manager Auto Scaling groups
+use ELB health checks, so they replace an instance whose setup failed.
 
 ### connection-gateway-install.sh
 Installs and configures DCV Connection Gateway.

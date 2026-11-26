@@ -94,6 +94,31 @@ describe('hub gateway ASG', () => {
   });
 });
 
+describe('hub Session Manager', () => {
+  const template = generate();
+
+  it('replaces a Session Manager that fails its target group health checks, after a 1800 s grace period', () => {
+    const asg = template.Resources.SessionManagerASG;
+    expect(asg.Properties.HealthCheckType).toBe('ELB');
+    expect(asg.Properties.HealthCheckGracePeriod).toBe(1800);
+    expect(asg.Properties.TargetGroupARNs).toEqual([
+      { Ref: 'SessionManagerAgentTargetGroup' },
+      { Ref: 'SessionManagerApiTargetGroup' },
+      { Ref: 'SessionManagerResolverTargetGroup' },
+    ]);
+    // No forced replacement of the running Session Manager on update.
+    expect(asg.UpdatePolicy).toBeUndefined();
+  });
+
+  it('gets user data that resumes after a restart, under the 16 KB limit', () => {
+    const userData = template.Resources.SessionManagerLaunchTemplate.Properties.LaunchTemplateData.UserData['Fn::Base64'];
+    expect(typeof userData).toBe('string');
+    expect(Buffer.byteLength(userData, 'utf8')).toBeLessThan(16384);
+    expect(userData).toContain('export DYNAMODB_TABLE_PREFIX="dcv-sm-regional-"');
+    expect(userData).toContain('PER_BOOT_COPY="$PER_BOOT_DIR/mrm-session-manager-setup.sh"');
+  });
+});
+
 describe('hub security groups', () => {
   it('drops the UDP 8443 gateway rule and scopes the health check to the VPC', () => {
     const rules = ingressOf(generate(), 'ConnectionGatewaySecurityGroup');

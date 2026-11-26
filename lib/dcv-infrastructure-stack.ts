@@ -575,6 +575,14 @@ ${connectionGatewayInstallScript}`;
       vpcSubnets: {
         subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
       },
+      // Replace a Session Manager whose setup failed: the install script
+      // stops the broker on a failure, so its target group health checks
+      // fail. The grace period leaves time for a patch, a restart and the
+      // setup rerun after it. Same health checks in the hub template.
+      healthChecks: autoscaling.HealthChecks.withAdditionalChecks({
+        additionalTypes: [autoscaling.AdditionalHealthCheckType.ELB],
+        gracePeriod: cdk.Duration.seconds(1800),
+      }),
     });
 
     // Create Network Load Balancer for Session Manager (stable endpoint)

@@ -153,6 +153,26 @@ upgrade to that version; a version without it needs only a redeploy.
   accepts only that same `HS256` header for AD tokens, and neither Lambda
   logs sign-in names.
   ([#85](https://github.com/awslabs/media-resource-manager/issues/85))
+- DCV Session Manager setup finishes when the instance restarts during its
+  first boot, for example when patch automation reboots it as soon as it
+  registers with Systems Manager. The setup script
+  (`user-data/session-manager-install.sh`) copies itself to cloud-init's
+  per-boot folder and runs again on each boot until it has stored the API
+  client parameters, then writes a done marker and stops running. A rerun
+  reuses the API client it already registered, which it keeps in a
+  root-only file (mode 0600) until the parameters are stored, then deletes.
+  The broker is enabled only when setup has finished. A failed download,
+  package install, broker start, registration or parameter write stops
+  setup with an `ERROR` line in `/var/log/dcv-session-manager-install.log`
+  and stops the broker. The Session Manager Auto Scaling groups in the
+  primary stack and the hub template use ELB health checks with a 1,800 s
+  grace period, so they replace an instance whose setup failed. Before, a
+  restart during setup left the API client parameters missing, and creating
+  a workstation failed at the DCV readiness step. A running Session Manager
+  isn't replaced on upgrade; new instances get the change. Regional hubs
+  get it when you **Update** them.
+  ([#161](https://github.com/awslabs/media-resource-manager/pull/161),
+  [#84](https://github.com/awslabs/media-resource-manager/issues/84))
 
 ### Security
 
