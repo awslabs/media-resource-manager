@@ -37,7 +37,8 @@ function adToken(expiresIn: number, authTime?: number, extra: Record<string, unk
   const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
   const body = btoa(JSON.stringify({
     username: 'aduser', email: 'aduser@example.com', isAdmin: false,
-    iat: now(), exp: now() + expiresIn, n: serial,
+    // A 1-hour token, like ldap-auth issues, with expiresIn seconds left
+    iat: now() + expiresIn - 3600, exp: now() + expiresIn, n: serial,
     ...(authTime === undefined ? {} : { auth_time: authTime }),
     ...extra,
   }));
@@ -177,6 +178,38 @@ describe('AD session refresh', () => {
     await vi.advanceTimersByTimeAsync(61 * 1000);
     expect(attempts).toBe(2);
     expect(sessionStorage.getItem('auth-token')).toBe(fresh);
+  });
+
+  it('with the local clock 56 minutes fast, refreshes once and schedules the next 55 minutes later', async () => {
+    vi.useFakeTimers();
+    const serverStart = now();
+    // ldap-auth stamps tokens with its own clock, which barely moves here
+    const serverToken = (iat: number) => {
+      serial += 1;
+      const header = btoa(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+      const body = btoa(JSON.stringify({ username: 'aduser', isAdmin: false, iat, auth_time: serverStart, exp: iat + 3600, n: serial }));
+      return `${header}.${body}.sig${serial}`;
+    };
+    vi.mocked(fetch).mockImplementation(async (url: string | URL | Request, init: RequestInit = {}) => {
+      const u = String(url);
+      calls.push(u);
+      requests.push({ url: u, init });
+      if (u === '/config.json' || u === '/config-dev.json') return json(200, CONFIG);
+      if (u === `${API}/auth/ldap`) return json(200, { token: serverToken(serverStart) });
+      if (u === `${API}/auth/ldap/refresh`) return json(200, { token: serverToken(serverStart + 60) });
+      return json(200, {});
+    });
+    await signInWithLDAP('aduser', 'pw-for-test'); // pragma: allowlist secret
+
+    vi.setSystemTime(Date.now() + 56 * 60 * 1000);
+    const token = sessionStorage.getItem('auth-token')!;
+    await apiCall('/workstations', { headers: { Authorization: `Bearer ${token}` } });
+    expect(refreshCalls()).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(54 * 60 * 1000);
+    expect(refreshCalls()).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2 * 60 * 1000);
+    expect(refreshCalls()).toHaveLength(2);
   });
 
   it('does not refresh a token that already lasts until the 12-hour cap', async () => {
