@@ -53,7 +53,8 @@ is a rebuild.
   `GET`/`PUT /users/{id}/native-client-transport`, and the workstation
   setting is `nativeClientTransport` in `PUT /workstations/{id}`; both are
   admin-only and accept `quic`, `websocket` or `null`.
-  ([#138](https://github.com/awslabs/media-resource-manager/issues/138))
+  ([#164](https://github.com/awslabs/media-resource-manager/pull/164),
+  [#138](https://github.com/awslabs/media-resource-manager/issues/138))
 
 ### Fixed
 
