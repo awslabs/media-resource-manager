@@ -134,6 +134,21 @@ Once your workstation is running:
 - Connects with QUIC (UDP) by default. If a firewall or security agent blocks
   UDP, an administrator can set **Settings → Session Management → Native client
   protocol** to **TCP (WebSocket)**.
+- An administrator can also choose the protocol for one workstation or one
+  user, so only the connections that need TCP give up QUIC:
+  - **Workstation** (workstation details → General → **Native client
+    protocol**): for a workstation whose own software, such as a security
+    agent or host firewall, drops UDP. It applies to everyone who connects to
+    that workstation.
+  - **User** (user details → User Information → **Native client protocol**):
+    for a user on a network that blocks UDP/QUIC. It applies to every
+    workstation that user connects to.
+
+  A workstation or user override wins over the Settings value. When both are
+  set and differ, TCP is used. When neither is set, the Settings value
+  applies. **Default** means no override at that level, and an override stays
+  as set when the Settings value changes. Native client links only: browser
+  sessions always use TCP.
 
 ### Stopping a Workstation
 

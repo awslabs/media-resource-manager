@@ -33,6 +33,8 @@ import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
 import { DcvApiService } from '../utils/dcvApi';
+import { parseNativeClientTransportOverride, type NativeClientTransportOverride } from '../utils/dcvClient';
+import NativeClientProtocolOverride from '../components/NativeClientProtocolOverride';
 
 const { Title, Text, Link } = Typography;
 
@@ -62,6 +64,8 @@ const UserDetailsAntd: React.FC<UserDetailsAntdProps> = ({
   const [activeTab, setActiveTab] = useState('user-info');
   const [autoStartEnabled, setAutoStartEnabled] = useState(false);
   const [userSchedule, setUserSchedule] = useState<any>(null);
+  // undefined until loaded; the control shows only once the stored value is known.
+  const [nativeClientTransport, setNativeClientTransport] = useState<NativeClientTransportOverride | undefined>(undefined);
 
   useEffect(() => {
     if (userId) {
@@ -71,6 +75,41 @@ const UserDetailsAntd: React.FC<UserDetailsAntdProps> = ({
       fetchUserSchedule();
     }
   }, [userId]);
+
+  useEffect(() => {
+    if (userId && isAdmin) fetchNativeClientTransport();
+  }, [userId, isAdmin]);
+
+  const fetchNativeClientTransport = async () => {
+    try {
+      const token = getAuthToken();
+      if (!token) return;
+      const response = await apiCall(`users/${encodeURIComponent(userId || '')}/native-client-transport`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setNativeClientTransport(parseNativeClientTransportOverride(data.nativeClientTransport));
+      }
+    } catch (error) {
+      console.error('Error fetching the native client protocol override:', error);
+    }
+  };
+
+  const saveNativeClientTransport = async (value: NativeClientTransportOverride) => {
+    const token = getAuthToken();
+    if (!token) throw new Error('No current user');
+    const response = await apiCall(`users/${encodeURIComponent(userId || '')}/native-client-transport`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ nativeClientTransport: value }),
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.error || `Could not save the native client protocol (HTTP ${response.status})`);
+    }
+    setNativeClientTransport(value);
+  };
 
   const fetchAutoStartSetting = async () => {
     try {
@@ -422,6 +461,22 @@ const UserDetailsAntd: React.FC<UserDetailsAntdProps> = ({
               <Descriptions.Item label="Department">{userData.department || 'Not specified'}</Descriptions.Item>
             </Descriptions>
           </div>
+
+          {isAdmin && nativeClientTransport !== undefined && (
+            <>
+              <Divider style={{ margin: 0 }} />
+
+              <div>
+                <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 12 }}>Native client protocol</Text>
+                <NativeClientProtocolOverride
+                  value={nativeClientTransport}
+                  onSave={saveNativeClientTransport}
+                  defaultLabel="workstation override or Settings"
+                  help="How the Amazon DCV client connects for this user, on any workstation. Use TCP when the user's network blocks UDP. This overrides Settings. If the workstation also has an override and the two differ, TCP is used."
+                />
+              </div>
+            </>
+          )}
 
           {directoryUser && (
             <>

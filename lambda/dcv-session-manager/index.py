@@ -151,6 +151,93 @@ def get_default_session_owner(server_id):
         print(f"Error getting workstation platform: {e}")
         return 'Administrator', None
 
+# Native client protocol (#138). The values match GET/POST /settings
+# nativeClientTransport: 'quic' (UDP) or 'websocket' (TCP). Admins can set an
+# override on a workstation record and on a user record (attribute
+# nativeClientTransport). A set override wins over the deployment-wide setting
+# in SSM; when both overrides are set and disagree, TCP wins. QUIC when nothing
+# is set, as before #138.
+NATIVE_CLIENT_TRANSPORTS = ('quic', 'websocket')
+DEFAULT_NATIVE_CLIENT_TRANSPORT = 'quic'
+TCP_NATIVE_CLIENT_TRANSPORT = 'websocket'
+NATIVE_CLIENT_TRANSPORT_PARAM = 'DCV/NativeClientTransport'
+
+
+def resolve_native_client_transport(workstation_override, user_override, global_setting):
+    """The overrides, then the global setting, then QUIC.
+
+    One override set: it wins. Both set: their value when they agree, TCP when
+    they don't. Neither set: the global setting. A value that isn't in
+    NATIVE_CLIENT_TRANSPORTS counts as not set.
+    """
+    overrides = {v for v in (workstation_override, user_override) if v in NATIVE_CLIENT_TRANSPORTS}
+    if len(overrides) == 1:
+        return overrides.pop()
+    if overrides:
+        return TCP_NATIVE_CLIENT_TRANSPORT
+    if global_setting in NATIVE_CLIENT_TRANSPORTS:
+        return global_setting
+    return DEFAULT_NATIVE_CLIENT_TRANSPORT
+
+
+def native_client_transport_for(server_id, caller_user_id, ssm_client):
+    """The protocol the native client should use for this caller and workstation.
+
+    Each read fails soft: a missing record or a failed read counts as not set,
+    so a connect never fails because of this lookup.
+    """
+    workstation_override = user_override = global_setting = None
+    try:
+        item = _dynamodb_table(
+            os.environ.get('WORKSTATION_TABLE_NAME', 'workstation-instances')
+        ).get_item(Key={'instanceId': server_id}).get('Item') or {}
+        workstation_override = item.get('nativeClientTransport')
+    except Exception as e:
+        print(f"Could not read the workstation protocol override: {e}")
+    if caller_user_id:
+        try:
+            item = _dynamodb_table(
+                os.environ.get('USER_TABLE_NAME', 'users')
+            ).get_item(Key={'userId': caller_user_id}).get('Item') or {}
+            user_override = item.get('nativeClientTransport')
+        except Exception as e:
+            print(f"Could not read the user protocol override: {e}")
+    try:
+        pascal_case_name = os.environ.get('PASCAL_CASE_NAME', 'MediaResourceManager')
+        global_setting = ssm_client.get_parameter(
+            Name=f'/{pascal_case_name}/{NATIVE_CLIENT_TRANSPORT_PARAM}'
+        )['Parameter']['Value']
+    except Exception as e:
+        # ParameterNotFound until an admin saves Settings once: QUIC.
+        print(f"Native client protocol setting not read ({type(e).__name__}); using the default")
+    transport = resolve_native_client_transport(workstation_override, user_override, global_setting)
+    print(f"Native client protocol: {transport} (workstation: {workstation_override or '-'}, "
+          f"user: {user_override or '-'}, global: {global_setting or '-'})")
+    return transport
+
+
+def with_native_client_transport(response, server_id, caller_user_id, ssm_client=None):
+    """Add nativeClientTransport to a successful create-session response.
+
+    Runs only in the primary Region's copy, which can read the tables and the
+    setting. A hub's copy answers the primary's forwarded call without it, and
+    the primary adds it to that answer.
+    """
+    if _primary_region() != os.environ.get('AWS_REGION'):
+        return response
+    if not isinstance(response, dict) or response.get('statusCode') != 200:
+        return response
+    try:
+        body = json.loads(response.get('body') or '{}')
+    except (TypeError, ValueError):
+        return response
+    if not isinstance(body, dict) or 'connectionUrl' not in body:
+        return response
+    body['nativeClientTransport'] = native_client_transport_for(
+        server_id, caller_user_id, ssm_client or boto3.client('ssm'))
+    return {**response, 'body': json.dumps(body)}
+
+
 # Where the browser viewer's gateway URL is published. The gateway stacks write
 # it: SSM /<ProductName>/DCV/BrowserGatewayUrl in the primary Region and in each
 # hub Region, and the hub record field browserGatewayUrl (from the hub stack
@@ -480,7 +567,10 @@ def lambda_handler(event, context):
             if workstation_region and workstation_region != current_region:
                 print(f"Workstation {server_id} is in region {workstation_region}, routing to regional Lambda...")
                 try:
-                    return invoke_regional_lambda(workstation_region, event)
+                    regional_response = invoke_regional_lambda(workstation_region, event)
+                    if action == 'create-session':
+                        return with_native_client_transport(regional_response, server_id, caller_username)
+                    return regional_response
                 except Exception as e:
                     print(f"Error invoking regional Lambda: {e}")
                     return {
@@ -969,7 +1059,7 @@ def lambda_handler(event, context):
                 
                 print(f"DCV URL constructed using gateway: {gateway_endpoint}; browser gateway: {browser_gateway_url}")
                 
-                return {
+                return with_native_client_transport({
                     'statusCode': 200,
                     'headers': cors_headers,
                     'body': json.dumps({
@@ -979,7 +1069,7 @@ def lambda_handler(event, context):
                         'browserGatewayUrl': browser_gateway_url,
                         'connectionToken': connection_token
                     })
-                }
+                }, server_id, caller_username, ssm)
                 
             elif action == 'delete-session':
                 if not session_id:

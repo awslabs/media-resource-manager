@@ -12,6 +12,23 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Added
+
+- Administrators can set the native client protocol for one workstation
+  (workstation details) or one user (user details): **Default**, **QUIC
+  (UDP)** or **TCP (WebSocket)**. An override wins over **Settings → Session
+  Management → Native client protocol**. When the workstation and the user
+  both have an override and they differ, TCP is used. With no override set,
+  connections use the Settings value as before, and an override stays as set
+  when the Settings value changes. `POST /dcv` `create-session` returns the
+  resolved `nativeClientTransport`, and the console builds the native client
+  link from it. The user setting is
+  `GET`/`PUT /users/{id}/native-client-transport`, and the workstation
+  setting is `nativeClientTransport` in `PUT /workstations/{id}`; both are
+  admin-only and accept `quic`, `websocket` or `null`.
+  ([#164](https://github.com/awslabs/media-resource-manager/pull/164),
+  [#138](https://github.com/awslabs/media-resource-manager/issues/138))
+
 ## [1.6.1] - 2026-11-26
 
 Fixes for regional hub and storage deletes, hostname numbering, the
