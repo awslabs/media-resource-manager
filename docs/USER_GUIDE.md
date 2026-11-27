@@ -144,9 +144,11 @@ Once your workstation is running:
     for a user on a network that blocks UDP/QUIC. It applies to every
     workstation that user connects to.
 
-  The workstation setting wins, then the user setting, then the Settings
-  value. **Default** means no override at that level. Native client links
-  only: browser sessions always use TCP.
+  A workstation or user override wins over the Settings value. When both are
+  set and differ, TCP is used. When neither is set, the Settings value
+  applies. **Default** means no override at that level, and an override stays
+  as set when the Settings value changes. Native client links only: browser
+  sessions always use TCP.
 
 ### Stopping a Workstation
 

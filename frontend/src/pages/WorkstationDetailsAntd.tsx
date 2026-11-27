@@ -544,7 +544,7 @@ const WorkstationDetailsAntd: React.FC<WorkstationDetailsAntdProps> = ({
                   value={parseNativeClientTransportOverride(workstation.nativeClientTransport)}
                   onSave={saveNativeClientTransport}
                   defaultLabel="user override or Settings"
-                  help="How the Amazon DCV client connects to this workstation, for everyone. Use TCP when software on the workstation drops UDP. This overrides the user's setting and Settings."
+                  help="How the Amazon DCV client connects to this workstation, for everyone. Use TCP when software on the workstation drops UDP. This overrides Settings. If the user also has an override and the two differ, TCP is used."
                 />
               </div>
             </>

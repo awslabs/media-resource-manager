@@ -66,14 +66,15 @@ export interface NativeClientUrls {
   connectionUrl?: string;
   quicConnectionUrl?: string;
   /**
-   * The protocol resolved for this caller and workstation (#138): the
-   * workstation override, then the user override, then the Settings value.
+   * The protocol resolved for this caller and workstation (#138): a set
+   * workstation or user override over the Settings value, and TCP when the
+   * two overrides differ.
    * When present it wins over the `fallbackTransport` argument of `nativeClientUrl`.
    */
   nativeClientTransport?: unknown;
 }
 
-/** A workstation or user override: a protocol, or `null` to follow the next level. */
+/** A workstation or user override: a protocol, or `null` for no override at that level. */
 export type NativeClientTransportOverride = NativeClientTransport | null;
 
 /** Read an override from an API response; anything unknown means no override. */

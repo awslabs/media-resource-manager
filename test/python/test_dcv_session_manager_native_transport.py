@@ -4,9 +4,10 @@
 """Unit tests for the native client protocol in lambda/dcv-session-manager
 create-session (#138), run by test/dcv-session-manager.test.ts.
 
-The workstation override wins, then the caller's user override, then
-Settings > Native client protocol, then QUIC. Only the primary Region's copy
-resolves it; for a hub workstation it adds the field to the hub's answer.
+A workstation override or the caller's user override wins over Settings >
+Native client protocol; when both are set and disagree, TCP wins. With
+neither set the Settings value applies, then QUIC. Only the primary Region's
+copy resolves it; for a hub workstation it adds the field to the hub's answer.
 """
 
 import importlib.util
@@ -113,10 +114,30 @@ def connect_event(username=USER_ID, is_admin=False):
     }
 
 
+# The design table in PR #164: (global, workstation override, user override) -> result.
+SCENARIOS = [
+    ('quic', None, None, 'quic'),                  # global QUIC, no overrides
+    ('quic', 'websocket', None, 'websocket'),      # global QUIC + workstation TCP
+    ('websocket', 'quic', None, 'quic'),           # one override wins over global, either way
+    ('websocket', None, 'quic', 'quic'),
+    ('quic', 'quic', 'websocket', 'websocket'),    # user TCP + workstation QUIC
+    ('quic', 'websocket', 'quic', 'websocket'),    # user QUIC + workstation TCP
+    ('websocket', 'quic', 'quic', 'quic'),         # user QUIC + workstation QUIC, global TCP
+    ('quic', 'websocket', 'websocket', 'websocket'),
+]
+
+
 class ResolveTest(unittest.TestCase):
-    def test_workstation_override_wins(self):
-        self.assertEqual(mod.resolve_native_client_transport('websocket', 'quic', 'quic'), 'websocket')
-        self.assertEqual(mod.resolve_native_client_transport('quic', 'websocket', 'websocket'), 'quic')
+    def test_design_table(self):
+        for global_setting, workstation, user, expected in SCENARIOS:
+            with self.subTest(global_setting=global_setting, workstation=workstation, user=user):
+                self.assertEqual(
+                    mod.resolve_native_client_transport(workstation, user, global_setting), expected)
+
+    def test_disagreeing_overrides_are_tcp_whatever_the_global_setting(self):
+        for global_setting in ('quic', 'websocket', None):
+            self.assertEqual(mod.resolve_native_client_transport('quic', 'websocket', global_setting), 'websocket')
+            self.assertEqual(mod.resolve_native_client_transport('websocket', 'quic', global_setting), 'websocket')
 
     def test_user_override_wins_over_the_global_setting(self):
         self.assertEqual(mod.resolve_native_client_transport(None, 'websocket', 'quic'), 'websocket')
@@ -173,9 +194,34 @@ class CreateSessionTest(unittest.TestCase):
                        setting='quic')
         self.assertEqual(self.transport(self.connect(fake)), 'websocket')
 
-    def test_workstation_override_beats_user_and_global(self):
+    def test_design_table_through_create_session(self):
+        for global_setting, workstation, user, expected in SCENARIOS:
+            with self.subTest(global_setting=global_setting, workstation=workstation, user=user):
+                ws_extra = {'nativeClientTransport': workstation} if workstation else {}
+                user_item = {'userId': USER_ID, 'nativeClientTransport': user} if user else None
+                fake = FakeAws(workstation=self.owned(**ws_extra), user=user_item, setting=global_setting)
+                self.assertEqual(self.transport(self.connect(fake)), expected)
+
+    def test_workstation_override_holds_when_global_changes_and_changes_back(self):
+        # Global TCP, then back to QUIC: the workstation's TCP override stays TCP.
+        fake = FakeAws(workstation=self.owned(nativeClientTransport='websocket'), setting='websocket')
+        self.assertEqual(self.transport(self.connect(fake)), 'websocket')
+        fake.setting = 'quic'
+        self.assertEqual(self.transport(self.connect(fake)), 'websocket')
+
+    def test_user_tcp_beats_workstation_quic(self):
         fake = FakeAws(workstation=self.owned(nativeClientTransport='quic'),
-                       user={'userId': USER_ID, 'nativeClientTransport': 'websocket'}, setting='websocket')
+                       user={'userId': USER_ID, 'nativeClientTransport': 'websocket'}, setting='quic')
+        self.assertEqual(self.transport(self.connect(fake)), 'websocket')
+
+    def test_workstation_tcp_beats_user_quic(self):
+        fake = FakeAws(workstation=self.owned(nativeClientTransport='websocket'),
+                       user={'userId': USER_ID, 'nativeClientTransport': 'quic'}, setting='quic')
+        self.assertEqual(self.transport(self.connect(fake)), 'websocket')
+
+    def test_agreeing_quic_overrides_beat_global_tcp(self):
+        fake = FakeAws(workstation=self.owned(nativeClientTransport='quic'),
+                       user={'userId': USER_ID, 'nativeClientTransport': 'quic'}, setting='websocket')
         self.assertEqual(self.transport(self.connect(fake)), 'quic')
 
     def test_the_caller_override_is_used_not_the_assignee(self):

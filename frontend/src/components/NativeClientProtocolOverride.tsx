@@ -3,8 +3,9 @@
 
 /**
  * Admin control for a per-workstation or per-user native client protocol
- * override (#138). "Default" stores no override, so the next level applies:
- * workstation, then user, then Settings > Native client protocol.
+ * override (#138). "Default" stores no override at this level. A set override
+ * wins over Settings > Native client protocol; when the workstation and the
+ * user overrides are both set and differ, TCP wins.
  */
 import React, { useEffect, useState } from 'react';
 import { Select, Typography } from 'antd';

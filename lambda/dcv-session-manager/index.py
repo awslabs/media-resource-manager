@@ -154,21 +154,29 @@ def get_default_session_owner(server_id):
 # Native client protocol (#138). The values match GET/POST /settings
 # nativeClientTransport: 'quic' (UDP) or 'websocket' (TCP). Admins can set an
 # override on a workstation record and on a user record (attribute
-# nativeClientTransport). The workstation override wins, then the user's, then
-# the deployment-wide setting in SSM. QUIC when none is set, as before #138.
+# nativeClientTransport). A set override wins over the deployment-wide setting
+# in SSM; when both overrides are set and disagree, TCP wins. QUIC when nothing
+# is set, as before #138.
 NATIVE_CLIENT_TRANSPORTS = ('quic', 'websocket')
 DEFAULT_NATIVE_CLIENT_TRANSPORT = 'quic'
+TCP_NATIVE_CLIENT_TRANSPORT = 'websocket'
 NATIVE_CLIENT_TRANSPORT_PARAM = 'DCV/NativeClientTransport'
 
 
 def resolve_native_client_transport(workstation_override, user_override, global_setting):
-    """Workstation override, then user override, then the global setting, then QUIC.
+    """The overrides, then the global setting, then QUIC.
 
-    A value that isn't in NATIVE_CLIENT_TRANSPORTS counts as not set.
+    One override set: it wins. Both set: their value when they agree, TCP when
+    they don't. Neither set: the global setting. A value that isn't in
+    NATIVE_CLIENT_TRANSPORTS counts as not set.
     """
-    for value in (workstation_override, user_override, global_setting):
-        if value in NATIVE_CLIENT_TRANSPORTS:
-            return value
+    overrides = {v for v in (workstation_override, user_override) if v in NATIVE_CLIENT_TRANSPORTS}
+    if len(overrides) == 1:
+        return overrides.pop()
+    if overrides:
+        return TCP_NATIVE_CLIENT_TRANSPORT
+    if global_setting in NATIVE_CLIENT_TRANSPORTS:
+        return global_setting
     return DEFAULT_NATIVE_CLIENT_TRANSPORT
 
 

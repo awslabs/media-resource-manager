@@ -471,8 +471,8 @@ const UserDetailsAntd: React.FC<UserDetailsAntdProps> = ({
                 <NativeClientProtocolOverride
                   value={nativeClientTransport}
                   onSave={saveNativeClientTransport}
-                  defaultLabel="Settings"
-                  help="How the Amazon DCV client connects for this user, on any workstation. Use TCP when the user's network blocks UDP. A workstation's own setting overrides this."
+                  defaultLabel="workstation override or Settings"
+                  help="How the Amazon DCV client connects for this user, on any workstation. Use TCP when the user's network blocks UDP. This overrides Settings. If the workstation also has an override and the two differ, TCP is used."
                 />
               </div>
             </>
