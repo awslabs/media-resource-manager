@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "releases": [
+    {
+      "version": "1.6.0",
+      "pipelineTemplateChanged": true,
+      "hubUpdate": true,
+      "hubFingerprint": "33026b9a65b767b8",
+      "sessionsDisconnect": true,
+      "adminAction": true,
+      "notes": "Update regional hubs after the deploy. The deploy and each hub Update replace the DCV Connection Gateways, so DCV sessions disconnect once. With AD sign-in, check the share and NTFS permissions on FSx for Windows file shares first. With an existing VPC, check that each private subnet has a 0.0.0.0/0 route to a NAT gateway or similar."
+    },
+    {
+      "version": "1.5.0",
+      "pipelineTemplateChanged": true,
+      "hubUpdate": true,
+      "hubFingerprint": "813e5e95849a3640",
+      "sessionsDisconnect": true,
+      "adminAction": true,
+      "notes": "Don't create, update or delete a regional hub while the deploy runs. Update regional hubs after the deploy. The deploy and each hub Update replace the DCV Connection Gateways, so DCV sessions disconnect. With VPC Block Public Access, add the exclusions for the private subnets or set DcvBrowserPath=direct first."
+    },
+    {
+      "version": "1.4.4",
+      "pipelineTemplateChanged": false,
+      "hubUpdate": false,
+      "hubFingerprint": "9cdd94119aa8f6c2",
+      "sessionsDisconnect": false,
+      "adminAction": false,
+      "notes": "No action needed; redeploy."
+    },
+    {
+      "version": "1.4.3",
+      "pipelineTemplateChanged": false,
+      "hubUpdate": false,
+      "hubFingerprint": "9cdd94119aa8f6c2",
+      "sessionsDisconnect": false,
+      "adminAction": false,
+      "notes": "No action needed; redeploy."
+    },
+    {
+      "version": "1.4.2",
+      "pipelineTemplateChanged": false,
+      "hubUpdate": true,
+      "hubFingerprint": "9cdd94119aa8f6c2",
+      "sessionsDisconnect": false,
+      "adminAction": false,
+      "notes": "Update each regional hub once more: the way hub versions are calculated changed."
+    },
+    {
+      "version": "1.4.1",
+      "pipelineTemplateChanged": false,
+      "hubUpdate": true,
+      "hubFingerprint": null,
+      "sessionsDisconnect": false,
+      "adminAction": true,
+      "notes": "Update regional hubs. Lambda log groups without a retention get 365 days, which deletes older events; set LambdaLogRetentionDays to use another period."
+    },
+    {
+      "version": "1.4.0",
+      "pipelineTemplateChanged": false,
+      "hubUpdate": false,
+      "hubFingerprint": null,
+      "sessionsDisconnect": false,
+      "adminAction": true,
+      "notes": "Check the Software Library: installers uploaded more than 30 days before the upgrade may be gone, and entries marked Installer missing need Replace installer."
+    }
+  ]
+}

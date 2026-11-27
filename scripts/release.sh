@@ -35,8 +35,17 @@ npm run version-sync
 
 echo "New version: $NEW_VERSION"
 
+# Fill in the computed fields of the release's releases.json entry, which
+# scripts/upgrade.sh reads (see docs/DEVELOPMENT.md, Release metadata)
+if ! node scripts/release-metadata.js "$NEW_VERSION"; then
+  echo "Nothing was committed. Add the $NEW_VERSION entry to releases.json, undo the version"
+  echo "bump (git checkout -- package.json package-lock.json frontend/package.json frontend/package-lock.json),"
+  echo "and run $0 $NEW_VERSION again."
+  exit 1
+fi
+
 # Commit and tag
-git add package.json package-lock.json frontend/package.json frontend/package-lock.json
+git add package.json package-lock.json frontend/package.json frontend/package-lock.json releases.json
 git commit -m "release: v${NEW_VERSION}"
 git tag "v${NEW_VERSION}"
 
