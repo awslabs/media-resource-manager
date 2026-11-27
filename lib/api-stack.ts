@@ -1013,6 +1013,8 @@ export class ApiStack extends cdk.Stack {
         `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/DCV/ConnectionGateway/*`,
         // Browser viewer origin, written by the gateway stack (browserGatewayUrl in create-session).
         `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/DCV/BrowserGatewayUrl`,
+        // Settings > Native client protocol, the fallback when no override is set (nativeClientTransport in create-session).
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/${props.pascalCaseName}/DCV/NativeClientTransport`,
       ],
     }));
 
@@ -1385,6 +1387,11 @@ export class ApiStack extends cdk.Stack {
     userScheduleResource.addMethod('GET', userGroupIntegration, { authorizer });
     userScheduleResource.addMethod('PUT', userGroupIntegration, { authorizer });
     userScheduleResource.addMethod('DELETE', userGroupIntegration, { authorizer });
+
+    // Per-user native client protocol override (#138); admins only, checked in user-group-manager.
+    const userNativeClientTransportResource = userResource.addResource('native-client-transport');
+    userNativeClientTransportResource.addMethod('GET', userGroupIntegration, { authorizer });
+    userNativeClientTransportResource.addMethod('PUT', userGroupIntegration, { authorizer });
 
     groupsResource.addMethod('GET', userGroupIntegration, { authorizer });
     groupsResource.addMethod('POST', userGroupIntegration, { authorizer });

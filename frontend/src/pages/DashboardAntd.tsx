@@ -39,7 +39,7 @@ import { useNavigate } from 'react-router-dom';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
-import { nativeClientUrl, openBrowserViewer, parseNativeClientTransport, DEFAULT_NATIVE_CLIENT_TRANSPORT } from '../utils/dcvClient';
+import { nativeClientUrl, nativeConnectionCheck, openBrowserViewer, parseNativeClientTransport, DEFAULT_NATIVE_CLIENT_TRANSPORT } from '../utils/dcvClient';
 import { postCreateSession, sessionNameFor, STARTING_SESSION_MESSAGE } from '../utils/dcvViewer';
 import { useDcvClientPrompt } from '../components/DcvClientPrompt';
 
@@ -358,7 +358,11 @@ const DashboardAntd: React.FC<DashboardProps> = ({
       if (response.ok) {
         const data = await response.json();
         
-        await connectWithClient(nativeClientUrl(data, nativeClientTransport), instanceId);
+        await connectWithClient(
+          nativeClientUrl(data, nativeClientTransport),
+          instanceId,
+          nativeConnectionCheck(data, instanceId, nativeClientTransport),
+        );
       } else {
         throw new Error('Failed to create DCV session');
       }

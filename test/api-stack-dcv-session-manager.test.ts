@@ -86,11 +86,13 @@ describe('ApiStack DCV session manager SSM access', () => {
     return ssm.flatMap((st: any) => ([] as unknown[]).concat(st.Resource)).map((r: unknown) => JSON.stringify(r));
   }
 
-  it('can read /<ProductName>/DCV/BrowserGatewayUrl, and only that parameter outside its existing paths', () => {
+  it('can read /<ProductName>/DCV/BrowserGatewayUrl and NativeClientTransport, and only those outside its existing paths', () => {
     const resources = sessionManagerSsmResources();
     expect(resources.some((r) => r.includes(':parameter/MediaResourceManager/DCV/BrowserGatewayUrl"'))).toBe(true);
+    // The fallback for the native client protocol in create-session (#138).
+    expect(resources.some((r) => r.includes(':parameter/MediaResourceManager/DCV/NativeClientTransport"'))).toBe(true);
     for (const r of resources) {
-      expect(r).toMatch(/:parameter\/MediaResourceManager\/DCV\/(SessionManager\/\*|ConnectionGateway\/\*|BrowserGatewayUrl)"/);
+      expect(r).toMatch(/:parameter\/MediaResourceManager\/DCV\/(SessionManager\/\*|ConnectionGateway\/\*|BrowserGatewayUrl|NativeClientTransport)"/);
     }
   });
 });

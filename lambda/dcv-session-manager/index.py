@@ -20,6 +20,25 @@ SESSION_WAIT_BUDGET_SECONDS = 15
 SESSION_POLL_SECONDS = 3
 SESSION_RETRY_AFTER_SECONDS = 5
 
+# DCV session IDs from Session Manager (UUIDs) and console session names.
+SESSION_ID_PATTERN = re.compile(r'^[A-Za-z0-9._-]{1,128}$')
+
+
+def session_connections(sessions, server_ids, session_id):
+    """Connection count and state of one session, if it runs on one of server_ids.
+
+    Returns None when the session isn't found on those servers, so a caller
+    can't read the count of a session on another workstation.
+    """
+    for session in sessions:
+        if session.get('Id') == session_id and (session.get('Server') or {}).get('Id') in server_ids:
+            return {
+                'sessionId': session_id,
+                'state': session.get('State'),
+                'numOfConnections': int(session.get('NumOfConnections') or 0),
+            }
+    return None
+
 def get_workstation_region(server_id):
     """Look up the region for a workstation from DynamoDB.
     
@@ -150,6 +169,93 @@ def get_default_session_owner(server_id):
     except Exception as e:
         print(f"Error getting workstation platform: {e}")
         return 'Administrator', None
+
+# Native client protocol (#138). The values match GET/POST /settings
+# nativeClientTransport: 'quic' (UDP) or 'websocket' (TCP). Admins can set an
+# override on a workstation record and on a user record (attribute
+# nativeClientTransport). A set override wins over the deployment-wide setting
+# in SSM; when both overrides are set and disagree, TCP wins. QUIC when nothing
+# is set, as before #138.
+NATIVE_CLIENT_TRANSPORTS = ('quic', 'websocket')
+DEFAULT_NATIVE_CLIENT_TRANSPORT = 'quic'
+TCP_NATIVE_CLIENT_TRANSPORT = 'websocket'
+NATIVE_CLIENT_TRANSPORT_PARAM = 'DCV/NativeClientTransport'
+
+
+def resolve_native_client_transport(workstation_override, user_override, global_setting):
+    """The overrides, then the global setting, then QUIC.
+
+    One override set: it wins. Both set: their value when they agree, TCP when
+    they don't. Neither set: the global setting. A value that isn't in
+    NATIVE_CLIENT_TRANSPORTS counts as not set.
+    """
+    overrides = {v for v in (workstation_override, user_override) if v in NATIVE_CLIENT_TRANSPORTS}
+    if len(overrides) == 1:
+        return overrides.pop()
+    if overrides:
+        return TCP_NATIVE_CLIENT_TRANSPORT
+    if global_setting in NATIVE_CLIENT_TRANSPORTS:
+        return global_setting
+    return DEFAULT_NATIVE_CLIENT_TRANSPORT
+
+
+def native_client_transport_for(server_id, caller_user_id, ssm_client):
+    """The protocol the native client should use for this caller and workstation.
+
+    Each read fails soft: a missing record or a failed read counts as not set,
+    so a connect never fails because of this lookup.
+    """
+    workstation_override = user_override = global_setting = None
+    try:
+        item = _dynamodb_table(
+            os.environ.get('WORKSTATION_TABLE_NAME', 'workstation-instances')
+        ).get_item(Key={'instanceId': server_id}).get('Item') or {}
+        workstation_override = item.get('nativeClientTransport')
+    except Exception as e:
+        print(f"Could not read the workstation protocol override: {e}")
+    if caller_user_id:
+        try:
+            item = _dynamodb_table(
+                os.environ.get('USER_TABLE_NAME', 'users')
+            ).get_item(Key={'userId': caller_user_id}).get('Item') or {}
+            user_override = item.get('nativeClientTransport')
+        except Exception as e:
+            print(f"Could not read the user protocol override: {e}")
+    try:
+        pascal_case_name = os.environ.get('PASCAL_CASE_NAME', 'MediaResourceManager')
+        global_setting = ssm_client.get_parameter(
+            Name=f'/{pascal_case_name}/{NATIVE_CLIENT_TRANSPORT_PARAM}'
+        )['Parameter']['Value']
+    except Exception as e:
+        # ParameterNotFound until an admin saves Settings once: QUIC.
+        print(f"Native client protocol setting not read ({type(e).__name__}); using the default")
+    transport = resolve_native_client_transport(workstation_override, user_override, global_setting)
+    print(f"Native client protocol: {transport} (workstation: {workstation_override or '-'}, "
+          f"user: {user_override or '-'}, global: {global_setting or '-'})")
+    return transport
+
+
+def with_native_client_transport(response, server_id, caller_user_id, ssm_client=None):
+    """Add nativeClientTransport to a successful create-session response.
+
+    Runs only in the primary Region's copy, which can read the tables and the
+    setting. A hub's copy answers the primary's forwarded call without it, and
+    the primary adds it to that answer.
+    """
+    if _primary_region() != os.environ.get('AWS_REGION'):
+        return response
+    if not isinstance(response, dict) or response.get('statusCode') != 200:
+        return response
+    try:
+        body = json.loads(response.get('body') or '{}')
+    except (TypeError, ValueError):
+        return response
+    if not isinstance(body, dict) or 'connectionUrl' not in body:
+        return response
+    body['nativeClientTransport'] = native_client_transport_for(
+        server_id, caller_user_id, ssm_client or boto3.client('ssm'))
+    return {**response, 'body': json.dumps(body)}
+
 
 # Where the browser viewer's gateway URL is published. The gateway stacks write
 # it: SSM /<ProductName>/DCV/BrowserGatewayUrl in the primary Region and in each
@@ -373,7 +479,11 @@ def lambda_handler(event, context):
         'get-instance-states',
         'get-connection-data',
     }
-    OWNER_OR_ADMIN_ACTIONS = {'create-session'}
+    # get-session-connections (#139): after the console opens a native client
+    # link, it asks whether a client connected to that session. It returns
+    # only the connection count and state of one session on the caller's own
+    # workstation.
+    OWNER_OR_ADMIN_ACTIONS = {'create-session', 'get-session-connections'}
 
     def _forbidden(msg):
         return {
@@ -453,6 +563,13 @@ def lambda_handler(event, context):
                     return _forbidden(
                         'Access denied. You may only connect to workstations assigned to you.'
                     )
+            if action == 'get-session-connections' and not (
+                    isinstance(session_id, str) and SESSION_ID_PATTERN.match(session_id)):
+                return {
+                    'statusCode': 400,
+                    'headers': {'Content-Type': 'application/json', **cors_headers},
+                    'body': json.dumps({'error': 'dcvSessionId is required'})
+                }
         elif action is None:
             return {
                 'statusCode': 400,
@@ -475,12 +592,15 @@ def lambda_handler(event, context):
         # Route to regional Lambda if workstation is in a different region
         # This is needed because the DCV Session Manager Lambda must be in the same
         # VPC as the Session Manager broker to communicate with it
-        if server_id and action in ['create-session', 'describe-servers', 'describe-sessions']:
+        if server_id and action in ['create-session', 'describe-servers', 'describe-sessions', 'get-session-connections']:
             workstation_region = get_workstation_region(server_id)
             if workstation_region and workstation_region != current_region:
                 print(f"Workstation {server_id} is in region {workstation_region}, routing to regional Lambda...")
                 try:
-                    return invoke_regional_lambda(workstation_region, event)
+                    regional_response = invoke_regional_lambda(workstation_region, event)
+                    if action == 'create-session':
+                        return with_native_client_transport(regional_response, server_id, caller_username)
+                    return regional_response
                 except Exception as e:
                     print(f"Error invoking regional Lambda: {e}")
                     return {
@@ -969,7 +1089,7 @@ def lambda_handler(event, context):
                 
                 print(f"DCV URL constructed using gateway: {gateway_endpoint}; browser gateway: {browser_gateway_url}")
                 
-                return {
+                return with_native_client_transport({
                     'statusCode': 200,
                     'headers': cors_headers,
                     'body': json.dumps({
@@ -979,8 +1099,42 @@ def lambda_handler(event, context):
                         'browserGatewayUrl': browser_gateway_url,
                         'connectionToken': connection_token
                     })
-                }
+                }, server_id, caller_username, ssm)
                 
+            elif action == 'get-session-connections':
+                # The session must be on this workstation's DCV server(s).
+                def broker_call(api, payload):
+                    request = urllib.request.Request(
+                        f"{base_url}/{api}",
+                        data=json.dumps(payload).encode(),
+                        headers={
+                            'Authorization': f'Bearer {access_token}',
+                            'Content-Type': 'application/json'
+                        },
+                        method='POST'
+                    )
+                    with safe_urlopen(request, context=ssl_context, timeout=10) as response:
+                        return json.loads(response.read().decode())
+
+                servers = broker_call('describeServers', {}).get('Servers', [])
+                server_ids = {
+                    s.get('Id') for s in servers
+                    if s.get('Id') and s.get('Host', {}).get('Aws', {}).get('EC2InstanceId') == server_id
+                }
+                sessions = broker_call('describeSessions', {'SessionIds': [session_id]}).get('Sessions', [])
+                result = session_connections(sessions, server_ids, session_id)
+                if result is None:
+                    return {
+                        'statusCode': 404,
+                        'headers': {'Content-Type': 'application/json', **cors_headers},
+                        'body': json.dumps({'error': 'Session not found on this workstation'})
+                    }
+                return {
+                    'statusCode': 200,
+                    'headers': cors_headers,
+                    'body': json.dumps(result)
+                }
+
             elif action == 'delete-session':
                 if not session_id:
                     raise Exception('sessionId is required for delete-session')

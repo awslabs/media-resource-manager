@@ -37,9 +37,17 @@ import type { ColumnsType } from 'antd/es/table';
 import AppLayoutAntd from '../components/AppLayoutAntd';
 import { getAuthToken, handleAuthError } from '../utils/auth';
 import { apiCall } from '../utils/api';
-import { nativeClientUrl, parseNativeClientTransport, DEFAULT_NATIVE_CLIENT_TRANSPORT } from '../utils/dcvClient';
+import {
+  nativeClientUrl,
+  nativeConnectionCheck,
+  parseNativeClientTransport,
+  parseNativeClientTransportOverride,
+  DEFAULT_NATIVE_CLIENT_TRANSPORT,
+  type NativeClientTransportOverride,
+} from '../utils/dcvClient';
 import { postCreateSession, sessionNameFor, STARTING_SESSION_MESSAGE } from '../utils/dcvViewer';
 import { useDcvClientPrompt } from '../components/DcvClientPrompt';
+import NativeClientProtocolOverride from '../components/NativeClientProtocolOverride';
 
 const { Title, Text, Link } = Typography;
 
@@ -260,6 +268,24 @@ const WorkstationDetailsAntd: React.FC<WorkstationDetailsAntdProps> = ({
     }
   };
 
+  const saveNativeClientTransport = async (value: NativeClientTransportOverride) => {
+    const token = getAuthToken();
+    if (!token) throw new Error('No current user');
+    const response = await apiCall(`workstations/${encodeURIComponent(instanceId || '')}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ nativeClientTransport: value }),
+    });
+    if (!response.ok) {
+      const result = await response.json().catch(() => ({}));
+      throw new Error(result.error || `Could not save the native client protocol (HTTP ${response.status})`);
+    }
+    setDetails((prev: any) => prev && ({
+      ...prev,
+      workstation: { ...prev.workstation, nativeClientTransport: value ?? undefined },
+    }));
+  };
+
   // Action handlers
   const handleConnect = async () => {
     if (!instanceId) return;
@@ -277,7 +303,11 @@ const WorkstationDetailsAntd: React.FC<WorkstationDetailsAntdProps> = ({
       const sessionData = await response.json();
       if (sessionData.error) throw new Error(sessionData.error);
 
-      await connectWithClient(nativeClientUrl(sessionData, nativeClientTransport), instanceId);
+      await connectWithClient(
+        nativeClientUrl(sessionData, nativeClientTransport),
+        instanceId,
+        nativeConnectionCheck(sessionData, instanceId, nativeClientTransport),
+      );
     } catch (error) {
       console.error('Error connecting to workstation:', error);
       setAlert({ type: 'error', message: `Failed to connect: ${(error as Error).message}` });
@@ -508,6 +538,22 @@ const WorkstationDetailsAntd: React.FC<WorkstationDetailsAntdProps> = ({
               <Descriptions.Item label="Assigned User">{workstation.assignedUserId || 'Unassigned'}</Descriptions.Item>
             </Descriptions>
           </div>
+
+          {isAdmin && (
+            <>
+              <Divider style={{ margin: 0 }} />
+
+              <div>
+                <Text strong style={{ fontSize: 14, display: 'block', marginBottom: 12 }}>Native client protocol</Text>
+                <NativeClientProtocolOverride
+                  value={parseNativeClientTransportOverride(workstation.nativeClientTransport)}
+                  onSave={saveNativeClientTransport}
+                  defaultLabel="user override or Settings"
+                  help="How the Amazon DCV client connects to this workstation, for everyone. Use TCP when software on the workstation drops UDP. This overrides Settings. If the user also has an override and the two differ, TCP is used."
+                />
+              </div>
+            </>
+          )}
 
           <Divider style={{ margin: 0 }} />
 

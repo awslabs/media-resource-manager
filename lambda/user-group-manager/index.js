@@ -64,6 +64,12 @@ exports.handler = async (event) => {
           // GET /users/{userId}/schedule
           const userId = decodeURIComponent(pathParameters?.id || path.split('/')[2]);
           return await getUserSchedule(userId);
+        } else if (path.match(/^\/users\/[^/]+\/native-client-transport$/)) {
+          // GET /users/{userId}/native-client-transport (admins only, like the PUT)
+          const denial = requireAdmin(event);
+          if (denial) return denial;
+          const userId = decodeURIComponent(pathParameters?.id || path.split('/')[2]);
+          return await getUserNativeClientTransport(userId);
         }
         break;
         
@@ -104,6 +110,10 @@ exports.handler = async (event) => {
           // PUT /users/{userId}/schedule
           const userId = decodeURIComponent(pathParameters?.id || path.split('/')[2]);
           return await updateUserSchedule(userId, JSON.parse(body), event);
+        } else if (path.match(/^\/users\/[^/]+\/native-client-transport$/)) {
+          // PUT /users/{userId}/native-client-transport (admin check above)
+          const userId = decodeURIComponent(pathParameters?.id || path.split('/')[2]);
+          return await updateUserNativeClientTransport(userId, JSON.parse(body || '{}'));
         }
         break;
         
@@ -1929,6 +1939,76 @@ async function deleteUserSchedule(userId, event) {
       statusCode: 500,
       headers: corsHeaders,
       body: JSON.stringify({ error: 'Failed to delete user schedule: ' + error.message })
+    };
+  }
+}
+
+// Per-user native client protocol override (#138), the same values as
+// Settings > Native client protocol. It's stored on the user record under the
+// sign-in user ID (the userId in GET /users, which is also what the JWT
+// authorizer passes as username), and dcv-session-manager reads it on connect.
+// No value means the user follows the workstation override or the global setting.
+const NATIVE_CLIENT_TRANSPORTS = ['quic', 'websocket'];
+
+async function getUserNativeClientTransport(userId) {
+  try {
+    const result = await dynamodb.send(new GetCommand({
+      TableName: process.env.USER_TABLE_NAME,
+      Key: { userId }
+    }));
+    const value = result.Item?.nativeClientTransport;
+    return {
+      statusCode: 200,
+      headers: corsHeaders,
+      body: JSON.stringify({ nativeClientTransport: NATIVE_CLIENT_TRANSPORTS.includes(value) ? value : null })
+    };
+  } catch (error) {
+    console.error('Error getting the user protocol override:', error.name);
+    return {
+      statusCode: 500,
+      headers: corsHeaders,
+      body: JSON.stringify({ error: 'Failed to get the native client protocol override' })
+    };
+  }
+}
+
+async function updateUserNativeClientTransport(userId, data) {
+  // null or '' clears the override, as for a workstation.
+  const value = data?.nativeClientTransport === '' ? null : data?.nativeClientTransport;
+  if (!userId) {
+    return { statusCode: 400, headers: corsHeaders, body: JSON.stringify({ error: 'userId is required' }) };
+  }
+  if (value !== null && !NATIVE_CLIENT_TRANSPORTS.includes(value)) {
+    return {
+      statusCode: 400,
+      headers: corsHeaders,
+      body: JSON.stringify({ error: `nativeClientTransport must be one of: ${NATIVE_CLIENT_TRANSPORTS.join(', ')}, or null` })
+    };
+  }
+  try {
+    // Like the schedule, a SET creates the row for a user who has no record yet.
+    await dynamodb.send(new UpdateCommand({
+      TableName: process.env.USER_TABLE_NAME,
+      Key: { userId },
+      ...(value === null
+        // Clearing never creates a row.
+        ? { UpdateExpression: 'REMOVE nativeClientTransport', ConditionExpression: 'attribute_exists(userId)' }
+        : { UpdateExpression: 'SET nativeClientTransport = :t', ExpressionAttributeValues: { ':t': value } })
+    }));
+    return {
+      statusCode: 200,
+      headers: corsHeaders,
+      body: JSON.stringify({ nativeClientTransport: value })
+    };
+  } catch (error) {
+    if (value === null && error.name === 'ConditionalCheckFailedException') {
+      return { statusCode: 200, headers: corsHeaders, body: JSON.stringify({ nativeClientTransport: null }) };
+    }
+    console.error('Error saving the user protocol override:', error.name);
+    return {
+      statusCode: 500,
+      headers: corsHeaders,
+      body: JSON.stringify({ error: 'Failed to save the native client protocol override' })
     };
   }
 }
