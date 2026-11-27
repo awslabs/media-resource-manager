@@ -12,6 +12,23 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Upgrade steps
+
+- No action needed for the Cognito sign-in limit below. Refresh tokens
+  issued before the upgrade keep the lifetime they were issued with (30 days
+  by default), so users who are signed in when you upgrade can stay
+  signed in until that token expires. Their next sign-in lasts up to
+  12 hours. ([#167](https://github.com/awslabs/media-resource-manager/pull/167))
+
+### Changed
+
+- Cognito sign-ins now last up to 12 hours, matching Active Directory
+  sign-ins; after that, users sign in again. The console's Cognito app
+  client issues refresh tokens that expire 12 hours after sign-in. ID and
+  access tokens still last 1 hour, and the console still renews them in the
+  background until the refresh token expires.
+  ([#167](https://github.com/awslabs/media-resource-manager/pull/167))
+
 ### Fixed
 
 - `cdk synth` and `cdk diff` without an AWS account (no credentials and no

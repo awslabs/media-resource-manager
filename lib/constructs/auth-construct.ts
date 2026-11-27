@@ -303,6 +303,10 @@ export class AuthConstruct extends Construct {
       authFlows: { userSrp: true, adminUserPassword: true, userPassword: true },
       supportedIdentityProviders,
       writeAttributes,
+      // A sign-in lasts at most 12 hours, the same cap as AD sign-ins
+      // (SESSION_MAX_SECONDS in lambda/ldap-auth). ID and access tokens keep
+      // the Cognito default of 1 hour.
+      refreshTokenValidity: cdk.Duration.hours(12),
       oAuth: {
         flows: { authorizationCodeGrant: true },
         scopes: [cognito.OAuthScope.EMAIL, cognito.OAuthScope.OPENID, cognito.OAuthScope.PROFILE],
