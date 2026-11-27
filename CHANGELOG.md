@@ -12,6 +12,26 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+### Fixed
+
+- `cdk synth` and `cdk diff` without an AWS account (no credentials and no
+  `CDK_DEFAULT_ACCOUNT`) stop with "The AWS account is unknown, so the
+  Cognito domain prefix cannot be built. Set AWS credentials, or set
+  CDK_DEFAULT_ACCOUNT to synthesize without credentials." Before, they
+  failed with a `domainPrefix` validation error from the Cognito domain.
+  With an account, the domain prefix and the synthesized templates are
+  unchanged.
+  ([#156](https://github.com/awslabs/media-resource-manager/issues/156))
+- `delete-stacks.sh` deletes the network interfaces that the DCV cleanup
+  Lambda functions leave on the security groups of
+  `<acronym>-Dcv-Infrastructure` before it deletes that stack, so the stack
+  doesn't end `DELETE_FAILED` because its workstation security group is
+  still in use. It deletes only interfaces with status `available` whose
+  description starts with `AWS Lambda VPC ENI-<acronym>-`, and prints each
+  ID. It waits up to 10 minutes for such interfaces that are still in use
+  to be released, then deletes the stack.
+  ([#158](https://github.com/awslabs/media-resource-manager/pull/158))
+
 ## [1.6.1] - 2026-11-26
 
 Fixes for regional hub and storage deletes, hostname numbering, the
@@ -144,15 +164,6 @@ is a rebuild.
   Before, it retried such a stack every 30 seconds without end, and exited
   with code 0 even when stacks were left.
   ([#155](https://github.com/awslabs/media-resource-manager/pull/155))
-- `delete-stacks.sh` deletes the network interfaces that the DCV cleanup
-  Lambda functions leave on the security groups of
-  `<acronym>-Dcv-Infrastructure` before it deletes that stack, so the stack
-  doesn't end `DELETE_FAILED` because its workstation security group is
-  still in use. It deletes only interfaces with status `available` whose
-  description starts with `AWS Lambda VPC ENI-<acronym>-`, and prints each
-  ID. It waits up to 10 minutes for such interfaces that are still in use
-  to be released, then deletes the stack.
-  ([#158](https://github.com/awslabs/media-resource-manager/pull/158))
 - With Cognito sign-in, the console keeps an active user signed in past the
   1-hour ID token lifetime. It keeps the Cognito refresh token in the tab's
   `sessionStorage`, next to the ID token, and gets a new ID token 5 minutes
