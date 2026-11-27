@@ -43,8 +43,9 @@ a new tab or window asks you to sign in again. While the tab stays open,
 the console renews your session in the background, so you aren't signed
 out every hour:
 
-- **Cognito:** the session lasts as long as the Cognito refresh token (30
-  days by default).
+- **Cognito:** the session lasts up to 12 hours after you sign in, when
+  the Cognito refresh token expires. Then the console signs you out and
+  you sign in again.
 - **LDAP (Active Directory):** the session lasts up to 12 hours after you
   sign in. Each renewal checks your account in Active Directory again: a
   disabled or deleted account ends the session within an hour, and a

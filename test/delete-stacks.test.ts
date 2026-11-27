@@ -56,6 +56,21 @@ case "$1 $2" in
     if [ -f "$STUB_DIR/stacks/$(arg_after --stack-name "$@")" ]; then
       echo "Waiter StackDeleteComplete failed: stub" >&2; exit 255
     fi ;;
+  "cloudformation list-stack-resources")
+    f="$STUB_DIR/sgs/$(arg_after --stack-name "$@")"
+    if [ -f "$f" ]; then cat "$f"; fi ;;
+  "ec2 describe-network-interfaces")
+    n=$(( $(cat "$STUB_DIR/eni-count") + 1 )); echo "$n" > "$STUB_DIR/eni-count"
+    filter=$(arg_after --filters "$@"); groups=",\${filter#Name=group-id,Values=},"
+    while IFS='|' read -r id status group desc; do
+      [ -n "$id" ] || continue
+      if grep -qx "$id" "$STUB_DIR/eni-deleted"; then continue; fi
+      case "$groups" in *",$group,"*) ;; *) continue ;; esac
+      case "$status" in in-use-for-*) if [ "$n" -gt "\${status#in-use-for-}" ]; then status=available; else status=in-use; fi ;; esac
+      printf '%s\\t%s\\t%s\\n' "$id" "$status" "$desc"
+    done < "$STUB_DIR/enis" ;;
+  "ec2 delete-network-interface")
+    arg_after --network-interface-id "$@" >> "$STUB_DIR/eni-deleted" ;;
   "ssm get-parameters-by-path")
     if [ -f "$STUB_DIR/ssm-fail" ]; then expired GetParametersByPath; fi
     if [ -f "$STUB_DIR/ssm-params" ]; then cat "$STUB_DIR/ssm-params"; fi ;;
@@ -94,6 +109,14 @@ interface RunOptions {
   deleteMode?: Record<string, 'refuse' | 'ignore' | 'ignore-then-refuse' | 'fail'>;
   /** AWS_DEFAULT_REGION (default us-east-1). Another Region also runs the us-east-1 stack step. */
   region?: string;
+  /** Security group IDs list-stack-resources returns per stack. */
+  sgs?: Record<string, string[]>;
+  /**
+   * Network interfaces, as 'id|status|group|description'. describe-network-interfaces
+   * returns those on the filtered groups that were not deleted. Status
+   * 'in-use-for-N' reads in-use for the first N describe calls, then available.
+   */
+  enis?: string[];
 }
 
 interface RunResult {
@@ -125,6 +148,13 @@ function run(opts: RunOptions): RunResult {
   fs.writeFileSync(path.join(stubDir, 'calls.log'), '');
   fs.writeFileSync(path.join(stubDir, 'describe-count'), '0');
   fs.writeFileSync(path.join(stubDir, 'listed'), opts.listed.join('\t'));
+  fs.mkdirSync(path.join(stubDir, 'sgs'));
+  for (const [name, ids] of Object.entries(opts.sgs ?? {})) {
+    fs.writeFileSync(path.join(stubDir, 'sgs', name), ids.join('\t'));
+  }
+  fs.writeFileSync(path.join(stubDir, 'enis'), (opts.enis ?? []).map((e) => `${e}\n`).join(''));
+  fs.writeFileSync(path.join(stubDir, 'eni-deleted'), '');
+  fs.writeFileSync(path.join(stubDir, 'eni-count'), '0');
   for (const name of opts.live ?? opts.listed) {
     fs.writeFileSync(path.join(stubDir, 'stacks', name), opts.statusOf?.[name] ?? 'CREATE_COMPLETE');
   }
@@ -285,6 +315,87 @@ describe('delete-stacks.sh', () => {
     expect(r.output).toMatch(/Deleting us-east-1 stack: MRM-Waf\n.*Failed to initiate deletion of MRM-Waf:\n.*TerminationProtection/);
     expect(r.calls).not.toMatch(/cloudformation wait/);
     expect(r.output).toMatch(/Teardown incomplete[^\n]*\n {2}- MRM-Waf\n {2}- MRM-Waf \(us-east-1\)\n/);
+  });
+
+  describe('Lambda network interfaces on the Dcv-Infrastructure security groups', () => {
+    const DCV = 'MRM-Dcv-Infrastructure';
+    const LAMBDA_ENI = 'AWS Lambda VPC ENI-mrm-dcv-broker-health-check';
+    const lines = (calls: string) => calls.split('\n');
+    const eniDeletes = (calls: string) =>
+      lines(calls).filter((l) => l.startsWith('aws ec2 delete-network-interface')).map((l) => l.split(' ')[4]);
+    const firstIndex = (calls: string, prefix: string) => lines(calls).findIndex((l) => l.startsWith(prefix));
+
+    test('deletes available interfaces of this deployment\'s Lambdas before deleting the stack', () => {
+      const r = run({
+        args: ['MRM'],
+        listed: ['MRM-Dcv-Cleanup', DCV],
+        sgs: { [DCV]: ['sg-ws1', 'sg-alb1'] },
+        enis: [`eni-aaa1|available|sg-ws1|${LAMBDA_ENI}`, 'eni-aaa2|available|sg-alb1|AWS Lambda VPC ENI-mrm-dcv-cleanup'],
+      });
+      expect(r.status).toBe(0);
+      expect(eniDeletes(r.calls)).toEqual(['eni-aaa1', 'eni-aaa2']);
+      expect(r.output).toMatch(/Deleted leftover Lambda network interface eni-aaa1 \(AWS Lambda VPC ENI-mrm-dcv-broker-health-check\)/);
+      expect(r.output).toMatch(/Deleted leftover Lambda network interface eni-aaa2/);
+      expect(r.calls).toMatch(/aws ec2 describe-network-interfaces --region us-east-1 --filters Name=group-id,Values=sg-ws1,sg-alb1 /);
+      // After the Dcv-Cleanup stack (whose Lambdas leave the interfaces) and before Dcv-Infrastructure.
+      const listResources = firstIndex(r.calls, `aws cloudformation list-stack-resources --stack-name ${DCV} `);
+      expect(listResources).toBeGreaterThan(firstIndex(r.calls, 'aws cloudformation delete-stack --stack-name MRM-Dcv-Cleanup '));
+      expect(firstIndex(r.calls, `aws cloudformation delete-stack --stack-name ${DCV} `))
+        .toBeGreaterThan(lines(r.calls).lastIndexOf(`aws ec2 delete-network-interface --network-interface-id eni-aaa2 --region us-east-1`));
+      expect(r.liveAfter).toEqual([]);
+    });
+
+    test('does not delete an in-use interface, and deletes it once it is released', () => {
+      const r = run({ args: ['MRM'], listed: [DCV], sgs: { [DCV]: ['sg-ws1'] }, enis: [`eni-bbb1|in-use-for-2|sg-ws1|${LAMBDA_ENI}`] });
+      expect(r.status).toBe(0);
+      expect(r.output).toMatch(/Waiting for Lambda network interfaces to be released: eni-bbb1/);
+      const before = lines(r.calls).slice(0, firstIndex(r.calls, 'aws ec2 delete-network-interface'));
+      // Two in-use reads with a wait after each, then the third read sees it available.
+      expect(before.filter((l) => l.startsWith('aws ec2 describe-network-interfaces'))).toHaveLength(3);
+      expect(before.filter((l) => l === 'sleep 30')).toHaveLength(2);
+      expect(eniDeletes(r.calls)).toEqual(['eni-bbb1']);
+      expect(r.liveAfter).toEqual([]);
+    });
+
+    test('stops waiting after 10 minutes, leaves the in-use interface and still deletes the stack', () => {
+      const r = run({ args: ['MRM'], listed: [DCV], sgs: { [DCV]: ['sg-ws1'] }, enis: [`eni-bbb2|in-use-for-999|sg-ws1|${LAMBDA_ENI}`] });
+      expect(r.status).toBe(0);
+      expect(eniDeletes(r.calls)).toEqual([]);
+      expect(r.output).toMatch(/Lambda network interfaces still in use after 10 minutes: eni-bbb2/);
+      expect(lines(r.calls).filter((l) => l.startsWith('aws ec2 describe-network-interfaces'))).toHaveLength(21);
+      expect(r.liveAfter).toEqual([]);
+    });
+
+    test('leaves interfaces that are not this deployment\'s Lambda interfaces alone', () => {
+      const r = run({
+        args: ['MRM'],
+        listed: [DCV],
+        sgs: { [DCV]: ['sg-ws1'] },
+        enis: [
+          'eni-ccc1|available|sg-ws1|AWS Lambda VPC ENI-mrm-dcv-cleanup',
+          'eni-ccc2|available|sg-ws1|AWS Lambda VPC ENI-other-app-handler',
+          'eni-ccc3|available|sg-ws1|AWS Lambda VPC ENI-mrmx-handler',
+          'eni-ccc4|available|sg-ws1|',
+          'eni-ccc5|in-use|sg-ws1|ELB app/other-alb/abc',
+          'eni-ccc6|available|sg-other|AWS Lambda VPC ENI-mrm-api',
+        ],
+      });
+      expect(r.status).toBe(0);
+      expect(eniDeletes(r.calls)).toEqual(['eni-ccc1']);
+      expect(r.calls).not.toMatch(/^sleep /m);
+    });
+
+    test('makes no network interface changes when there are none, and checks no other stack', () => {
+      const r = run({ args: ['MRM'], listed: ['MRM-Api', DCV], sgs: { [DCV]: ['sg-ws1'] } });
+      expect(r.status).toBe(0);
+      expect(lines(r.calls).filter((l) => l.startsWith('aws cloudformation list-stack-resources'))).toEqual([
+        `aws cloudformation list-stack-resources --stack-name ${DCV} --region us-east-1 --query StackResourceSummaries[?ResourceType=='AWS::EC2::SecurityGroup'].PhysicalResourceId --output text`,
+      ]);
+      expect(lines(r.calls).filter((l) => l.startsWith('aws ec2 describe-network-interfaces'))).toHaveLength(1);
+      expect(eniDeletes(r.calls)).toEqual([]);
+      expect(r.calls).not.toMatch(/^sleep /m);
+      expect(r.liveAfter).toEqual([]);
+    });
   });
 
   test('rejects an acronym with characters that are not letters or digits', () => {

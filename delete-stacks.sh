@@ -231,12 +231,76 @@ delete_stack() {
     done
 }
 
+# Lambda functions in a VPC leave network interfaces behind for a while after the
+# functions are deleted. The DCV cleanup Lambdas (deleted with the Dcv-Cleanup stack)
+# use the workstation security group of Dcv-Infrastructure, and an interface left on
+# it makes that stack end DELETE_FAILED. Deletes only this deployment's Lambda
+# interfaces ("AWS Lambda VPC ENI-<acronym>-...") on the stack's own security groups,
+# and waits up to ENI_WAIT_SECONDS for in-use ones to be released.
+ENI_WAIT_SECONDS=600
+cleanup_lambda_enis() {
+    local stack_name=$1
+    local prefix="AWS Lambda VPC ENI-${ACRONYM,,}-"
+    local sg_ids groups enis id status desc in_use
+    if ! sg_ids=$(aws cloudformation list-stack-resources --stack-name "$stack_name" --region "$REGION" \
+        --query "StackResourceSummaries[?ResourceType=='AWS::EC2::SecurityGroup'].PhysicalResourceId" \
+        --output text 2>"$AWS_ERR"); then
+        if grep -q "does not exist" "$AWS_ERR"; then
+            return 0
+        fi
+        aws_fail "Listing security groups of $stack_name (list-stack-resources)"
+    fi
+    if [ -z "$sg_ids" ] || [ "$sg_ids" = "None" ]; then
+        return 0
+    fi
+    groups=$(echo $sg_ids | tr ' ' ',')
+
+    local waited=0
+    while true; do
+        if ! enis=$(aws ec2 describe-network-interfaces --region "$REGION" \
+            --filters "Name=group-id,Values=$groups" \
+            --query 'NetworkInterfaces[].[NetworkInterfaceId,Status,Description]' \
+            --output text 2>"$AWS_ERR"); then
+            aws_fail "Listing network interfaces of $stack_name security groups (describe-network-interfaces)"
+        fi
+        in_use=()
+        while IFS=$'\t' read -r id status desc; do
+            [[ "$desc" == "$prefix"* ]] || continue
+            if [ "$status" = "available" ]; then
+                if aws ec2 delete-network-interface --network-interface-id "$id" --region "$REGION" </dev/null 2>"$AWS_ERR"; then
+                    echo "$(date): Deleted leftover Lambda network interface $id ($desc)"
+                else
+                    echo "$(date): Could not delete Lambda network interface $id:"
+                    cat "$AWS_ERR"
+                fi
+            else
+                in_use+=("$id")
+            fi
+        done <<< "$enis"
+
+        if [ ${#in_use[@]} -eq 0 ]; then
+            return 0
+        fi
+        if [ "$waited" -ge "$ENI_WAIT_SECONDS" ]; then
+            echo "$(date): Lambda network interfaces still in use after $((ENI_WAIT_SECONDS / 60)) minutes: ${in_use[*]}"
+            echo "  Deleting $stack_name anyway. If it ends DELETE_FAILED, rerun ./delete-stacks.sh later."
+            return 0
+        fi
+        echo "$(date): Waiting for Lambda network interfaces to be released: ${in_use[*]}"
+        sleep 30
+        waited=$((waited + 30))
+    done
+}
+
 echo "$(date): Starting systematic stack deletion..."
 
 # Stacks that were not deleted (refused, given up on or DELETE_FAILED), for the final summary
 NOT_DELETED_STACKS=()
 
 for stack in "${STACKS_TO_DELETE[@]}"; do
+    if [ "$stack" = "$ACRONYM-Dcv-Infrastructure" ]; then
+        cleanup_lambda_enis "$stack"
+    fi
     if delete_stack "$stack"; then
         echo "$(date): Successfully processed $stack"
     else
