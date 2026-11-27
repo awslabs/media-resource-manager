@@ -191,6 +191,12 @@ const DashboardAntd: React.FC<DashboardProps> = ({
         headers: { 'Authorization': `Bearer ${token}` },
       });
       
+      // A 401 has an empty body and apiCall has ended the session (#157);
+      // keep the current list and parse only a successful response.
+      if (!response.ok) {
+        if (response.status !== 401) console.error(`Error fetching workstations: HTTP ${response.status}`);
+        return;
+      }
       const data = await response.json();
       setWorkstations(data);
     } catch (error) {

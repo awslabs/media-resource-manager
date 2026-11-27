@@ -212,13 +212,23 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
   const fetchUsers = async () => {
     try {
       setLoading(true);
+      // No token: the session has ended and the console shows sign-in (#157).
       const token = getAuthToken();
-      if (!token) throw new Error('No current user');
+      if (!token) return;
 
       const response = await apiCall('users', {
         headers: { Authorization: `Bearer ${token}` },
       });
 
+      // A 401 has an empty body and apiCall has ended the session; keep the
+      // current list and parse only a successful response.
+      if (!response.ok) {
+        if (response.status !== 401) {
+          console.error(`Error fetching users: HTTP ${response.status}`);
+          setAlert({ type: 'error', message: 'Failed to fetch users' });
+        }
+        return;
+      }
       const data = await response.json();
       setUsers(Array.isArray(data) ? data : []);
     } catch (error) {
@@ -233,12 +243,16 @@ const UserManagementAntd: React.FC<UserManagementAntdProps> = ({
     try {
       setGroupsLoading(true);
       const token = getAuthToken();
-      if (!token) throw new Error('No current user');
+      if (!token) return;
 
       const response = await apiCall('groups', {
         headers: { Authorization: `Bearer ${token}` },
       });
 
+      if (!response.ok) {
+        if (response.status !== 401) console.error(`Error fetching groups: HTTP ${response.status}`);
+        return;
+      }
       const data = await response.json();
       setGroups(Array.isArray(data) ? data : []);
     } catch (error) {

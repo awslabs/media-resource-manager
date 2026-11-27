@@ -48,6 +48,13 @@ upgrade to that version; a version without it needs only a redeploy.
   ID. It waits up to 10 minutes for such interfaces that are still in use
   to be released, then deletes the stack.
   ([#158](https://github.com/awslabs/media-resource-manager/pull/158))
+- When a session ends while the **Users** page or the **Dashboard** is
+  loading, the browser console doesn't log `SyntaxError: Unexpected end of
+  input`. The Users page loads users and groups only when there is a token,
+  and both pages read the response body only for a successful response. For
+  a failed response other than 401, they log the HTTP status and keep the
+  current list; the Users page also shows "Failed to fetch users".
+  ([#157](https://github.com/awslabs/media-resource-manager/issues/157))
 
 ## [1.6.1] - 2026-11-26
 
