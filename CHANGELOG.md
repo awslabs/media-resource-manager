@@ -12,8 +12,24 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-11-27
+
+Fixes for `cdk synth` without an AWS account, the `delete-stacks.sh`
+teardown and console errors on the **Users** page and the **Dashboard**.
+Cognito sign-ins last up to 12 hours, matching AD sign-ins. The pipeline
+template and the regional hub code are the same as in 1.6.1, so the upgrade
+is a rebuild.
+
 ### Upgrade steps
 
+- **Pipeline template changed: no.** Take the
+  [quick path](docs/UPGRADING.md#quick-path): set `GitBranch` to the new tag,
+  or start a build when `GitBranch` is `main`.
+- Regional hubs don't need an **Update**. The regional hub code fingerprint
+  (`lib/regional-hub-version.ts`) is the same as in 1.6.1, so **Regions**
+  doesn't offer one after the deploy.
+- The deploy doesn't replace the DCV Connection Gateways, so DCV sessions
+  stay connected.
 - No action needed for the Cognito sign-in limit below. Refresh tokens
   issued before the upgrade keep the lifetime they were issued with (30 days
   by default), so users who are signed in when you upgrade can stay
@@ -38,7 +54,8 @@ upgrade to that version; a version without it needs only a redeploy.
   failed with a `domainPrefix` validation error from the Cognito domain.
   With an account, the domain prefix and the synthesized templates are
   unchanged.
-  ([#156](https://github.com/awslabs/media-resource-manager/issues/156))
+  ([#162](https://github.com/awslabs/media-resource-manager/pull/162),
+  [#156](https://github.com/awslabs/media-resource-manager/issues/156))
 - `delete-stacks.sh` deletes the network interfaces that the DCV cleanup
   Lambda functions leave on the security groups of
   `<acronym>-Dcv-Infrastructure` before it deletes that stack, so the stack
@@ -54,7 +71,8 @@ upgrade to that version; a version without it needs only a redeploy.
   and both pages read the response body only for a successful response. For
   a failed response other than 401, they log the HTTP status and keep the
   current list; the Users page also shows "Failed to fetch users".
-  ([#157](https://github.com/awslabs/media-resource-manager/issues/157))
+  ([#159](https://github.com/awslabs/media-resource-manager/pull/159),
+  [#157](https://github.com/awslabs/media-resource-manager/issues/157))
 
 ## [1.6.1] - 2026-11-26
 
@@ -836,7 +854,8 @@ client prompt.
 Earlier releases are listed on the
 [GitHub releases page](https://github.com/awslabs/media-resource-manager/releases).
 
-[Unreleased]: https://github.com/awslabs/media-resource-manager/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/awslabs/media-resource-manager/compare/v1.6.2...HEAD
+[1.6.2]: https://github.com/awslabs/media-resource-manager/compare/v1.6.1...v1.6.2
 [1.6.1]: https://github.com/awslabs/media-resource-manager/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/awslabs/media-resource-manager/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/awslabs/media-resource-manager/compare/v1.4.4...v1.5.0
