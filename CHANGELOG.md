@@ -14,13 +14,6 @@ upgrade to that version; a version without it needs only a redeploy.
 
 ### Upgrade steps
 
-- Optional, for installations that ran v1.4.3 or earlier: the log group
-  `/aws/lambda/<acronym>-create-admin-groups` in the primary Region may still
-  hold admin email addresses from earlier deploys. You can delete it or set a
-  short retention on it. See
-  [Installations that ran v1.4.3 or earlier](docs/UPGRADING.md#installations-that-ran-v143-or-earlier-old-adminsetup-log-group).
-  ([#148](https://github.com/awslabs/media-resource-manager/pull/148),
-  [#82](https://github.com/awslabs/media-resource-manager/issues/82))
 - No action needed for the Cognito sign-in limit below. Refresh tokens
   issued before the upgrade keep the lifetime they were issued with (30 days
   by default), so users who are signed in when you upgrade can stay
@@ -35,6 +28,55 @@ upgrade to that version; a version without it needs only a redeploy.
   access tokens still last 1 hour, and the console still renews them in the
   background until the refresh token expires.
   ([#167](https://github.com/awslabs/media-resource-manager/pull/167))
+
+### Fixed
+
+- `cdk synth` and `cdk diff` without an AWS account (no credentials and no
+  `CDK_DEFAULT_ACCOUNT`) stop with "The AWS account is unknown, so the
+  Cognito domain prefix cannot be built. Set AWS credentials, or set
+  CDK_DEFAULT_ACCOUNT to synthesize without credentials." Before, they
+  failed with a `domainPrefix` validation error from the Cognito domain.
+  With an account, the domain prefix and the synthesized templates are
+  unchanged.
+  ([#156](https://github.com/awslabs/media-resource-manager/issues/156))
+- `delete-stacks.sh` deletes the network interfaces that the DCV cleanup
+  Lambda functions leave on the security groups of
+  `<acronym>-Dcv-Infrastructure` before it deletes that stack, so the stack
+  doesn't end `DELETE_FAILED` because its workstation security group is
+  still in use. It deletes only interfaces with status `available` whose
+  description starts with `AWS Lambda VPC ENI-<acronym>-`, and prints each
+  ID. It waits up to 10 minutes for such interfaces that are still in use
+  to be released, then deletes the stack.
+  ([#158](https://github.com/awslabs/media-resource-manager/pull/158))
+
+## [1.6.1] - 2026-11-26
+
+Fixes for regional hub and storage deletes, hostname numbering, the
+existing-VPC analyzer and the deploy and cleanup scripts. Console sessions
+with Cognito or AD sign-in renew past the 1-hour token lifetime. The pipeline
+template and the regional hub code are the same as in 1.6.0, so the upgrade
+is a rebuild.
+
+### Upgrade steps
+
+- **Pipeline template changed: no.** Take the
+  [quick path](docs/UPGRADING.md#quick-path): set `GitBranch` to the new tag,
+  or start a build when `GitBranch` is `main`.
+- Regional hubs don't need an **Update**. The regional hub code fingerprint
+  (`lib/regional-hub-version.ts`) is the same as in 1.6.0, so **Regions**
+  doesn't offer one after the deploy.
+- The deploy doesn't replace the DCV Connection Gateways, so DCV sessions
+  stay connected.
+- Console tabs signed in before the upgrade end their session at the 1-hour
+  token expiry and show the sign-in page. Sessions started after the upgrade
+  renew as described under **Fixed**.
+- Optional, for installations that ran v1.4.3 or earlier: the log group
+  `/aws/lambda/<acronym>-create-admin-groups` in the primary Region may still
+  hold admin email addresses from earlier deploys. You can delete it or set a
+  short retention on it. See
+  [Installations that ran v1.4.3 or earlier](docs/UPGRADING.md#installations-that-ran-v143-or-earlier-old-adminsetup-log-group).
+  ([#148](https://github.com/awslabs/media-resource-manager/pull/148),
+  [#82](https://github.com/awslabs/media-resource-manager/issues/82))
 
 ### Fixed
 
@@ -60,7 +102,8 @@ upgrade to that version; a version without it needs only a redeploy.
   one; if another workstation has taken a later number in the meantime, the
   number stays unused. Before, each failed attempt used up a number, so
   hostnames skipped numbers.
-  ([#5](https://github.com/awslabs/media-resource-manager/issues/5))
+  ([#151](https://github.com/awslabs/media-resource-manager/pull/151),
+  [#5](https://github.com/awslabs/media-resource-manager/issues/5))
 - Deleting a storage resource whose record has no MRM storage stack works.
   When `cloudFormationStackName` is empty or doesn't start with
   `<Acronym>-Storage-` (for example `N/A` on a record for a file system MRM
@@ -151,7 +194,8 @@ upgrade to that version; a version without it needs only a redeploy.
   the end, or halfway for tokens that last 10 minutes or less), so a computer
   clock that is wrong doesn't change it, and at most one background refresh
   starts per minute. AD sessions use the same timing.
-  ([#85](https://github.com/awslabs/media-resource-manager/issues/85))
+  ([#153](https://github.com/awslabs/media-resource-manager/pull/153),
+  [#85](https://github.com/awslabs/media-resource-manager/issues/85))
 - With AD sign-in (`useCognitoAuth=false`), the console renews the 1-hour
   session token through the new `POST /auth/ldap/refresh` route, about 5
   minutes before it expires, for up to 12 hours after sign-in. The route is
@@ -166,7 +210,8 @@ upgrade to that version; a version without it needs only a redeploy.
   password or other secret is stored in the browser. The JWT authorizer now
   accepts only that same `HS256` header for AD tokens, and neither Lambda
   logs sign-in names.
-  ([#85](https://github.com/awslabs/media-resource-manager/issues/85))
+  ([#154](https://github.com/awslabs/media-resource-manager/pull/154),
+  [#85](https://github.com/awslabs/media-resource-manager/issues/85))
 
 ### Security
 
@@ -784,7 +829,8 @@ client prompt.
 Earlier releases are listed on the
 [GitHub releases page](https://github.com/awslabs/media-resource-manager/releases).
 
-[Unreleased]: https://github.com/awslabs/media-resource-manager/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/awslabs/media-resource-manager/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/awslabs/media-resource-manager/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/awslabs/media-resource-manager/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/awslabs/media-resource-manager/compare/v1.4.4...v1.5.0
 [1.4.4]: https://github.com/awslabs/media-resource-manager/compare/v1.4.3...v1.4.4

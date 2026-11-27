@@ -315,9 +315,18 @@ export class AuthConstruct extends Construct {
       },
     });
 
+    // The prefix must stay exactly as on existing installs (a new one replaces
+    // the Cognito domain), so it needs the account at synth time. Without it
+    // the account is a token, and its substring is not a valid prefix (#156).
+    const account = cdk.Stack.of(this).account;
+    if (cdk.Token.isUnresolved(account)) {
+      throw new Error(
+        'The AWS account is unknown, so the Cognito domain prefix cannot be built. '
+        + 'Set AWS credentials, or set CDK_DEFAULT_ACCOUNT to synthesize without credentials.');
+    }
     this.userPoolDomain = new cognito.UserPoolDomain(this, 'UserPoolDomain', {
       userPool: this.userPool,
-      cognitoDomain: { domainPrefix: `${props.acronym.toLowerCase()}-${cdk.Stack.of(this).account.substring(0,8)}` },
+      cognitoDomain: { domainPrefix: `${props.acronym.toLowerCase()}-${account.substring(0,8)}` },
     });
 
     // Cognito Identity Pool for direct AWS service access (S3 Storage Browser, S3 Watchfolder app)

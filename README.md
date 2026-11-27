@@ -1146,7 +1146,7 @@ To remove all Media Resource Manager resources:
 
 The script will:
 1. Discover all stacks with the product prefix
-2. Delete them in reverse dependency order
+2. Delete them in reverse dependency order. Before it deletes the DCV infrastructure stack, it deletes network interfaces that the deployment's Lambda functions left on that stack's security groups.
 3. Clean up orphaned resources (SSM parameters, CloudWatch log groups, Image Builder resources)
 4. Prompt before deleting the S3 media bucket (contains user data)
 
